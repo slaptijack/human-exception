@@ -30,6 +30,8 @@ Human Exception is written in Rust. Install a current stable Rust toolchain, the
 cargo run
 ```
 
+Run `human-exception --help` for usage, or `human-exception --version` for the build's firmware version.
+
 To run the repository checks:
 
 ```console

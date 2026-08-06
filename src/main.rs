@@ -1,6 +1,7 @@
+mod cli;
+
 fn main() {
-    println!("HUMAN EXCEPTION // resistance console");
-    println!("No active satellite link. System bootstrap complete.");
+    cli::run();
 }
 
 #[cfg(test)]
