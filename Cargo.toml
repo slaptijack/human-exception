@@ -8,6 +8,5 @@ repository = "https://github.com/slaptijack/human-exception"
 readme = "README.md"
 keywords = ["game", "terminal", "strategy", "lua"]
 categories = ["games"]
-publish = false
 
 [dependencies]
