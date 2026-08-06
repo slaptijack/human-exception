@@ -46,8 +46,8 @@ Before requesting review, run all repository checks:
 
 ```console
 cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets --all-features
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-targets --all-features
 ```
 
 These commands must remain aligned with `.github/workflows/ci.yml`. If the project adds another required check, update CI and this file together.
