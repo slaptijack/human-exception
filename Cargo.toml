@@ -1,0 +1,13 @@
+[package]
+name = "human-exception"
+version = "0.1.0"
+edition = "2024"
+description = "A terminal-native strategy game about hacking the machines that inherited the Earth"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/slaptijack/human-exception"
+readme = "README.md"
+keywords = ["game", "terminal", "strategy", "lua"]
+categories = ["games"]
+publish = false
+
+[dependencies]
