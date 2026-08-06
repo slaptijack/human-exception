@@ -43,6 +43,7 @@ cargo test --all-targets --all-features
 The design is still taking shape. Discussion and focused proposals are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 
 Maintainers publishing a release should see [docs/RELEASING.md](docs/RELEASING.md).
+Dependency updates are handled by Dependabot; see [docs/DEPENDABOT.md](docs/DEPENDABOT.md).
 
 ## License
 
