@@ -1,3 +1,4 @@
+pub mod console;
 pub mod lua_controller;
 pub mod render;
 pub mod simulation;

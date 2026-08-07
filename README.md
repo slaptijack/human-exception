@@ -32,6 +32,8 @@ cargo run -- examples/first_contact.lua
 
 This loads the checked-in example script and runs "First Contact," the resistance's fixed reconnaissance operation: a captured drone must explore an unfamiliar facility, avoid its hazard, and reach a network uplink before its operational budget runs out. The console prints a satellite view and tick-by-tick telemetry for every tick, followed by a final success or failure report.
 
+Run `human-exception` with no script path to launch the persistent, full-screen resistance console instead. The console currently exposes the navigation shell — Signals, Target, Controller, Operation, and After Action — with placeholder content in each view; running an operation from inside the console is not implemented yet, so use the script-path form above for that. Press `F1` for contextual help, `F2`-`F5` to move between views, and `Ctrl+Q` to quit.
+
 Run `human-exception --help` for usage, or `human-exception --version` for the build's firmware version.
 
 To run the repository checks:
