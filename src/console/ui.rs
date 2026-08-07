@@ -457,6 +457,15 @@ fn help_lines(state: &AppState) -> Vec<Line<'static>> {
     lines.push(Line::from(""));
 
     lines.push(Line::from(Span::styled(
+        "Scrolling",
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(
+        "Up/Down  scroll this pane for the Lua reference, terminology, and symbols below",
+    ));
+    lines.push(Line::from(""));
+
+    lines.push(Line::from(Span::styled(
         "Global controls",
         Style::default().add_modifier(Modifier::BOLD),
     )));
@@ -734,6 +743,20 @@ mod tests {
         ));
         assert!(buffer_contains(&terminal, "Global controls"));
         assert!(buffer_contains(&terminal, "on_tick(observation)"));
+    }
+
+    #[test]
+    fn help_advertises_its_own_scrolling_at_the_supported_minimum_geometry() {
+        use super::super::state::Msg;
+
+        // The Lua/terminology/symbol sections only fit below the fold at
+        // the supported minimum, so the hint that Up/Down reaches them
+        // must itself be visible without scrolling.
+        let mut state = AppState::new();
+        state.apply(Msg::OpenHelp);
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+
+        assert!(buffer_contains(&terminal, "Up/Down  scroll this pane"));
     }
 
     #[test]
