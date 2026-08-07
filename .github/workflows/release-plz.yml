@@ -33,7 +33,12 @@ jobs:
         uses: release-plz/action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5.131
         with:
           command: release
-          dry_run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+          # release-plz/action treats a non-empty `dry_run` input as truthy
+          # (it checks `[[ -n "$INPUT" ]]`, not whether it equals "true"),
+          # so this must resolve to the literal string "true" or an empty
+          # string — never "false" — or every push-triggered release job
+          # silently dry-runs.
+          dry_run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'true' || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
