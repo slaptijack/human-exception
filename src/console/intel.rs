@@ -102,7 +102,7 @@ pub struct TargetDossier {
     pub confidence_summary: &'static str,
     pub known: &'static [&'static str],
     pub unknown: &'static [&'static str],
-    pub opportunity_text: &'static [&'static str],
+    pub opportunity: &'static str,
     pub source: &'static [&'static str],
     pub access: &'static [&'static str],
     pub confidence: &'static [(&'static str, &'static str)],
@@ -123,10 +123,8 @@ pub fn first_contact_dossier() -> TargetDossier {
             "drone endurance is limited",
         ],
         unknown: &["uplink location", "complete floor plan", "hazard locations"],
-        opportunity_text: &[
-            "If the drone reaches the uplink, we may obtain a foothold in the facility",
-            "network before the access window closes.",
-        ],
+        opportunity: "If the drone reaches the uplink, we may obtain a foothold in the \
+                      facility network before the access window closes.",
         source: &["machine intercept + shared fragment"],
         access: &[
             "captured maintenance controller",
@@ -196,7 +194,8 @@ mod tests {
     #[test]
     fn dossier_never_mentions_the_hidden_uplink_coordinates() {
         let dossier = first_contact_dossier();
-        let haystack = [dossier.known, dossier.unknown, dossier.opportunity_text].concat();
+        let mut haystack: Vec<&str> = [dossier.known, dossier.unknown].concat();
+        haystack.push(dossier.opportunity);
         for line in haystack {
             assert!(!line.contains("4, 4") && !line.contains("(4,4)"));
         }

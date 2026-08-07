@@ -6,6 +6,12 @@
 
 use super::intel::authored_signals;
 
+/// An upper bound on how far Help can scroll. The full contextual + Lua
+/// reference content is well under this many lines; capping here just
+/// guarantees `ScrollHelpDown` can never run away toward `u16::MAX` and
+/// leave the player pressing `Up` an impractical number of times to recover.
+const MAX_HELP_SCROLL: u16 = 60;
+
 /// A major state the console can be showing.
 ///
 /// Mirrors the `Signals -> Target -> Controller -> Operation -> After
@@ -124,6 +130,15 @@ impl AppState {
         self.should_quit
     }
 
+    /// Resets narrow-layout state that only makes sense for the geometry it
+    /// was toggled under: a `ToggleSecondaryPane` while wide has no visible
+    /// effect, but without this it would still silently flip the flag, so a
+    /// later resize into narrow layout could show the secondary pane
+    /// without the player ever having pressed `F8` in that layout.
+    pub fn handle_resize(&mut self) {
+        self.narrow_secondary_visible = false;
+    }
+
     /// Whether `view` is currently reachable via `Navigate`, given what the
     /// player has inspected or committed to so far.
     pub fn view_available(&self, view: View) -> bool {
@@ -167,7 +182,9 @@ impl AppState {
                 self.narrow_secondary_visible = !self.narrow_secondary_visible;
             }
             Msg::ScrollHelpUp => self.help_scroll = self.help_scroll.saturating_sub(1),
-            Msg::ScrollHelpDown => self.help_scroll = self.help_scroll.saturating_add(1),
+            Msg::ScrollHelpDown => {
+                self.help_scroll = self.help_scroll.saturating_add(1).min(MAX_HELP_SCROLL);
+            }
             Msg::Quit => self.should_quit = true,
         }
     }
@@ -391,6 +408,32 @@ mod tests {
         state.apply(Msg::ScrollHelpUp);
         state.apply(Msg::ScrollHelpUp);
         assert_eq!(state.help_scroll(), 0);
+    }
+
+    #[test]
+    fn help_scroll_is_capped_and_recoverable() {
+        let mut state = AppState::new();
+        for _ in 0..1000 {
+            state.apply(Msg::ScrollHelpDown);
+        }
+        let capped = state.help_scroll();
+        assert!(capped < 1000);
+
+        for _ in 0..capped {
+            state.apply(Msg::ScrollHelpUp);
+        }
+        assert_eq!(state.help_scroll(), 0);
+    }
+
+    #[test]
+    fn resizing_clears_the_narrow_secondary_pane_flag() {
+        let mut state = AppState::new();
+        state.apply(Msg::ToggleSecondaryPane);
+        assert!(state.narrow_secondary_visible());
+
+        state.handle_resize();
+
+        assert!(!state.narrow_secondary_visible());
     }
 
     #[test]

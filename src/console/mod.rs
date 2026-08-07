@@ -102,11 +102,13 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resu
 /// Applies a single terminal event to `state`, returning whether the frame
 /// needs to be redrawn as a result.
 ///
-/// A resize never changes session state but always needs a redraw: the
-/// geometry warning (or the shell it replaces) depends on the frame size,
-/// not on any key event.
+/// A resize always needs a redraw, since the geometry warning (or the shell
+/// it replaces) depends on the frame size, not on any key event. It also
+/// clears layout-specific state (the narrow-mode secondary-pane toggle) so
+/// it can't leak across a change in available width.
 fn should_redraw(state: &mut AppState, event: Event) -> bool {
     if matches!(event, Event::Resize(_, _)) {
+        state.handle_resize();
         return true;
     }
 
@@ -295,5 +297,15 @@ mod tests {
         }
 
         assert!(buffer_contains(&terminal, "SIGNALS"));
+    }
+
+    #[test]
+    fn a_resize_clears_the_narrow_secondary_pane_toggle() {
+        let (mut state, _) = render(90, 30, &[press(KeyCode::F(8))]);
+        assert!(state.narrow_secondary_visible());
+
+        should_redraw(&mut state, Event::Resize(90, 30));
+
+        assert!(!state.narrow_secondary_visible());
     }
 }

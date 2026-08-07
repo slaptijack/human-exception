@@ -64,25 +64,47 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
         Some(WorkingSet::FirstContact) => "FIRST CONTACT",
         None => "none",
     };
+    let working = format!("WORKING SET: {working_set}");
 
-    let extra = match state.current_view() {
-        View::Signals => format!("SIGNALS: {:02}", authored_signals().len()),
+    // Candidates in priority order (most detail first): the working set is
+    // always the last-dropped field, since it's the one status the header
+    // priorities in `docs/TUI_DESIGN.md` ("Persistent header") most need to
+    // stay visible at the supported minimum width.
+    let candidates: Vec<String> = match state.current_view() {
+        View::Signals => {
+            let signals = format!("SIGNALS: {:02}", authored_signals().len());
+            vec![
+                format!("MESH: DEGRADED   {signals}   {working}"),
+                format!("{signals}   {working}"),
+            ]
+        }
         View::Target => {
             let dossier = first_contact_dossier();
-            format!(
-                "TARGET: {}   CONFIDENCE: {}",
-                dossier.title, dossier.confidence_summary
-            )
+            let target = format!("TARGET: {}", dossier.title);
+            let confidence = format!("CONFIDENCE: {}", dossier.confidence_summary);
+            vec![
+                format!("MESH: DEGRADED   {target}   {confidence}   {working}"),
+                format!("{target}   {confidence}   {working}"),
+                format!("{target}   {working}"),
+            ]
         }
-        _ => "SATLINK: COMPROMISED".to_string(),
+        _ => vec![
+            format!("MESH: DEGRADED   SATLINK: COMPROMISED   {working}"),
+            format!("SATLINK: COMPROMISED   {working}"),
+            working.clone(),
+        ],
     };
 
-    let status = Line::from(format!(
-        "MESH: DEGRADED   {extra}   WORKING SET: {working_set}"
-    ));
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let status = candidates
+        .iter()
+        .find(|candidate| candidate.chars().count() <= inner_width)
+        .or(candidates.last())
+        .cloned()
+        .unwrap_or_default();
 
     let block = Block::default().borders(Borders::ALL).title(TITLE);
-    frame.render_widget(Paragraph::new(status).block(block), area);
+    frame.render_widget(Paragraph::new(Line::from(status)).block(block), area);
 }
 
 fn draw_body(frame: &mut Frame, area: Rect, state: &AppState) {
@@ -90,6 +112,14 @@ fn draw_body(frame: &mut Frame, area: Rect, state: &AppState) {
         View::Signals => draw_signals(frame, area, state),
         View::Target => draw_target(frame, area, state),
         View::Help => draw_help(frame, area, state),
+        View::Controller => {
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .title(view_title(View::Controller));
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+            frame.render_widget(Paragraph::new(controller_body(state)), inner);
+        }
         view => {
             let block = Block::default()
                 .borders(Borders::ALL)
@@ -98,6 +128,19 @@ fn draw_body(frame: &mut Frame, area: Rect, state: &AppState) {
             frame.render_widget(block, area);
             frame.render_widget(Paragraph::new(view_body(view)), inner);
         }
+    }
+}
+
+fn controller_body(state: &AppState) -> Vec<Line<'static>> {
+    match state.controller_source() {
+        Some(_) => vec![
+            Line::from("Starter controller loaded for FIRST CONTACT."),
+            Line::from("The in-console Lua editor will appear here (see #44)."),
+        ],
+        None => vec![
+            Line::from("No controller is loaded yet."),
+            Line::from("The captured-controller Lua editor will appear here (see #44)."),
+        ],
     }
 }
 
@@ -115,10 +158,6 @@ fn view_title(view: View) -> &'static str {
 /// Placeholder body content for views this issue doesn't populate.
 fn view_body(view: View) -> Vec<Line<'static>> {
     match view {
-        View::Controller => vec![
-            Line::from("No controller is loaded yet."),
-            Line::from("The captured-controller Lua editor will appear here (see #44)."),
-        ],
         View::Operation => vec![
             Line::from("No operation is deployed yet."),
             Line::from("The compromised satellite feed and telemetry will appear here (see #45)."),
@@ -127,7 +166,7 @@ fn view_body(view: View) -> Vec<Line<'static>> {
             Line::from("No operation has concluded yet."),
             Line::from("The after-action report will appear here (see #46)."),
         ],
-        View::Signals | View::Target | View::Help => Vec::new(),
+        View::Signals | View::Target | View::Controller | View::Help => Vec::new(),
     }
 }
 
@@ -242,6 +281,9 @@ fn draw_target(frame: &mut Frame, area: Rect, state: &AppState) {
     }
 }
 
+/// Kept compact enough (well under 16 lines, the inner height available at
+/// the supported `MIN_ROWS` minimum) that `Enter  work this opportunity`
+/// always stays visible without scrolling.
 fn target_intel_lines(dossier: &TargetDossier) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from(Span::styled(
@@ -249,7 +291,6 @@ fn target_intel_lines(dossier: &TargetDossier) -> Vec<Line<'static>> {
             Style::default().add_modifier(Modifier::BOLD),
         )),
         Line::from(dossier.location),
-        Line::from(""),
         Line::from(Span::styled(
             "KNOWN",
             Style::default().add_modifier(Modifier::BOLD),
@@ -258,7 +299,6 @@ fn target_intel_lines(dossier: &TargetDossier) -> Vec<Line<'static>> {
     for fact in dossier.known {
         lines.push(Line::from(format!("- {fact}")));
     }
-    lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "UNKNOWN",
         Style::default().add_modifier(Modifier::BOLD),
@@ -266,10 +306,7 @@ fn target_intel_lines(dossier: &TargetDossier) -> Vec<Line<'static>> {
     for fact in dossier.unknown {
         lines.push(Line::from(format!("- {fact}")));
     }
-    lines.push(Line::from(""));
-    for line in dossier.opportunity_text {
-        lines.push(Line::from(*line));
-    }
+    lines.push(Line::from(dossier.opportunity));
     lines.push(Line::from(""));
     lines.push(Line::from("Enter  work this opportunity"));
     lines
@@ -384,6 +421,38 @@ fn help_lines(state: &AppState) -> Vec<Line<'static>> {
         crate::simulation::ACTION_COST,
         crate::simulation::HAZARD_ENTRY_COST
     )));
+    lines.push(Line::from(""));
+
+    lines.push(Line::from(Span::styled(
+        "Terminology",
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(
+        "working set     the opportunity you are currently working, if any",
+    ));
+    lines.push(Line::from(
+        "MACHINE INTERCEPT   traffic captured from compromised infrastructure",
+    ));
+    lines.push(Line::from(
+        "SHARED INTEL        a fragment another resistance hacker chose to pass on",
+    ));
+    lines.push(Line::from(
+        "REQUEST             another cell asking for help; not addressed to you",
+    ));
+    lines.push(Line::from(
+        "ANOMALY              unexplained activity from a passive sensor",
+    ));
+    lines.push(Line::from(
+        "[OPEN]               this signal currently has a workable opportunity",
+    ));
+    lines.push(Line::from(""));
+
+    lines.push(Line::from(Span::styled(
+        "Satellite symbols",
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from("D drone   U uplink   . floor"));
+    lines.push(Line::from("# wall    ~ hazard   ? undiscovered"));
 
     lines
 }
@@ -407,31 +476,41 @@ fn view_specific_help(view: View) -> Vec<Line<'static>> {
     }
 }
 
-fn footer_hint_items(state: &AppState) -> Vec<(&'static str, bool)> {
-    vec![
-        ("F1 Help", true),
-        ("F2 Signals", true),
-        ("F3 Target", state.view_available(View::Target)),
-        ("F4 Controller", state.view_available(View::Controller)),
-        ("F5 Operation", state.view_available(View::Operation)),
+/// `(full label, compact label, enabled)` for each footer hint. The compact
+/// form is used whenever the full labels would crowd out the `Ctrl+Q Quit`
+/// hint, which must always stay visible.
+fn footer_hint_items(state: &AppState, show_f8: bool) -> Vec<(&'static str, &'static str, bool)> {
+    let mut items = vec![
+        ("F1 Help", "F1 Help", true),
+        ("F2 Signals", "F2 Sig", true),
+        ("F3 Target", "F3 Tgt", state.view_available(View::Target)),
+        (
+            "F4 Controller",
+            "F4 Ctl",
+            state.view_available(View::Controller),
+        ),
+        (
+            "F5 Operation",
+            "F5 Op",
+            state.view_available(View::Operation),
+        ),
         // F6 has no prerequisite controller to deploy yet (see #44/#45).
-        ("F6 Deploy", false),
-    ]
+        ("F6 Deploy", "F6 Dep", false),
+    ];
+    if show_f8 {
+        items.push(("F8 Toggle Pane", "F8 Pane", true));
+    }
+    items
 }
 
 const FOOTER_RIGHT_HINT: &str = "Ctrl+Q Quit";
 
-fn draw_footer(frame: &mut Frame, area: Rect, state: &AppState, full_width: u16) {
-    let mut items = footer_hint_items(state);
-    if full_width < TWO_PANE_MIN_COLUMNS
-        && matches!(state.current_view(), View::Signals | View::Target)
-    {
-        items.push(("F8 Toggle Pane", true));
-    }
-
-    let mut spans = Vec::with_capacity(items.len() * 2 + 2);
+/// Lays out `labels` (already chosen enabled/dimmed) against `inner_width`,
+/// keeping `FOOTER_RIGHT_HINT` visible whenever the labels leave room for it.
+fn footer_line(labels: &[(&'static str, bool)], inner_width: usize) -> Line<'static> {
+    let mut spans = Vec::with_capacity(labels.len() * 2 + 2);
     let mut left_len = 0usize;
-    for (index, (label, enabled)) in items.iter().enumerate() {
+    for (index, (label, enabled)) in labels.iter().enumerate() {
         if index > 0 {
             spans.push(Span::raw(" "));
             left_len += 1;
@@ -445,15 +524,48 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &AppState, full_width: u16)
         left_len += label.len();
     }
 
-    let inner_width = area.width.saturating_sub(2) as usize;
     let used = left_len + 1 + FOOTER_RIGHT_HINT.len();
-    let padding = " ".repeat(inner_width.saturating_sub(used).max(1));
+    if used <= inner_width {
+        spans.push(Span::raw(" ".repeat(inner_width - used)));
+        spans.push(Span::raw(FOOTER_RIGHT_HINT));
+    }
+    // If even the left-hand labels alone don't fit, the quit hint is
+    // dropped rather than truncated into something misleading; this only
+    // happens below the widths this console otherwise supports.
 
-    spans.push(Span::raw(padding));
-    spans.push(Span::raw(FOOTER_RIGHT_HINT));
+    Line::from(spans)
+}
+
+fn footer_line_width(labels: &[(&'static str, bool)]) -> usize {
+    labels.iter().map(|(label, _)| label.len()).sum::<usize>() + labels.len().saturating_sub(1)
+}
+
+fn draw_footer(frame: &mut Frame, area: Rect, state: &AppState, full_width: u16) {
+    let show_f8 = full_width < TWO_PANE_MIN_COLUMNS
+        && matches!(state.current_view(), View::Signals | View::Target);
+    let items = footer_hint_items(state, show_f8);
+    let inner_width = area.width.saturating_sub(2) as usize;
+
+    let full: Vec<(&'static str, bool)> = items
+        .iter()
+        .map(|(full, _, enabled)| (*full, *enabled))
+        .collect();
+    let compact: Vec<(&'static str, bool)> = items
+        .iter()
+        .map(|(_, compact, enabled)| (*compact, *enabled))
+        .collect();
+
+    // Prefer full labels; fall back to compact ones once the quit hint
+    // would otherwise be crowded out at the narrower supported widths.
+    let labels = if footer_line_width(&full) + 1 + FOOTER_RIGHT_HINT.len() <= inner_width {
+        &full
+    } else {
+        &compact
+    };
 
     frame.render_widget(
-        Paragraph::new(Line::from(spans)).block(Block::default().borders(Borders::ALL)),
+        Paragraph::new(footer_line(labels, inner_width))
+            .block(Block::default().borders(Borders::ALL)),
         area,
     );
 }
@@ -548,5 +660,67 @@ mod tests {
         let terminal = render(90, 30, &state);
 
         assert!(buffer_contains(&terminal, "SELECTED SIGNAL"));
+    }
+
+    #[test]
+    fn target_view_at_minimum_supported_geometry_still_shows_the_enter_hint() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+
+        assert!(buffer_contains(&terminal, "work this opportunity"));
+    }
+
+    #[test]
+    fn footer_keeps_the_quit_hint_visible_at_minimum_width() {
+        let state = AppState::new();
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+
+        assert!(buffer_contains(&terminal, "Ctrl+Q Quit"));
+    }
+
+    #[test]
+    fn header_keeps_working_set_visible_at_minimum_width() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.apply(Msg::Navigate(View::Target));
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+
+        assert!(buffer_contains(&terminal, "WORKING SET: FIRST CONTACT"));
+    }
+
+    #[test]
+    fn help_lists_signal_terminology_and_satellite_symbols() {
+        use super::super::state::Msg;
+
+        // Tall enough that the full two-level help content (view controls,
+        // global controls, Lua contract, terminology, symbol legend) fits
+        // without needing to scroll.
+        let mut state = AppState::new();
+        state.apply(Msg::OpenHelp);
+        let terminal = render(120, 60, &state);
+
+        assert!(buffer_contains(&terminal, "Terminology"));
+        assert!(buffer_contains(&terminal, "MACHINE INTERCEPT"));
+        assert!(buffer_contains(&terminal, "Satellite symbols"));
+        assert!(buffer_contains(&terminal, "D drone"));
+    }
+
+    #[test]
+    fn controller_view_acknowledges_the_seeded_starter() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        let terminal = render(120, 40, &state);
+
+        assert!(buffer_contains(&terminal, "Starter controller loaded"));
+        assert!(!buffer_contains(&terminal, "No controller is loaded yet."));
     }
 }
