@@ -10,7 +10,7 @@ The game is inspired by the programmable-vehicle fantasy of *Omega*, reimagined 
 
 ## Status
 
-Human Exception is at the **concept and foundation** stage. The current executable can run one fixed training operation end to end, controlled by a Lua script you supply; broader gameplay (facilities, additional missions, campaign progression) is not implemented yet.
+Human Exception is at the **concept and foundation** stage. The current executable can run one fixed reconnaissance operation, "First Contact," end to end, controlled by a Lua script you supply; broader gameplay (facilities, additional missions, campaign progression) is not implemented yet.
 
 ## Design principles
 
@@ -30,7 +30,7 @@ Human Exception is written in Rust. Install a current stable Rust toolchain, the
 cargo run -- examples/first_contact.lua
 ```
 
-This loads the checked-in example script, runs the fixed "first contact" training operation, and prints a satellite view and tick-by-tick telemetry for every tick, followed by a final success or failure report.
+This loads the checked-in example script and runs "First Contact," the resistance's fixed reconnaissance operation: a captured drone must explore an unfamiliar facility, avoid its hazard, and reach a network uplink before its operational budget runs out. The console prints a satellite view and tick-by-tick telemetry for every tick, followed by a final success or failure report.
 
 Run `human-exception --help` for usage, or `human-exception --version` for the build's firmware version.
 
@@ -99,7 +99,7 @@ Run a controller with:
 cargo run -- path/to/your_script.lua
 ```
 
-See [`examples/first_contact.lua`](examples/first_contact.lua) for a working controller against the fixed "first contact" scenario: a 5x5 facility map and a 15-budget operation. The layout below documents the fixed map for reference; it is not exposed directly through the API, so a controller must still discover it through observation and scanning. Two equal-length routes lead from the start to the uplink: one along column `x=0` and row `y=4` that never touches the hazard, and one along row `y=1` and column `x=4` that passes through it — a controller must discover and choose between them.
+See [`examples/first_contact.lua`](examples/first_contact.lua) for a reference reconnaissance controller against the "First Contact" scenario: a 5x5 facility map and a 15-budget operation. It opens with a `"scan"` to map the surrounding area before committing to a direction, remembers every tile it discovers in its own Lua state, prefers a known non-hazard tile over a known hazard tile, heads for the uplink once it turns up in that memory, and scans again if it ever runs out of confirmed safe moves. The layout below documents the fixed map for reference; it is not exposed directly through the API, so a controller must still discover it through observation and scanning. Two equal-length routes lead from the start to the uplink: one along column `x=0` and row `y=4` that never touches the hazard, and one along row `y=1` and column `x=4` that passes through it — a controller must discover and choose between them.
 
 ```
        x=0  x=1  x=2  x=3  x=4

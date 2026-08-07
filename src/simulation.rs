@@ -1,10 +1,10 @@
-//! The deterministic drone training simulation.
+//! The deterministic drone reconnaissance simulation.
 //!
-//! This module models the fixed "first contact" training operation: a single
-//! captured maintenance drone must cross a small facility map, avoiding
-//! walls, to reach a network-uplink objective within a limited number of
-//! ticks. All authoritative state transitions live here; this module has no
-//! knowledge of Lua, the command line, or terminal output.
+//! This module models the fixed "First Contact" reconnaissance operation: a
+//! single captured maintenance drone must cross a small facility map,
+//! avoiding walls, to reach a network-uplink objective within a limited
+//! number of ticks. All authoritative state transitions live here; this
+//! module has no knowledge of Lua, the command line, or terminal output.
 
 use std::collections::{HashSet, VecDeque};
 use std::error::Error;
@@ -274,7 +274,7 @@ pub const ACTION_COST: u32 = 1;
 /// the hazard tile, not for continuing to occupy or waiting on it.
 pub const HAZARD_ENTRY_COST: u32 = 5;
 
-/// The fixed training scenario: one drone, one facility map, one
+/// The fixed reconnaissance scenario: one drone, one facility map, one
 /// operational budget.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scenario {
@@ -282,7 +282,7 @@ pub struct Scenario {
     starting_budget: u32,
 }
 
-/// The fixed "first contact" facility map, drawn north-up (the first row is
+/// The fixed "First Contact" reconnaissance facility map, drawn north-up (the first row is
 /// `y = height - 1`). `S` is the drone start, `U` is the uplink objective,
 /// `.` is floor, `#` is a wall, and `~` is a hazard tile (traversable, but
 /// costly to enter). Row `y = 1` is open floor across its whole width, so a
@@ -321,7 +321,7 @@ impl Scenario {
         }
     }
 
-    /// The one fixed "first contact" training scenario.
+    /// The one fixed "First Contact" reconnaissance scenario.
     pub fn first_contact() -> Self {
         let map = FacilityMap::new(
             5,
@@ -431,7 +431,7 @@ impl fmt::Display for ActionError {
                 )
             }
             ActionError::OutOfBounds => {
-                write!(f, "that move would leave the bounded training area")
+                write!(f, "that move would leave the bounded facility area")
             }
             ActionError::BlockedByWall => {
                 write!(f, "that move would run the drone into a wall")
@@ -467,7 +467,7 @@ pub struct Observation {
     pub discovered: Vec<DiscoveredTile>,
 }
 
-/// The authoritative, deterministic state of a training operation.
+/// The authoritative, deterministic state of a reconnaissance operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Simulation {
     scenario: Scenario,
@@ -479,7 +479,7 @@ pub struct Simulation {
 }
 
 impl Simulation {
-    /// Starts a new simulation of the fixed "first contact" scenario.
+    /// Starts a new simulation of the fixed "First Contact" scenario.
     ///
     /// A new simulation always starts from the same state.
     pub fn new() -> Self {

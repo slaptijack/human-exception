@@ -83,7 +83,7 @@ fn bad_argument_detail(error: &clap::Error) -> String {
     }
 }
 
-/// Runs the training operation controlled by the script at `script`,
+/// Runs the reconnaissance operation controlled by the script at `script`,
 /// printing tick-by-tick telemetry and a final report, and returns the
 /// process exit code: `0` on success, `1` on mission failure, `3` if the
 /// script could not be loaded or executed.

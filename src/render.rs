@@ -26,8 +26,8 @@ use crate::simulation::{DiscoveredTile, Position, TileKind};
 /// drone's own position) are ever rendered as anything other than `?`.
 /// Column and row labels are padded to the longest label on their axis, so
 /// the grid stays aligned for any map size without depending on terminal
-/// width detection. For example, at the start of the fixed "first contact"
-/// scenario:
+/// width detection. For example, at the start of the fixed "First Contact"
+/// reconnaissance scenario:
 ///
 /// ```text
 /// SATELLITE FEED // discovered terrain
