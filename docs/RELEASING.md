@@ -95,3 +95,26 @@ workflow run from the Actions tab. release-plz checks crates.io before
 publishing each package, so it will skip anything already published
 and only retry what's missing — it will not create a duplicate tag,
 GitHub release, or crates.io publish.
+
+## If `Cargo.toml`'s version sits ahead of the published crate for a while
+
+release-plz expects the release PR it opens to be merged (which
+publishes that version) before more commits land. If `Cargo.toml`'s
+version instead stays ahead of what's on crates.io for an extended
+period — as happened between #14 and #37, when a release-job bug meant
+`0.1.1` never actually got tagged or published while several more
+PRs merged — release-plz's changelog updater can stop picking up new
+commits into that pending version's changelog entry. It doesn't
+retroactively catch up once the version finally publishes: the
+`CHANGELOG.md` entry and GitHub release notes for that release may
+end up missing entries for commits that landed while it sat pending
+(see #38, where 8 of the 17 commits that shipped in `v0.1.1` were
+missing from both).
+
+If this happens, there's no automated recovery — release-plz doesn't
+rewrite a changelog entry for a version it has already tagged. Fix
+`CHANGELOG.md` by hand (compare `git log <previous-tag>..<tag>` against
+the changelog entry) and edit the GitHub release notes to match
+(`gh release edit <tag> --notes-file -`). The safest way to avoid this
+altogether is to merge the release PR promptly instead of letting
+`Cargo.toml`'s version drift ahead of the registry for long.

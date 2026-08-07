@@ -9,8 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.1](https://github.com/slaptijack/human-exception/compare/v0.1.0...v0.1.1) - 2026-08-07
 
+### Added
+
+- deliver the complete reconnaissance operation ([#35](https://github.com/slaptijack/human-exception/pull/35))
+- render the discovered facility as a satellite view ([#34](https://github.com/slaptijack/human-exception/pull/34))
+- add deterministic hazards and an operational budget ([#33](https://github.com/slaptijack/human-exception/pull/33))
+- expose local observations and scanning to Lua ([#32](https://github.com/slaptijack/human-exception/pull/32))
+- model a deterministic reconnaissance facility map ([#31](https://github.com/slaptijack/human-exception/pull/31))
+
+### Fixed
+
+- never pass a literal "false" dry_run to release-plz/action ([#37](https://github.com/slaptijack/human-exception/pull/37))
+
 ### Other
 
+- enforce Conventional Commits PR titles ([#30](https://github.com/slaptijack/human-exception/pull/30))
 - Add code coverage reporting to CI ([#28](https://github.com/slaptijack/human-exception/pull/28))
 - Add the first playable command-line operation ([#21](https://github.com/slaptijack/human-exception/pull/21))
 - Add the Lua controller boundary for the training simulation ([#19](https://github.com/slaptijack/human-exception/pull/19))
