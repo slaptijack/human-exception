@@ -32,8 +32,15 @@ accordingly:
 - `fix: ...` — patch release
 - `feat: ...` — minor release
 - `feat!: ...` or a `BREAKING CHANGE:` footer — major release
-- `chore: ...`, `docs: ...`, `ci: ...`, `test: ...`, `refactor: ...` —
-  recorded but do not trigger a release on their own
+- `chore: ...`, `docs: ...`, `ci: ...`, `test: ...`, `refactor: ...`,
+  `build: ...`, `perf: ...`, `revert: ...` — recorded but do not
+  trigger a release on their own
+
+The **PR title** job in
+[`.github/workflows/pr-title.yml`](../.github/workflows/pr-title.yml)
+enforces this on every PR (checked on open, edit, and each push), so a
+non-conforming title fails CI instead of silently confusing
+release-plz after a squash-merge.
 
 ## One-time setup
 
