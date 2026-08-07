@@ -95,6 +95,17 @@ impl fmt::Display for ActionError {
 
 impl Error for ActionError {}
 
+/// A read-only snapshot of observable state for a single tick, handed to a
+/// controller instead of letting it combine [`Simulation`] getters with
+/// scenario details itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Observation {
+    pub drone_position: Position,
+    pub uplink_position: Position,
+    pub tick: u32,
+    pub ticks_remaining: u32,
+}
+
 /// The authoritative, deterministic state of a training operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Simulation {
@@ -131,6 +142,16 @@ impl Simulation {
 
     pub fn outcome(&self) -> TickOutcome {
         self.outcome
+    }
+
+    /// Returns a read-only snapshot of the current tick's observable state.
+    pub fn observe(&self) -> Observation {
+        Observation {
+            drone_position: self.drone_position,
+            uplink_position: self.scenario.uplink,
+            tick: self.ticks_elapsed,
+            ticks_remaining: self.scenario.tick_limit.saturating_sub(self.ticks_elapsed),
+        }
     }
 
     /// Submits one action for this tick and advances the simulation by one
@@ -309,6 +330,46 @@ mod tests {
 
         assert_eq!(result, Err(ActionError::OutOfBounds));
         assert_eq!(sim, before);
+    }
+
+    #[test]
+    fn observe_reports_fixed_scenario_details_at_start() {
+        let sim = Simulation::from_scenario(small_scenario(5));
+
+        assert_eq!(
+            sim.observe(),
+            Observation {
+                drone_position: Position { x: 0, y: 0 },
+                uplink_position: Position { x: 2, y: 2 },
+                tick: 0,
+                ticks_remaining: 5,
+            }
+        );
+    }
+
+    #[test]
+    fn observe_reflects_elapsed_ticks_after_moves() {
+        let mut sim = Simulation::from_scenario(small_scenario(5));
+        sim.step(Action::MoveNorth).unwrap();
+        sim.step(Action::MoveEast).unwrap();
+
+        assert_eq!(
+            sim.observe(),
+            Observation {
+                drone_position: Position { x: 1, y: 1 },
+                uplink_position: Position { x: 2, y: 2 },
+                tick: 2,
+                ticks_remaining: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn observe_does_not_underflow_ticks_remaining_past_the_limit() {
+        let mut sim = Simulation::from_scenario(small_scenario(1));
+        sim.step(Action::Wait).unwrap();
+
+        assert_eq!(sim.observe().ticks_remaining, 0);
     }
 
     #[test]
