@@ -348,10 +348,35 @@ fn draw_help(frame: &mut Frame, area: Rect, state: &AppState) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let paragraph = Paragraph::new(help_lines(state))
+    let lines = help_lines(state);
+    // `state.help_scroll()` only enforces a coarse upper bound; clamp it
+    // again here against the content actually rendered at this viewport so
+    // scrolling can never run past the last wrapped row into a blank pane.
+    let content_rows = wrapped_row_count(&lines, inner.width);
+    let max_scroll = content_rows.saturating_sub(inner.height as usize) as u16;
+    let scroll = state.help_scroll().min(max_scroll);
+
+    let paragraph = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
-        .scroll((state.help_scroll(), 0));
+        .scroll((scroll, 0));
     frame.render_widget(paragraph, inner);
+}
+
+/// How many terminal rows `lines` occupies once wrapped to `width`, matching
+/// the `Wrap { trim: false }` behavior used to render Help.
+fn wrapped_row_count(lines: &[Line<'static>], width: u16) -> usize {
+    let width = width.max(1) as usize;
+    lines
+        .iter()
+        .map(|line| {
+            let line_width = line.width();
+            if line_width == 0 {
+                1
+            } else {
+                line_width.div_ceil(width)
+            }
+        })
+        .sum()
 }
 
 /// Two-level contextual help: the current (or Help-opened-from) view's
@@ -460,12 +485,14 @@ fn help_lines(state: &AppState) -> Vec<Line<'static>> {
 fn view_specific_help(view: View) -> Vec<Line<'static>> {
     match view {
         View::Signals => vec![
-            Line::from("Up/Down  move between signals"),
-            Line::from("Enter    inspect the selected signal (opens Target if actionable)"),
+            Line::from("Up/Down  move the selection; its detail follows automatically"),
+            Line::from("Enter    open Target (only signals marked [OPEN] respond)"),
+            Line::from("F8       (80-99 columns) switch to the selected signal's detail"),
         ],
         View::Target => vec![
             Line::from("Enter  work this opportunity"),
             Line::from("Esc    back to Signals"),
+            Line::from("F8     (80-99 columns) switch between intel and provenance"),
         ],
         View::Controller => vec![Line::from("The Lua editor arrives in a later build (#44).")],
         View::Operation => vec![Line::from("Live telemetry arrives in a later build (#45).")],
@@ -637,7 +664,10 @@ mod tests {
         let terminal = render(120, 40, &state);
 
         assert!(buffer_contains(&terminal, "This view"));
-        assert!(buffer_contains(&terminal, "inspect the selected signal"));
+        assert!(buffer_contains(
+            &terminal,
+            "only signals marked [OPEN] respond"
+        ));
         assert!(buffer_contains(&terminal, "Global controls"));
         assert!(buffer_contains(&terminal, "on_tick(observation)"));
     }
@@ -709,6 +739,24 @@ mod tests {
         assert!(buffer_contains(&terminal, "MACHINE INTERCEPT"));
         assert!(buffer_contains(&terminal, "Satellite symbols"));
         assert!(buffer_contains(&terminal, "D drone"));
+    }
+
+    #[test]
+    fn help_at_a_tall_viewport_does_not_scroll_past_its_own_content() {
+        use super::super::state::Msg;
+
+        // At this height the full Help document already fits without
+        // scrolling; MAX_HELP_SCROLL alone would still let repeated Down
+        // presses blank the pane, so the render-time clamp must catch it.
+        let mut state = AppState::new();
+        state.apply(Msg::OpenHelp);
+        for _ in 0..60 {
+            state.apply(Msg::ScrollHelpDown);
+        }
+        let terminal = render(120, 60, &state);
+
+        assert!(buffer_contains(&terminal, "Satellite symbols"));
+        assert!(buffer_contains(&terminal, "? undiscovered"));
     }
 
     #[test]
