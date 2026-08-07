@@ -544,6 +544,13 @@ fn help_lines(state: &AppState) -> Vec<Line<'static>> {
     lines.push(Line::from(
         "  uplink        whether it's the network-uplink objective",
     ));
+    lines.push(Line::from(
+        "the drone's own tile and its four cardinal neighbours are added",
+    ));
+    lines.push(Line::from(
+        "automatically every tick; nothing farther is visible until",
+    ));
+    lines.push(Line::from("discovered (e.g. by a scan)"));
     lines.push(Line::from(""));
     lines.push(Line::from(
         "valid return values: north south east west wait scan",
@@ -928,6 +935,10 @@ mod tests {
         ));
         assert!(buffer_contains(&terminal, "whether the drone could occupy"));
         assert!(buffer_contains(&terminal, "network-uplink objective"));
+        assert!(buffer_contains(
+            &terminal,
+            "own tile and its four cardinal neighbours are added"
+        ));
     }
 
     #[test]
