@@ -8,13 +8,16 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::state::{Msg, View};
 
-/// Maps a key event to a player intent, given whether Help is currently
-/// showing (`F1` and `Esc` need to know whether they're opening or
-/// dismissing it).
-pub fn map(key: KeyEvent, help_is_open: bool) -> Option<Msg> {
+/// Maps a key event to a player intent, given the view currently showing
+/// (several keys are context-sensitive: `F1`/`Esc` need to know whether
+/// Help is open, `Esc`/arrows/`Enter` behave differently in Signals, Target,
+/// and Help).
+pub fn map(key: KeyEvent, current_view: View) -> Option<Msg> {
     if key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return Some(Msg::Quit);
     }
+
+    let help_is_open = current_view == View::Help;
 
     match key.code {
         KeyCode::F(1) => Some(if help_is_open {
@@ -23,6 +26,7 @@ pub fn map(key: KeyEvent, help_is_open: bool) -> Option<Msg> {
             Msg::OpenHelp
         }),
         KeyCode::Esc if help_is_open => Some(Msg::DismissHelp),
+        KeyCode::Esc if current_view == View::Target => Some(Msg::Navigate(View::Signals)),
         KeyCode::F(2) => Some(Msg::Navigate(View::Signals)),
         KeyCode::F(3) => Some(Msg::Navigate(View::Target)),
         KeyCode::F(4) => Some(Msg::Navigate(View::Controller)),
@@ -31,6 +35,14 @@ pub fn map(key: KeyEvent, help_is_open: bool) -> Option<Msg> {
         // stays inert rather than claiming to run anything; ui::draw_footer
         // renders it visibly dimmed to match.
         KeyCode::F(6) => None,
+        KeyCode::F(8) => Some(Msg::ToggleSecondaryPane),
+        KeyCode::Enter if current_view == View::Signals || current_view == View::Target => {
+            Some(Msg::Activate)
+        }
+        KeyCode::Up if current_view == View::Signals => Some(Msg::SelectPreviousSignal),
+        KeyCode::Down if current_view == View::Signals => Some(Msg::SelectNextSignal),
+        KeyCode::Up if help_is_open => Some(Msg::ScrollHelpUp),
+        KeyCode::Down if help_is_open => Some(Msg::ScrollHelpDown),
         _ => None,
     }
 }
@@ -52,55 +64,106 @@ mod tests {
     fn ctrl_q_quits_regardless_of_help_state() {
         let quit = key_with_modifiers(KeyCode::Char('q'), KeyModifiers::CONTROL);
 
-        assert_eq!(map(quit, false), Some(Msg::Quit));
-        assert_eq!(map(quit, true), Some(Msg::Quit));
+        assert_eq!(map(quit, View::Signals), Some(Msg::Quit));
+        assert_eq!(map(quit, View::Help), Some(Msg::Quit));
     }
 
     #[test]
     fn plain_q_does_not_quit() {
-        assert_eq!(map(key(KeyCode::Char('q')), false), None);
+        assert_eq!(map(key(KeyCode::Char('q')), View::Signals), None);
     }
 
     #[test]
     fn f1_opens_help_when_closed_and_dismisses_when_open() {
-        assert_eq!(map(key(KeyCode::F(1)), false), Some(Msg::OpenHelp));
-        assert_eq!(map(key(KeyCode::F(1)), true), Some(Msg::DismissHelp));
+        assert_eq!(map(key(KeyCode::F(1)), View::Signals), Some(Msg::OpenHelp));
+        assert_eq!(map(key(KeyCode::F(1)), View::Help), Some(Msg::DismissHelp));
     }
 
     #[test]
-    fn esc_dismisses_help_only_when_open() {
-        assert_eq!(map(key(KeyCode::Esc), true), Some(Msg::DismissHelp));
-        assert_eq!(map(key(KeyCode::Esc), false), None);
+    fn esc_dismisses_help_when_open() {
+        assert_eq!(map(key(KeyCode::Esc), View::Help), Some(Msg::DismissHelp));
+    }
+
+    #[test]
+    fn esc_returns_to_signals_from_target() {
+        assert_eq!(
+            map(key(KeyCode::Esc), View::Target),
+            Some(Msg::Navigate(View::Signals))
+        );
+    }
+
+    #[test]
+    fn esc_does_nothing_elsewhere() {
+        assert_eq!(map(key(KeyCode::Esc), View::Signals), None);
+        assert_eq!(map(key(KeyCode::Esc), View::Controller), None);
     }
 
     #[test]
     fn function_keys_navigate_to_their_view() {
         assert_eq!(
-            map(key(KeyCode::F(2)), false),
+            map(key(KeyCode::F(2)), View::Signals),
             Some(Msg::Navigate(View::Signals))
         );
         assert_eq!(
-            map(key(KeyCode::F(3)), false),
+            map(key(KeyCode::F(3)), View::Signals),
             Some(Msg::Navigate(View::Target))
         );
         assert_eq!(
-            map(key(KeyCode::F(4)), false),
+            map(key(KeyCode::F(4)), View::Signals),
             Some(Msg::Navigate(View::Controller))
         );
         assert_eq!(
-            map(key(KeyCode::F(5)), false),
+            map(key(KeyCode::F(5)), View::Signals),
             Some(Msg::Navigate(View::Operation))
         );
     }
 
     #[test]
     fn f6_deploy_is_inert_until_a_controller_can_be_loaded() {
-        assert_eq!(map(key(KeyCode::F(6)), false), None);
+        assert_eq!(map(key(KeyCode::F(6)), View::Signals), None);
+    }
+
+    #[test]
+    fn f8_toggles_the_secondary_pane() {
+        assert_eq!(
+            map(key(KeyCode::F(8)), View::Signals),
+            Some(Msg::ToggleSecondaryPane)
+        );
+    }
+
+    #[test]
+    fn enter_activates_in_signals_and_target_only() {
+        assert_eq!(map(key(KeyCode::Enter), View::Signals), Some(Msg::Activate));
+        assert_eq!(map(key(KeyCode::Enter), View::Target), Some(Msg::Activate));
+        assert_eq!(map(key(KeyCode::Enter), View::Controller), None);
+        assert_eq!(map(key(KeyCode::Enter), View::Help), None);
+    }
+
+    #[test]
+    fn arrows_move_signal_selection_only_in_signals() {
+        assert_eq!(
+            map(key(KeyCode::Up), View::Signals),
+            Some(Msg::SelectPreviousSignal)
+        );
+        assert_eq!(
+            map(key(KeyCode::Down), View::Signals),
+            Some(Msg::SelectNextSignal)
+        );
+        assert_eq!(map(key(KeyCode::Up), View::Target), None);
+    }
+
+    #[test]
+    fn arrows_scroll_help_when_help_is_open() {
+        assert_eq!(map(key(KeyCode::Up), View::Help), Some(Msg::ScrollHelpUp));
+        assert_eq!(
+            map(key(KeyCode::Down), View::Help),
+            Some(Msg::ScrollHelpDown)
+        );
     }
 
     #[test]
     fn unbound_keys_map_to_nothing() {
-        assert_eq!(map(key(KeyCode::Char('x')), false), None);
+        assert_eq!(map(key(KeyCode::Char('x')), View::Signals), None);
     }
 
     #[test]
@@ -108,6 +171,9 @@ mod tests {
         let mut released = key(KeyCode::F(2));
         released.kind = KeyEventKind::Release;
 
-        assert_eq!(map(released, false), Some(Msg::Navigate(View::Signals)));
+        assert_eq!(
+            map(released, View::Signals),
+            Some(Msg::Navigate(View::Signals))
+        );
     }
 }

@@ -7,6 +7,7 @@
 //! issues (#43-#46) to populate.
 
 pub mod event;
+pub mod intel;
 pub mod state;
 pub mod ui;
 
@@ -23,7 +24,7 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
-use state::{AppState, View};
+use state::AppState;
 
 type PanicHook = dyn Fn(&PanicHookInfo<'_>) + Sync + Send + 'static;
 
@@ -116,8 +117,7 @@ fn should_redraw(state: &mut AppState, event: Event) -> bool {
         return false;
     }
 
-    let help_is_open = state.current_view() == View::Help;
-    match event::map(key, help_is_open) {
+    match event::map(key, state.current_view()) {
         Some(msg) => {
             state.apply(msg);
             true
@@ -131,6 +131,7 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::backend::TestBackend;
+    use state::View;
 
     fn press(code: KeyCode) -> Event {
         Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
@@ -183,7 +184,7 @@ mod tests {
             120,
             40,
             &[
-                press(KeyCode::F(3)),
+                press(KeyCode::Enter), // inspect the actionable signal, opening Target
                 press(KeyCode::F(1)),
                 press(KeyCode::Esc),
             ],
@@ -240,6 +241,40 @@ mod tests {
             "Minimum console geometry: 80x24"
         ));
         assert!(!buffer_contains(&terminal, "SIGNALS"));
+    }
+
+    #[test]
+    fn f3_is_inert_before_a_signal_has_been_inspected() {
+        let (state, terminal) = render(120, 40, &[press(KeyCode::F(3))]);
+
+        assert_eq!(state.current_view(), View::Signals);
+        assert!(buffer_contains(&terminal, "SIGNALS"));
+    }
+
+    #[test]
+    fn inspecting_and_working_the_opportunity_reaches_controller_with_a_working_set() {
+        let (state, terminal) = render(120, 40, &[press(KeyCode::Enter), press(KeyCode::Enter)]);
+
+        assert_eq!(state.current_view(), View::Controller);
+        assert_eq!(state.working_set(), Some(state::WorkingSet::FirstContact));
+        assert!(state.controller_source().is_some());
+        assert!(buffer_contains(&terminal, "FIRST CONTACT"));
+    }
+
+    #[test]
+    fn f4_becomes_available_once_a_working_set_exists() {
+        let (state, _) = render(
+            120,
+            40,
+            &[
+                press(KeyCode::Enter),
+                press(KeyCode::Enter),
+                press(KeyCode::F(2)),
+                press(KeyCode::F(4)),
+            ],
+        );
+
+        assert_eq!(state.current_view(), View::Controller);
     }
 
     #[test]
