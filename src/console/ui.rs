@@ -177,6 +177,29 @@ fn draw_pane(frame: &mut Frame, area: Rect, title: &'static str, lines: Vec<Line
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
+/// Like [`draw_pane`], but pins `action` to a fixed last row instead of
+/// letting it sit at the end of the wrapped `lines`. However `lines` wraps
+/// at a given pane width — a variable number of known/unknown facts
+/// wrapping at a narrow two-pane width, for example — the local action a
+/// player needs (`Enter  work this opportunity`, `Esc  back to signals`)
+/// must never be the thing that gets pushed off-screen for it.
+fn draw_pane_with_pinned_action(
+    frame: &mut Frame,
+    area: Rect,
+    title: &'static str,
+    lines: Vec<Line<'static>>,
+    action: &'static str,
+) {
+    let block = Block::default().borders(Borders::ALL).title(title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let [content, action_area] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), content);
+    frame.render_widget(Paragraph::new(action), action_area);
+}
+
 fn draw_signals(frame: &mut Frame, area: Rect, state: &AppState) {
     let signal = &authored_signals()[state.selected_signal()];
 
@@ -185,11 +208,25 @@ fn draw_signals(frame: &mut Frame, area: Rect, state: &AppState) {
             Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
                 .areas(area);
         draw_pane(frame, left, "SIGNALS", signal_list_lines(state));
-        draw_pane(frame, right, "SELECTED SIGNAL", signal_detail_lines(signal));
+        draw_signal_detail_pane(frame, right, signal);
     } else if state.narrow_secondary_visible() {
-        draw_pane(frame, area, "SELECTED SIGNAL", signal_detail_lines(signal));
+        draw_signal_detail_pane(frame, area, signal);
     } else {
         draw_pane(frame, area, "SIGNALS", signal_list_lines(state));
+    }
+}
+
+fn draw_signal_detail_pane(frame: &mut Frame, area: Rect, signal: &Signal) {
+    if signal.is_actionable() {
+        draw_pane_with_pinned_action(
+            frame,
+            area,
+            "SELECTED SIGNAL",
+            signal_detail_lines(signal),
+            "Enter  inspect opportunity",
+        );
+    } else {
+        draw_pane(frame, area, "SELECTED SIGNAL", signal_detail_lines(signal));
     }
 }
 
@@ -240,7 +277,6 @@ fn signal_detail_lines(signal: &Signal) -> Vec<Line<'static>> {
             "ACTIONABLE: FIRST CONTACT",
             Style::default().add_modifier(Modifier::BOLD),
         )));
-        lines.push(Line::from("Enter  inspect opportunity"));
     }
     lines
 }
@@ -252,38 +288,43 @@ fn draw_target(frame: &mut Frame, area: Rect, state: &AppState) {
         let [left, right] =
             Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)])
                 .areas(area);
-        draw_pane(
+        draw_pane_with_pinned_action(
             frame,
             left,
             "TARGET INTELLIGENCE",
             target_intel_lines(&dossier),
+            "Enter  work this opportunity",
         );
-        draw_pane(
+        draw_pane_with_pinned_action(
             frame,
             right,
             "PROVENANCE / ACCESS",
             target_provenance_lines(&dossier),
+            "Esc  back to signals",
         );
     } else if state.narrow_secondary_visible() {
-        draw_pane(
+        draw_pane_with_pinned_action(
             frame,
             area,
             "PROVENANCE / ACCESS",
             target_provenance_lines(&dossier),
+            "Esc  back to signals",
         );
     } else {
-        draw_pane(
+        draw_pane_with_pinned_action(
             frame,
             area,
             "TARGET INTELLIGENCE",
             target_intel_lines(&dossier),
+            "Enter  work this opportunity",
         );
     }
 }
 
-/// Kept compact enough (well under 16 lines, the inner height available at
-/// the supported `MIN_ROWS` minimum) that `Enter  work this opportunity`
-/// always stays visible without scrolling.
+/// Content for the TARGET INTELLIGENCE pane, excluding the pinned
+/// `Enter  work this opportunity` action row: however this wraps at a given
+/// pane width, that action always renders on its own fixed last row instead
+/// of at the tail of this list, so it can't be pushed off-screen.
 fn target_intel_lines(dossier: &TargetDossier) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from(Span::styled(
@@ -307,8 +348,6 @@ fn target_intel_lines(dossier: &TargetDossier) -> Vec<Line<'static>> {
         lines.push(Line::from(format!("- {fact}")));
     }
     lines.push(Line::from(dossier.opportunity));
-    lines.push(Line::from(""));
-    lines.push(Line::from("Enter  work this opportunity"));
     lines
 }
 
@@ -336,8 +375,6 @@ fn target_provenance_lines(dossier: &TargetDossier) -> Vec<Line<'static>> {
     for (fact, level) in dossier.confidence {
         lines.push(Line::from(format!("{fact}   {level}")));
     }
-    lines.push(Line::from(""));
-    lines.push(Line::from("Esc  back to signals"));
     lines
 }
 
@@ -701,6 +738,30 @@ mod tests {
         let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
 
         assert!(buffer_contains(&terminal, "work this opportunity"));
+    }
+
+    #[test]
+    fn target_view_at_the_two_pane_threshold_still_shows_the_pinned_actions() {
+        use super::super::state::Msg;
+
+        // 100x24: the narrowest width that switches Target into the
+        // two-pane layout, where a 55% intelligence pane wraps enough known
+        // facts and the opportunity blurb that the action row would be the
+        // first thing pushed off-screen if it weren't pinned separately.
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        let terminal = render(TWO_PANE_MIN_COLUMNS, MIN_ROWS, &state);
+
+        assert!(buffer_contains(&terminal, "work this opportunity"));
+        assert!(buffer_contains(&terminal, "back to signals"));
+    }
+
+    #[test]
+    fn signal_detail_pane_at_the_two_pane_threshold_still_shows_the_pinned_action() {
+        let state = AppState::new();
+        let terminal = render(TWO_PANE_MIN_COLUMNS, MIN_ROWS, &state);
+
+        assert!(buffer_contains(&terminal, "inspect opportunity"));
     }
 
     #[test]
