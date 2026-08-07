@@ -50,7 +50,7 @@ A controller is a Lua script that defines one global callback:
 
 ```lua
 function on_tick(observation)
-  -- return one of: "north", "south", "east", "west", "wait"
+  -- return one of: "north", "south", "east", "west", "wait", "scan"
 end
 ```
 
@@ -59,11 +59,15 @@ Each tick, `on_tick` receives a read-only `observation` table:
 | field | type | meaning |
 | --- | --- | --- |
 | `observation.drone.x`, `observation.drone.y` | integer | the drone's current position |
-| `observation.uplink.x`, `observation.uplink.y` | integer | the fixed uplink objective position |
 | `observation.tick` | integer | ticks elapsed so far |
 | `observation.ticks_remaining` | integer | ticks left before the operation times out |
+| `observation.discovered` | array of tables | every tile learned about so far |
 
-`on_tick` must return one of `"north"`, `"south"`, `"east"`, `"west"`, or `"wait"`. Any other value, a move that would leave the map, or a move into a wall, ends the run with an error.
+Each entry in `observation.discovered` is a table `{ x, y, tile, traversable, uplink }`, where `tile` is `"floor"`, `"wall"`, or `"hazard"`, `traversable` is whether the drone could occupy that tile, and `uplink` is whether it's the network-uplink objective. The drone's own tile and its four cardinal neighbours are added automatically every tick; nothing farther away is visible until discovered.
+
+`on_tick` must return one of `"north"`, `"south"`, `"east"`, `"west"`, `"wait"`, or `"scan"`. Any other value, a move that would leave the map, or a move into a wall, ends the run with an error.
+
+`"scan"` costs one tick and does not move the drone. It reveals every tile within 2 tiles of the drone in any direction (a 5x5 area, including diagonals), regardless of walls in the way — scanning is not blocked by line of sight. Discoveries, whether from passive local vision or a scan, persist for the rest of the run.
 
 Run a controller with:
 
@@ -71,7 +75,7 @@ Run a controller with:
 cargo run -- path/to/your_script.lua
 ```
 
-See [`examples/first_contact.lua`](examples/first_contact.lua) for a working controller against the fixed "first contact" scenario: a 5x5 facility map, a 20-tick budget, and the layout below (the observation does not expose terrain yet, so this map is the only place to see it).
+See [`examples/first_contact.lua`](examples/first_contact.lua) for a working controller against the fixed "first contact" scenario: a 5x5 facility map and a 20-tick budget. The layout below documents the fixed map for reference; it is not exposed directly through the API, so a controller must still discover it through observation and scanning.
 
 ```
        x=0  x=1  x=2  x=3  x=4

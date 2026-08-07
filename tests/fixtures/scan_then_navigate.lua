@@ -1,8 +1,10 @@
--- Explores from (0,0) to the uplink in the fixed "first contact" scenario,
--- only ever moving onto tiles already confirmed traversable via
--- observation.discovered, and scanning if it ever runs out of confirmed
--- moves. See examples/first_contact.lua for the full contract.
+-- Scans once on the first tick, then explores toward the uplink using only
+-- observation.discovered, matching tests/fixtures/success.lua otherwise.
 function on_tick(observation)
+  if observation.tick == 0 then
+    return "scan"
+  end
+
   local function find_tile(x, y)
     for _, tile in ipairs(observation.discovered) do
       if tile.x == x and tile.y == y then

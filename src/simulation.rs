@@ -6,7 +6,7 @@
 //! ticks. All authoritative state transitions live here; this module has no
 //! knowledge of Lua, the command line, or terminal output.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::error::Error;
 use std::fmt;
 
@@ -204,6 +204,28 @@ impl FacilityMap {
     }
 }
 
+/// The four cardinal neighbours of `position`, regardless of map bounds.
+fn cardinal_neighbours(position: Position) -> [Position; 4] {
+    [
+        Position {
+            x: position.x,
+            y: position.y + 1,
+        },
+        Position {
+            x: position.x,
+            y: position.y - 1,
+        },
+        Position {
+            x: position.x + 1,
+            y: position.y,
+        },
+        Position {
+            x: position.x - 1,
+            y: position.y,
+        },
+    ]
+}
+
 /// Breadth-first search over cardinal neighbours, true if `uplink` is
 /// reachable from `start` through traversable tiles.
 fn uplink_is_reachable(
@@ -228,26 +250,7 @@ fn uplink_is_reachable(
             return true;
         }
 
-        let neighbours = [
-            Position {
-                x: current.x,
-                y: current.y + 1,
-            },
-            Position {
-                x: current.x,
-                y: current.y - 1,
-            },
-            Position {
-                x: current.x + 1,
-                y: current.y,
-            },
-            Position {
-                x: current.x - 1,
-                y: current.y,
-            },
-        ];
-
-        for neighbour in neighbours {
+        for neighbour in cardinal_neighbours(current) {
             if !(0..width).contains(&neighbour.x) || !(0..height).contains(&neighbour.y) {
                 continue;
             }
@@ -347,6 +350,9 @@ pub enum Action {
     MoveEast,
     MoveWest,
     Wait,
+    /// Reveals a documented, bounded area around the drone without moving
+    /// it. See [`Simulation::step`] for the exact area revealed.
+    Scan,
 }
 
 /// The operation's state as of the most recent tick.
@@ -396,15 +402,29 @@ impl fmt::Display for ActionError {
 
 impl Error for ActionError {}
 
+/// A single tile a controller has learned about, either through passive
+/// local vision or a completed [`Action::Scan`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiscoveredTile {
+    pub position: Position,
+    pub kind: TileKind,
+    pub is_traversable: bool,
+    pub is_uplink: bool,
+}
+
 /// A read-only snapshot of observable state for a single tick, handed to a
 /// controller instead of letting it combine [`Simulation`] getters with
 /// scenario details itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `discovered` is cumulative: it contains every tile the drone has learned
+/// about so far, not just this tick's surroundings. Tiles the drone has
+/// never been near and never scanned are simply absent.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Observation {
     pub drone_position: Position,
-    pub uplink_position: Position,
     pub tick: u32,
     pub ticks_remaining: u32,
+    pub discovered: Vec<DiscoveredTile>,
 }
 
 /// The authoritative, deterministic state of a training operation.
@@ -414,6 +434,7 @@ pub struct Simulation {
     drone_position: Position,
     ticks_elapsed: u32,
     outcome: TickOutcome,
+    discovered: HashSet<Position>,
 }
 
 impl Simulation {
@@ -426,12 +447,15 @@ impl Simulation {
 
     fn from_scenario(scenario: Scenario) -> Self {
         let drone_position = scenario.drone_start();
-        Simulation {
+        let mut simulation = Simulation {
             scenario,
             drone_position,
             ticks_elapsed: 0,
             outcome: TickOutcome::Running,
-        }
+            discovered: HashSet::new(),
+        };
+        simulation.reveal_local();
+        simulation
     }
 
     pub fn drone_position(&self) -> Position {
@@ -453,14 +477,34 @@ impl Simulation {
 
     /// Returns a read-only snapshot of the current tick's observable state.
     pub fn observe(&self) -> Observation {
+        let mut discovered: Vec<DiscoveredTile> = self
+            .discovered
+            .iter()
+            .map(|&position| {
+                let kind = self
+                    .scenario
+                    .tile_at(position)
+                    .expect("discovered tiles are always in bounds");
+                DiscoveredTile {
+                    position,
+                    kind,
+                    is_traversable: kind.is_traversable(),
+                    is_uplink: position == self.scenario.uplink(),
+                }
+            })
+            .collect();
+        // `HashSet` iteration order is not stable across runs, so sort for
+        // determinism.
+        discovered.sort_by_key(|tile| (tile.position.y, tile.position.x));
+
         Observation {
             drone_position: self.drone_position,
-            uplink_position: self.scenario.uplink(),
             tick: self.ticks_elapsed,
             ticks_remaining: self
                 .scenario
                 .tick_limit()
                 .saturating_sub(self.ticks_elapsed),
+            discovered,
         }
     }
 
@@ -478,6 +522,10 @@ impl Simulation {
 
         self.drone_position = next_position;
         self.ticks_elapsed += 1;
+        self.reveal_local();
+        if action == Action::Scan {
+            self.reveal_scan();
+        }
         self.outcome = if self.drone_position == self.scenario.uplink() {
             TickOutcome::Succeeded
         } else if self.ticks_elapsed >= self.scenario.tick_limit() {
@@ -499,13 +547,45 @@ impl Simulation {
             Action::MoveSouth => Position { x, y: y - 1 },
             Action::MoveEast => Position { x: x + 1, y },
             Action::MoveWest => Position { x: x - 1, y },
-            Action::Wait => Position { x, y },
+            Action::Wait | Action::Scan => Position { x, y },
         };
 
         match self.scenario.tile_at(candidate) {
             None => Err(ActionError::OutOfBounds),
             Some(tile) if tile.is_traversable() => Ok(candidate),
             Some(_) => Err(ActionError::BlockedByWall),
+        }
+    }
+
+    /// Marks the drone's current tile and its in-bounds cardinal neighbours
+    /// as discovered. Applied every tick so passive local vision is always
+    /// up to date with the drone's position.
+    fn reveal_local(&mut self) {
+        let position = self.drone_position;
+        self.discovered.insert(position);
+        for neighbour in cardinal_neighbours(position) {
+            if self.scenario.tile_at(neighbour).is_some() {
+                self.discovered.insert(neighbour);
+            }
+        }
+    }
+
+    /// Marks every in-bounds tile within Chebyshev distance 2 of the drone
+    /// as discovered. Walls do not block this: the whole documented area is
+    /// always revealed.
+    fn reveal_scan(&mut self) {
+        const SCAN_RADIUS: i32 = 2;
+        let center = self.drone_position;
+        for dy in -SCAN_RADIUS..=SCAN_RADIUS {
+            for dx in -SCAN_RADIUS..=SCAN_RADIUS {
+                let position = Position {
+                    x: center.x + dx,
+                    y: center.y + dy,
+                };
+                if self.scenario.tile_at(position).is_some() {
+                    self.discovered.insert(position);
+                }
+            }
         }
     }
 }
@@ -1020,6 +1100,17 @@ mod tests {
         assert_eq!(outcome, TickOutcome::Running);
     }
 
+    /// A discovered floor tile, for building expected `discovered` lists in
+    /// tests against the fully-open `open_scenario` map.
+    fn floor_tile(x: i32, y: i32) -> DiscoveredTile {
+        DiscoveredTile {
+            position: Position { x, y },
+            kind: TileKind::Floor,
+            is_traversable: true,
+            is_uplink: false,
+        }
+    }
+
     #[test]
     fn observe_reports_fixed_scenario_details_at_start() {
         let sim = Simulation::from_scenario(open_scenario(5));
@@ -1028,9 +1119,9 @@ mod tests {
             sim.observe(),
             Observation {
                 drone_position: Position { x: 0, y: 0 },
-                uplink_position: Position { x: 2, y: 2 },
                 tick: 0,
                 ticks_remaining: 5,
+                discovered: vec![floor_tile(0, 0), floor_tile(1, 0), floor_tile(0, 1)],
             }
         );
     }
@@ -1045,9 +1136,17 @@ mod tests {
             sim.observe(),
             Observation {
                 drone_position: Position { x: 1, y: 1 },
-                uplink_position: Position { x: 2, y: 2 },
                 tick: 2,
                 ticks_remaining: 3,
+                discovered: vec![
+                    floor_tile(0, 0),
+                    floor_tile(1, 0),
+                    floor_tile(0, 1),
+                    floor_tile(1, 1),
+                    floor_tile(2, 1),
+                    floor_tile(0, 2),
+                    floor_tile(1, 2),
+                ],
             }
         );
     }
@@ -1096,6 +1195,154 @@ mod tests {
             let outcome_a = a.step(action).unwrap();
             let outcome_b = b.step(action).unwrap();
             assert_eq!(outcome_a, outcome_b);
+            assert_eq!(a, b);
+        }
+    }
+
+    /// A 7x7 fully open map, for scan tests that need room for the 5x5 scan
+    /// area to not simply cover the whole map.
+    fn big_open_scenario(tick_limit: u32) -> Scenario {
+        let map = FacilityMap::new(
+            7,
+            7,
+            vec![TileKind::Floor; 49],
+            Position { x: 3, y: 3 },
+            Position { x: 6, y: 6 },
+        )
+        .unwrap();
+        Scenario::new(map, tick_limit)
+    }
+
+    #[test]
+    fn scan_reveals_a_five_by_five_area_around_the_drone() {
+        let mut sim = Simulation::from_scenario(big_open_scenario(20));
+        sim.step(Action::Scan).unwrap();
+
+        let discovered: HashSet<Position> = sim
+            .observe()
+            .discovered
+            .into_iter()
+            .map(|tile| tile.position)
+            .collect();
+
+        for dx in -2..=2 {
+            for dy in -2..=2 {
+                let position = Position {
+                    x: 3 + dx,
+                    y: 3 + dy,
+                };
+                assert!(
+                    discovered.contains(&position),
+                    "{position:?} should be discovered by the scan"
+                );
+            }
+        }
+        assert_eq!(discovered.len(), 25);
+    }
+
+    #[test]
+    fn scan_does_not_move_the_drone_but_advances_the_tick() {
+        let mut sim = Simulation::from_scenario(open_scenario(20));
+
+        let outcome = sim.step(Action::Scan).unwrap();
+
+        assert_eq!(sim.drone_position(), Position { x: 0, y: 0 });
+        assert_eq!(sim.ticks_elapsed(), 1);
+        assert_eq!(outcome, TickOutcome::Running);
+    }
+
+    #[test]
+    fn scan_reveals_walls_without_occlusion() {
+        // The wall at (1, 1) is diagonal from the start, so passive local
+        // vision (cardinal neighbours only) never reveals it; only a scan
+        // does.
+        let mut sim = Simulation::from_scenario(walled_scenario());
+
+        sim.step(Action::Scan).unwrap();
+
+        let tile = sim
+            .observe()
+            .discovered
+            .into_iter()
+            .find(|tile| tile.position == Position { x: 1, y: 1 })
+            .expect("the wall at (1, 1) should be discovered by the scan");
+
+        assert_eq!(tile.kind, TileKind::Wall);
+        assert!(!tile.is_traversable);
+    }
+
+    #[test]
+    fn scan_at_a_map_corner_only_discovers_in_bounds_tiles() {
+        let mut sim = Simulation::from_scenario(open_scenario(20));
+
+        sim.step(Action::Scan).unwrap();
+
+        for tile in sim.observe().discovered {
+            assert!((0..3).contains(&tile.position.x));
+            assert!((0..3).contains(&tile.position.y));
+        }
+    }
+
+    #[test]
+    fn discoveries_persist_after_the_drone_moves_away() {
+        let mut sim = Simulation::from_scenario(open_scenario(20));
+        sim.step(Action::Scan).unwrap();
+        let discovered_after_scan: HashSet<Position> = sim
+            .observe()
+            .discovered
+            .into_iter()
+            .map(|tile| tile.position)
+            .collect();
+
+        sim.step(Action::MoveNorth).unwrap();
+        sim.step(Action::MoveNorth).unwrap();
+
+        let discovered_now: HashSet<Position> = sim
+            .observe()
+            .discovered
+            .into_iter()
+            .map(|tile| tile.position)
+            .collect();
+
+        for position in discovered_after_scan {
+            assert!(discovered_now.contains(&position));
+        }
+    }
+
+    #[test]
+    fn undiscovered_uplink_and_hazard_are_not_in_the_observation() {
+        let sim = Simulation::from_scenario(walled_scenario());
+
+        let discovered = sim.observe().discovered;
+
+        assert!(discovered.iter().all(|tile| !tile.is_uplink));
+        assert!(discovered.iter().all(|tile| tile.kind != TileKind::Hazard));
+    }
+
+    #[test]
+    fn moving_expands_the_discovered_set() {
+        let mut sim = Simulation::from_scenario(open_scenario(20));
+        let before = sim.observe().discovered.len();
+
+        sim.step(Action::MoveNorth).unwrap();
+
+        assert!(sim.observe().discovered.len() > before);
+    }
+
+    #[test]
+    fn identical_action_sequences_including_scans_produce_identical_states() {
+        let actions = [
+            Action::MoveNorth,
+            Action::Scan,
+            Action::MoveEast,
+            Action::Scan,
+        ];
+
+        let mut a = Simulation::from_scenario(open_scenario(20));
+        let mut b = Simulation::from_scenario(open_scenario(20));
+
+        for action in actions {
+            assert_eq!(a.step(action), b.step(action));
             assert_eq!(a, b);
         }
     }
