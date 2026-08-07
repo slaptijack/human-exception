@@ -32,6 +32,8 @@ jobs:
         run: cargo test --locked --all-targets --all-features
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Install lcov
+        run: sudo apt-get update && sudo apt-get install -y lcov
       - name: Generate coverage report
         run: cargo llvm-cov --locked --all-targets --all-features --lcov --output-path lcov.info
       - name: Upload coverage artifact
