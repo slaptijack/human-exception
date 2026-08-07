@@ -122,6 +122,23 @@ fn each_tick_reports_position_action_and_remaining_time() {
 }
 
 #[test]
+fn each_tick_is_preceded_by_a_satellite_view_of_discovered_terrain() {
+    let output = bin()
+        .arg(example_path("first_contact.lua"))
+        .output()
+        .expect("binary should run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(stdout.contains("SATELLITE FEED // discovered terrain"));
+    assert!(
+        stdout
+            .contains("legend: D drone   U uplink   . floor   # wall   ~ hazard   ? undiscovered")
+    );
+    // The first frame reflects tick 1's completed move north to (0, 1).
+    assert!(stdout.contains("y=1 |   D   .   ?   ?   ?"));
+}
+
+#[test]
 fn a_hazard_route_script_reports_the_hazard_telemetry_line_and_lower_final_budget() {
     let output = bin()
         .arg(fixture_path("hazard_route.lua"))

@@ -19,7 +19,8 @@ use std::path::{Path, PathBuf};
 use mlua::{Function, Lua, Table};
 
 use crate::simulation::{
-    Action, ActionError, Observation, Position, SimEvent, Simulation, TickOutcome, TileKind,
+    Action, ActionError, DiscoveredTile, Observation, Position, SimEvent, Simulation, TickOutcome,
+    TileKind,
 };
 
 /// The name of the one callback a player script must define.
@@ -88,6 +89,9 @@ pub struct TickRecord {
     pub budget_remaining: u32,
     pub outcome: TickOutcome,
     pub events: Vec<SimEvent>,
+    pub map_width: i32,
+    pub map_height: i32,
+    pub discovered: Vec<DiscoveredTile>,
 }
 
 /// Loads `script_path`, then drives a fresh [`Simulation`] to completion by
@@ -133,6 +137,7 @@ pub fn run(
             .map_err(|err| invalid_action_error(&response, err))?;
 
         let obs = simulation.observe();
+        let map = simulation.map();
         observer(TickRecord {
             tick: obs.tick,
             drone_position: obs.drone_position,
@@ -140,6 +145,9 @@ pub fn run(
             budget_remaining: obs.budget_remaining,
             outcome: report.outcome,
             events: report.events,
+            map_width: map.width(),
+            map_height: map.height(),
+            discovered: obs.discovered,
         });
 
         if report.outcome != TickOutcome::Running {

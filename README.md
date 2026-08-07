@@ -30,7 +30,7 @@ Human Exception is written in Rust. Install a current stable Rust toolchain, the
 cargo run -- examples/first_contact.lua
 ```
 
-This loads the checked-in example script, runs the fixed "first contact" training operation, and prints tick-by-tick telemetry followed by a final success or failure report.
+This loads the checked-in example script, runs the fixed "first contact" training operation, and prints a satellite view and tick-by-tick telemetry for every tick, followed by a final success or failure report.
 
 Run `human-exception --help` for usage, or `human-exception --version` for the build's firmware version.
 
@@ -68,6 +68,30 @@ Each entry in `observation.discovered` is a table `{ x, y, tile, traversable, up
 `on_tick` must return one of `"north"`, `"south"`, `"east"`, `"west"`, `"wait"`, or `"scan"`. Any other value, a move that would leave the map, or a move into a wall, ends the run with an error and does not consume budget.
 
 Every action — a move, `"wait"`, or `"scan"` — costs 1 budget. `"scan"` does not move the drone; it reveals every tile within 2 tiles of the drone in any direction (a 5x5 area, including diagonals), regardless of walls in the way — scanning is not blocked by line of sight. Moving onto a hazard tile costs an additional 5 budget on top of the action's base cost, charged only on the tick the drone enters it; waiting on a hazard, or continuing to occupy one, costs nothing extra. Discoveries, whether from passive local vision or a scan, persist for the rest of the run. The operation fails if the budget is exhausted before the drone reaches the uplink; reaching the uplink always succeeds, even on the same action that would have exhausted the budget.
+
+### The satellite view
+
+Before each tick's telemetry line, the console prints a compact satellite view: a grid of the terrain the drone has discovered so far, drawn north-up (highest `y` at the top, matching the layout table above). Tiles the drone hasn't discovered yet — through passive local vision or a `"scan"` — are never shown, even if they're a wall, the hazard, or the uplink.
+
+```
+SATELLITE FEED // discovered terrain
+     x=0 x=1 x=2 x=3 x=4
+y=4 |   ?   ?   ?   ?   ?
+y=3 |   ?   ?   ?   ?   ?
+y=2 |   ?   ?   ?   ?   ?
+y=1 |   .   ?   ?   ?   ?
+y=0 |   D   #   ?   ?   ?
+legend: D drone   U uplink   . floor   # wall   ~ hazard   ? undiscovered
+```
+
+| symbol | meaning |
+| --- | --- |
+| `D` | the drone's current position |
+| `U` | a discovered uplink tile |
+| `.` | discovered floor |
+| `#` | discovered wall |
+| `~` | discovered hazard |
+| `?` | not yet discovered |
 
 Run a controller with:
 
