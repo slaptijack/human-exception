@@ -122,6 +122,20 @@ fn each_tick_reports_position_action_and_remaining_time() {
 }
 
 #[test]
+fn a_hazard_route_script_reports_the_hazard_telemetry_line_and_lower_final_budget() {
+    let output = bin()
+        .arg(fixture_path("hazard_route.lua"))
+        .output()
+        .expect("binary should run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success());
+    assert!(stdout.contains("UPLINK ESTABLISHED"));
+    assert!(stdout.contains("tick  6 | drone (4, 2) | action: north | budget remaining: 4"));
+    assert!(stdout.contains("hazard triggered at (4, 2): -5 budget"));
+}
+
+#[test]
 fn a_wait_only_script_reports_mission_failure() {
     let output = bin()
         .arg(fixture_path("always_wait.lua"))

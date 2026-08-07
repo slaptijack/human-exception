@@ -393,7 +393,9 @@ pub enum SimEvent {
     /// The drone moved onto a hazard tile this tick, incurring an
     /// additional cost on top of the action's base cost.
     HazardEntered { position: Position, amount: u32 },
-    /// The drone reached the uplink with budget remaining.
+    /// The drone reached the uplink. This is checked, and takes
+    /// precedence, before budget-exhaustion failure is applied, so it can
+    /// still occur on the same action that brings the budget to zero.
     OperationSucceeded,
     /// The budget was exhausted before the uplink was reached.
     BudgetExhausted,
