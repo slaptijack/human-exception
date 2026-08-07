@@ -378,6 +378,32 @@ fn target_provenance_lines(dossier: &TargetDossier) -> Vec<Line<'static>> {
     lines
 }
 
+/// The Help pane's inner (content) dimensions for a given full frame size,
+/// matching the header/footer/border geometry [`draw`] and [`draw_help`]
+/// actually use. Exposed so callers outside this module (the event loop)
+/// can bound `help_scroll` against the real viewport without duplicating
+/// that layout math.
+pub(crate) fn help_inner_dimensions(frame_width: u16, frame_height: u16) -> (u16, u16) {
+    if frame_width < MIN_COLUMNS || frame_height < MIN_ROWS {
+        return (0, 0);
+    }
+    const HEADER_AND_FOOTER_HEIGHT: u16 = 6; // draw()'s two Length(3) rows
+    const BORDER_INSET: u16 = 2; // draw_help()'s own Block::borders(ALL)
+    let body_height = frame_height.saturating_sub(HEADER_AND_FOOTER_HEIGHT);
+    (
+        frame_width.saturating_sub(BORDER_INSET),
+        body_height.saturating_sub(BORDER_INSET),
+    )
+}
+
+/// How far `help_scroll` can advance before it would scroll past the last
+/// rendered row of Help's content at this frame size.
+pub(crate) fn help_max_scroll(state: &AppState, frame_width: u16, frame_height: u16) -> u16 {
+    let (content_width, content_height) = help_inner_dimensions(frame_width, frame_height);
+    let content_rows = wrapped_row_count(&help_lines(state), content_width);
+    content_rows.saturating_sub(content_height as usize) as u16
+}
+
 fn draw_help(frame: &mut Frame, area: Rect, state: &AppState) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -386,9 +412,10 @@ fn draw_help(frame: &mut Frame, area: Rect, state: &AppState) {
     frame.render_widget(block, area);
 
     let lines = help_lines(state);
-    // `state.help_scroll()` only enforces a coarse upper bound; clamp it
-    // again here against the content actually rendered at this viewport so
-    // scrolling can never run past the last wrapped row into a blank pane.
+    // The event loop already clamps the stored offset via `help_max_scroll`
+    // as each scroll key arrives; this recomputes against the exact `inner`
+    // Rect as a second, render-time backstop (e.g. for the very first draw,
+    // or a caller that renders without going through that event loop).
     let content_rows = wrapped_row_count(&lines, inner.width);
     let max_scroll = content_rows.saturating_sub(inner.height as usize) as u16;
     let scroll = state.help_scroll().min(max_scroll);

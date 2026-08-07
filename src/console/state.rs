@@ -126,6 +126,15 @@ impl AppState {
         self.help_scroll
     }
 
+    /// Bounds the stored scroll offset itself against `max`, not just the
+    /// value used for a single render. Without this, repeated `Down`
+    /// presses can advance `help_scroll` toward `MAX_HELP_SCROLL` even once
+    /// the content is fully visible, and `Up` then appears to do nothing
+    /// until the stored offset drops back below the real maximum.
+    pub fn clamp_help_scroll(&mut self, max: u16) {
+        self.help_scroll = self.help_scroll.min(max);
+    }
+
     pub fn should_quit(&self) -> bool {
         self.should_quit
     }

@@ -35,7 +35,13 @@ pub fn map(key: KeyEvent, current_view: View) -> Option<Msg> {
         // stays inert rather than claiming to run anything; ui::draw_footer
         // renders it visibly dimmed to match.
         KeyCode::F(6) => None,
-        KeyCode::F(8) => Some(Msg::ToggleSecondaryPane),
+        // F8's narrow-layout pane toggle only applies to Signals/Target
+        // (`docs/TUI_DESIGN.md`, "Responsive behavior"); mapping it
+        // elsewhere — e.g. while Help is open — would flip the hidden
+        // toggle without a resize or navigation to ever reset it.
+        KeyCode::F(8) if current_view == View::Signals || current_view == View::Target => {
+            Some(Msg::ToggleSecondaryPane)
+        }
         KeyCode::Enter if current_view == View::Signals || current_view == View::Target => {
             Some(Msg::Activate)
         }
@@ -129,6 +135,22 @@ mod tests {
             map(key(KeyCode::F(8)), View::Signals),
             Some(Msg::ToggleSecondaryPane)
         );
+        assert_eq!(
+            map(key(KeyCode::F(8)), View::Target),
+            Some(Msg::ToggleSecondaryPane)
+        );
+    }
+
+    #[test]
+    fn f8_is_inert_outside_signals_and_target() {
+        for view in [
+            View::Controller,
+            View::Operation,
+            View::AfterAction,
+            View::Help,
+        ] {
+            assert_eq!(map(key(KeyCode::F(8)), view), None);
+        }
     }
 
     #[test]

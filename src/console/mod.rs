@@ -24,7 +24,7 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
-use state::AppState;
+use state::{AppState, Msg};
 
 type PanicHook = dyn Fn(&PanicHookInfo<'_>) + Sync + Send + 'static;
 
@@ -86,13 +86,22 @@ fn restore_terminal() -> io::Result<()> {
 /// [`ui::draw`] so it can also be driven against `TestBackend` in tests.
 fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
     let mut state = AppState::new();
+    let mut frame_size = (0u16, 0u16);
 
-    terminal.draw(|frame| ui::draw(frame, &state))?;
+    terminal.draw(|frame| {
+        let area = frame.area();
+        frame_size = (area.width, area.height);
+        ui::draw(frame, &state);
+    })?;
 
     while !state.should_quit() {
         let event = term_event::read()?;
-        if should_redraw(&mut state, event) {
-            terminal.draw(|frame| ui::draw(frame, &state))?;
+        if should_redraw(&mut state, event, frame_size) {
+            terminal.draw(|frame| {
+                let area = frame.area();
+                frame_size = (area.width, area.height);
+                ui::draw(frame, &state);
+            })?;
         }
     }
 
@@ -100,13 +109,17 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resu
 }
 
 /// Applies a single terminal event to `state`, returning whether the frame
-/// needs to be redrawn as a result.
+/// needs to be redrawn as a result. `frame_size` is the frame's size as of
+/// the most recent draw — slightly stale for the resize event that changes
+/// it, but accurate again by the time the next key event arrives — and
+/// exists only to bound `help_scroll` against the viewport it will actually
+/// render into.
 ///
 /// A resize always needs a redraw, since the geometry warning (or the shell
 /// it replaces) depends on the frame size, not on any key event. It also
 /// clears layout-specific state (the narrow-mode secondary-pane toggle) so
 /// it can't leak across a change in available width.
-fn should_redraw(state: &mut AppState, event: Event) -> bool {
+fn should_redraw(state: &mut AppState, event: Event, frame_size: (u16, u16)) -> bool {
     if matches!(event, Event::Resize(_, _)) {
         state.handle_resize();
         return true;
@@ -122,6 +135,10 @@ fn should_redraw(state: &mut AppState, event: Event) -> bool {
     match event::map(key, state.current_view()) {
         Some(msg) => {
             state.apply(msg);
+            if matches!(msg, Msg::ScrollHelpUp | Msg::ScrollHelpDown) {
+                let max = ui::help_max_scroll(state, frame_size.0, frame_size.1);
+                state.clamp_help_scroll(max);
+            }
             true
         }
         None => false,
@@ -153,7 +170,7 @@ mod tests {
             .expect("initial draw should succeed");
 
         for event in events {
-            if should_redraw(&mut state, event.clone()) {
+            if should_redraw(&mut state, event.clone(), (width, height)) {
                 terminal
                     .draw(|frame| ui::draw(frame, &state))
                     .expect("redraw should succeed");
@@ -228,7 +245,7 @@ mod tests {
             let event = events
                 .next()
                 .expect("script should quit before running out");
-            should_redraw(&mut state, event);
+            should_redraw(&mut state, event, (120, 40));
         }
 
         assert!(state.should_quit());
@@ -290,7 +307,7 @@ mod tests {
         assert!(buffer_contains(&terminal, "Terminal link degraded."));
 
         terminal.backend_mut().resize(120, 40);
-        if should_redraw(&mut state, Event::Resize(120, 40)) {
+        if should_redraw(&mut state, Event::Resize(120, 40), (120, 40)) {
             terminal
                 .draw(|frame| ui::draw(frame, &state))
                 .expect("redraw should succeed");
@@ -304,8 +321,30 @@ mod tests {
         let (mut state, _) = render(90, 30, &[press(KeyCode::F(8))]);
         assert!(state.narrow_secondary_visible());
 
-        should_redraw(&mut state, Event::Resize(90, 30));
+        should_redraw(&mut state, Event::Resize(90, 30), (90, 30));
 
         assert!(!state.narrow_secondary_visible());
+    }
+
+    #[test]
+    fn help_scroll_offset_stays_bounded_to_the_viewport_not_just_the_render() {
+        let (mut state, _) = render(120, 40, &[press(KeyCode::F(1))]);
+        for _ in 0..100 {
+            should_redraw(&mut state, press(KeyCode::Down), (120, 40));
+        }
+        let bound = state.help_scroll();
+        assert!(
+            bound < 100,
+            "offset should be clamped to the real content at this viewport, \
+             not just the coarse MAX_HELP_SCROLL constant"
+        );
+
+        should_redraw(&mut state, press(KeyCode::Up), (120, 40));
+
+        assert_eq!(
+            state.help_scroll(),
+            bound - 1,
+            "Up should immediately move the stored offset, not appear stuck"
+        );
     }
 }
