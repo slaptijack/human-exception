@@ -1,4 +1,4 @@
-//! The Lua controller boundary for the training simulation.
+//! The Lua controller boundary for the reconnaissance simulation.
 //!
 //! A player script is required to define one global callback, [`ON_TICK`],
 //! invoked once per tick with a read-only [`Observation`]. The callback must
