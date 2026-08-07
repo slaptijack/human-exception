@@ -119,15 +119,34 @@ fn view_body(view: View) -> Vec<Line<'static>> {
             Line::from("F4 Controller    the Lua editor for the working set"),
             Line::from("F5 Operation     the live satellite/telemetry view"),
             Line::from("F6 Deploy        run the current controller"),
+            Line::from("                 (unavailable: no controller is loaded yet, see #44/#45)"),
             Line::from("Ctrl+Q Quit      exit and restore the terminal"),
         ],
     }
 }
 
+const FOOTER_LEFT_HINTS: &str = "F1 Help F2 Signals F3 Target F4 Controller F5 Operation F6 Deploy";
+const FOOTER_RIGHT_HINT: &str = "Ctrl+Q Quit";
+
 fn draw_footer(frame: &mut Frame, area: Rect) {
-    let hints = Line::from(
-        "F1 Help   F2 Signals   F3 Target   F4 Controller   F5 Operation   F6 Deploy                Ctrl+Q Quit",
-    );
+    // F6 has no prerequisite controller to deploy yet (see #44/#45), so it's
+    // rendered dimmed rather than claiming it runs anything. Help (F1)
+    // explains why, since dimming alone shouldn't be the only signal.
+    let f6_start = FOOTER_LEFT_HINTS
+        .find("F6")
+        .expect("FOOTER_LEFT_HINTS always contains the F6 hint");
+    let (before_f6, f6_and_after) = FOOTER_LEFT_HINTS.split_at(f6_start);
+
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let used = FOOTER_LEFT_HINTS.len() + 1 + FOOTER_RIGHT_HINT.len();
+    let padding = " ".repeat(inner_width.saturating_sub(used).max(1));
+
+    let hints = Line::from(vec![
+        Span::raw(before_f6),
+        Span::styled(f6_and_after, Style::default().add_modifier(Modifier::DIM)),
+        Span::raw(padding),
+        Span::raw(FOOTER_RIGHT_HINT),
+    ]);
     frame.render_widget(
         Paragraph::new(hints).block(Block::default().borders(Borders::ALL)),
         area,

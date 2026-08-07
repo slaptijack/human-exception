@@ -27,9 +27,10 @@ pub fn map(key: KeyEvent, help_is_open: bool) -> Option<Msg> {
         KeyCode::F(3) => Some(Msg::Navigate(View::Target)),
         KeyCode::F(4) => Some(Msg::Navigate(View::Controller)),
         KeyCode::F(5) => Some(Msg::Navigate(View::Operation)),
-        // Real deploy semantics arrive with #44/#45; for now F6 only
-        // previews the Operation placeholder like F5 does.
-        KeyCode::F(6) => Some(Msg::Navigate(View::Operation)),
+        // F6 Deploy has no controller to deploy yet (see #44/#45), so it
+        // stays inert rather than claiming to run anything; ui::draw_footer
+        // renders it visibly dimmed to match.
+        KeyCode::F(6) => None,
         _ => None,
     }
 }
@@ -90,10 +91,11 @@ mod tests {
             map(key(KeyCode::F(5)), false),
             Some(Msg::Navigate(View::Operation))
         );
-        assert_eq!(
-            map(key(KeyCode::F(6)), false),
-            Some(Msg::Navigate(View::Operation))
-        );
+    }
+
+    #[test]
+    fn f6_deploy_is_inert_until_a_controller_can_be_loaded() {
+        assert_eq!(map(key(KeyCode::F(6)), false), None);
     }
 
     #[test]

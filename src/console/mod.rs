@@ -11,8 +11,10 @@ pub mod state;
 pub mod ui;
 
 use std::io;
-use std::panic;
+use std::panic::{self, PanicHookInfo};
+use std::sync::Arc;
 
+use crossterm::cursor::Show;
 use crossterm::event::{self as term_event, Event, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -23,33 +25,58 @@ use ratatui::backend::CrosstermBackend;
 
 use state::{AppState, View};
 
+type PanicHook = dyn Fn(&PanicHookInfo<'_>) + Sync + Send + 'static;
+
 /// Enters the interactive resistance-console session against a real
 /// terminal, and restores the terminal on every exit path, including a
 /// panic.
 pub fn run() -> io::Result<()> {
     enable_raw_mode()?;
-    execute!(io::stdout(), EnterAlternateScreen)?;
+    if let Err(err) = execute!(io::stdout(), EnterAlternateScreen) {
+        let _ = disable_raw_mode();
+        return Err(err);
+    }
 
-    let default_hook = panic::take_hook();
-    panic::set_hook(Box::new(move |info| {
-        let _ = restore_terminal();
-        default_hook(info);
-    }));
+    let previous_hook = install_panic_hook();
 
     let backend = CrosstermBackend::new(io::stdout());
-    let mut terminal = Terminal::new(backend)?;
+    let mut terminal = match Terminal::new(backend) {
+        Ok(terminal) => terminal,
+        Err(err) => {
+            restore_panic_hook(previous_hook);
+            let _ = restore_terminal();
+            return Err(err);
+        }
+    };
 
     let result = event_loop(&mut terminal);
 
-    let _ = panic::take_hook();
+    restore_panic_hook(previous_hook);
     restore_terminal()?;
 
     result
 }
 
+/// Installs a panic hook that restores the terminal before delegating to
+/// whatever hook the host application had configured, and returns that
+/// original hook so it can be reinstated once the session ends normally.
+fn install_panic_hook() -> Arc<PanicHook> {
+    let previous: Arc<PanicHook> = Arc::from(panic::take_hook());
+    let for_hook = Arc::clone(&previous);
+    panic::set_hook(Box::new(move |info| {
+        let _ = restore_terminal();
+        for_hook(info);
+    }));
+    previous
+}
+
+fn restore_panic_hook(previous: Arc<PanicHook>) {
+    panic::set_hook(Box::new(move |info| previous(info)));
+}
+
 fn restore_terminal() -> io::Result<()> {
     disable_raw_mode()?;
-    execute!(io::stdout(), LeaveAlternateScreen)?;
+    execute!(io::stdout(), LeaveAlternateScreen, Show)?;
     Ok(())
 }
 
