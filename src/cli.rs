@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use clap::error::{ContextKind, ContextValue, ErrorKind};
 use clap::{CommandFactory, FromArgMatches, Parser};
 
-use human_exception::{Action, FailureReason, TickOutcome, TickRecord};
+use human_exception::{Action, FailureReason, SimEvent, TickOutcome, TickRecord};
 
 const BANNER: &str = "HUMAN EXCEPTION // resistance console";
 
@@ -95,6 +95,9 @@ fn run_operation(script: &Path) -> i32 {
     let result = human_exception::lua_controller::run(script, |record| {
         tick_count = record.tick;
         println!("{}", format_tick_line(&record));
+        for line in format_event_lines(&record) {
+            println!("{line}");
+        }
     });
 
     match result {
@@ -121,13 +124,27 @@ fn run_operation(script: &Path) -> i32 {
 
 fn format_tick_line(record: &TickRecord) -> String {
     format!(
-        "tick {:>2} | drone ({}, {}) | action: {} | uplink in {} tick(s)",
+        "tick {:>2} | drone ({}, {}) | action: {} | budget remaining: {}",
         record.tick,
         record.drone_position.x,
         record.drone_position.y,
         format_action(record.action),
-        record.ticks_remaining,
+        record.budget_remaining,
     )
+}
+
+fn format_event_lines(record: &TickRecord) -> Vec<String> {
+    record
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            SimEvent::HazardEntered { position, amount } => Some(format!(
+                "  hazard triggered at ({}, {}): -{amount} budget",
+                position.x, position.y
+            )),
+            _ => None,
+        })
+        .collect()
 }
 
 fn format_action(action: Action) -> &'static str {
@@ -143,8 +160,8 @@ fn format_action(action: Action) -> &'static str {
 
 fn format_failure(reason: FailureReason) -> String {
     match reason {
-        FailureReason::TickLimitReached => {
-            "the operation ran out of time before reaching the uplink".to_string()
+        FailureReason::BudgetExhausted => {
+            "the operation ran out of budget before reaching the uplink".to_string()
         }
     }
 }

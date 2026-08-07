@@ -31,12 +31,24 @@ fn a_controller_that_scans_before_navigating_still_reaches_the_uplink() {
 }
 
 #[test]
-fn a_waiting_controller_fails_at_the_tick_limit() {
+fn a_waiting_controller_fails_when_the_budget_is_exhausted() {
     let outcome = lua_controller::run(&fixture("always_wait.lua"), |_| {}).unwrap();
-    assert_eq!(
-        outcome,
-        TickOutcome::Failed(FailureReason::TickLimitReached)
-    );
+    assert_eq!(outcome, TickOutcome::Failed(FailureReason::BudgetExhausted));
+}
+
+#[test]
+fn a_controller_that_routes_through_the_hazard_reports_a_hazard_entered_event() {
+    let mut ticks = Vec::new();
+    let outcome =
+        lua_controller::run(&fixture("hazard_route.lua"), |record| ticks.push(record)).unwrap();
+
+    assert_eq!(outcome, TickOutcome::Succeeded);
+    assert!(ticks.iter().any(|record| {
+        record
+            .events
+            .iter()
+            .any(|event| matches!(event, human_exception::SimEvent::HazardEntered { .. }))
+    }));
 }
 
 #[test]

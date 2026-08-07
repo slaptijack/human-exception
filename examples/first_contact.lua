@@ -4,8 +4,9 @@
 --   cargo run -- examples/first_contact.lua
 --
 -- Each tick, on_tick(observation) receives a read-only snapshot of the
--- drone's own position, the current tick, the ticks remaining, and
--- observation.discovered: every tile learned about so far (its own tile
+-- drone's own position, the current tick, the operational budget
+-- remaining (observation.budget_remaining), and observation.discovered:
+-- every tile learned about so far (its own tile
 -- and cardinal neighbours every tick, plus anything revealed by a
 -- completed "scan"). It must return one action name: "north", "south",
 -- "east", "west", "wait", or "scan". This script only ever moves onto a
