@@ -84,6 +84,10 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
             let confidence = format!("CONFIDENCE: {}", dossier.confidence_summary);
             vec![
                 format!("MESH: DEGRADED   {target}   {confidence}   {working}"),
+                // Confidence is the lowest-priority field here — drop it,
+                // not MESH, so Target doesn't lose link condition while
+                // every other view keeps it at the same widths.
+                format!("MESH: DEGRADED   {target}   {working}"),
                 format!("{target}   {confidence}   {working}"),
                 format!("{target}   {working}"),
             ]
@@ -510,6 +514,15 @@ fn help_lines(state: &AppState) -> Vec<Line<'static>> {
     lines.push(Line::from(
         "                               {x, y, tile, traversable, uplink}",
     ));
+    lines.push(Line::from(
+        "  tile          \"floor\", \"wall\", or \"hazard\"",
+    ));
+    lines.push(Line::from(
+        "  traversable   whether the drone could occupy that tile",
+    ));
+    lines.push(Line::from(
+        "  uplink        whether it's the network-uplink objective",
+    ));
     lines.push(Line::from(""));
     lines.push(Line::from(
         "valid return values: north south east west wait scan",
@@ -833,6 +846,43 @@ mod tests {
         let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
 
         assert!(buffer_contains(&terminal, "WORKING SET: FIRST CONTACT"));
+    }
+
+    #[test]
+    fn target_header_keeps_link_condition_at_minimum_width_before_and_after_commitment() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+        assert!(
+            buffer_contains(&terminal, "MESH: DEGRADED"),
+            "Target should keep link condition before committing, like every other view"
+        );
+
+        state.apply(Msg::Activate);
+        state.apply(Msg::Navigate(View::Target));
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+        assert!(
+            buffer_contains(&terminal, "MESH: DEGRADED"),
+            "Target should keep link condition after committing too"
+        );
+    }
+
+    #[test]
+    fn help_documents_discovered_tile_field_meanings() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::OpenHelp);
+        let terminal = render(120, 60, &state);
+
+        assert!(buffer_contains(
+            &terminal,
+            "\"floor\", \"wall\", or \"hazard\""
+        ));
+        assert!(buffer_contains(&terminal, "whether the drone could occupy"));
+        assert!(buffer_contains(&terminal, "network-uplink objective"));
     }
 
     #[test]
