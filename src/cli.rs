@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use clap::error::{ContextKind, ContextValue, ErrorKind};
@@ -50,11 +51,12 @@ pub fn run() {
                 return;
             }
 
-            println!("{BANNER}");
-
             match cli.script {
-                None => println!("No active satellite link. System bootstrap complete."),
-                Some(script) => std::process::exit(run_operation(&script)),
+                None => std::process::exit(enter_console()),
+                Some(script) => {
+                    println!("{BANNER}");
+                    std::process::exit(run_operation(&script));
+                }
             }
         }
         Err(e) if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) => {
@@ -80,6 +82,27 @@ fn bad_argument_detail(error: &clap::Error) -> String {
     match arg {
         Some(ContextValue::String(value)) => format!("unrecognized directive '{value}'"),
         _ => "unrecognized directive".to_string(),
+    }
+}
+
+/// Enters the persistent resistance-console session when a real terminal is
+/// attached, or prints the bootstrap banner and returns immediately when it
+/// isn't (piped/redirected stdio, as in noninteractive CI invocations).
+/// Returns the process exit code.
+fn enter_console() -> i32 {
+    if !std::io::stdout().is_terminal() || !std::io::stdin().is_terminal() {
+        println!("{BANNER}");
+        println!("No active satellite link. System bootstrap complete.");
+        return 0;
+    }
+
+    match human_exception::console::run() {
+        Ok(()) => 0,
+        Err(err) => {
+            eprintln!("{BANNER}");
+            eprintln!("Uplink rejected: console session failed: {err}");
+            3
+        }
     }
 }
 
