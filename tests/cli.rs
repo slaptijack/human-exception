@@ -129,7 +129,30 @@ fn each_tick_is_preceded_by_a_satellite_view_of_discovered_terrain() {
         .expect("binary should run");
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    assert!(stdout.contains("SATELLITE FEED // discovered terrain"));
+    // Every satellite frame header and every tick telemetry line, in the
+    // order they were printed: this proves the two counts match (one frame
+    // per tick, not just at least one) and that each frame immediately
+    // precedes its tick's line, not just appears somewhere in the output.
+    let events: Vec<&str> = stdout
+        .lines()
+        .filter(|line| *line == "SATELLITE FEED // discovered terrain" || line.starts_with("tick "))
+        .collect();
+
+    assert!(!events.is_empty(), "expected at least one tick to run");
+    assert_eq!(
+        events.len() % 2,
+        0,
+        "expected a matched satellite frame for every tick line, got {events:?}"
+    );
+    for pair in events.chunks(2) {
+        assert_eq!(pair[0], "SATELLITE FEED // discovered terrain");
+        assert!(
+            pair[1].starts_with("tick "),
+            "expected a tick line immediately after each satellite frame, got {:?}",
+            pair[1]
+        );
+    }
+
     assert!(
         stdout
             .contains("legend: D drone   U uplink   . floor   # wall   ~ hazard   ? undiscovered")
