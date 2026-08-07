@@ -42,6 +42,8 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets --all-features
 ```
 
+To generate a test coverage report locally, install [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) and run `cargo llvm-cov --open`. CI reports coverage on every pull request but does not enforce a minimum.
+
 ## Writing a controller
 
 A controller is a Lua script that defines one global callback:
