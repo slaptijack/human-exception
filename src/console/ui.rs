@@ -92,11 +92,26 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
                 format!("{target}   {working}"),
             ]
         }
-        _ => vec![
-            format!("MESH: DEGRADED   SATLINK: COMPROMISED   {working}"),
-            format!("SATLINK: COMPROMISED   {working}"),
-            working.clone(),
-        ],
+        _ => {
+            // No Lua editing exists yet (#44), so "starter" is the only
+            // controller state reachable once a working set seeds source;
+            // "modified"/"invalid" become possible once editing does.
+            match state.controller_source() {
+                Some(_) => vec![
+                    format!(
+                        "MESH: DEGRADED   SATLINK: COMPROMISED   CONTROLLER: starter   {working}"
+                    ),
+                    format!("SATLINK: COMPROMISED   CONTROLLER: starter   {working}"),
+                    format!("CONTROLLER: starter   {working}"),
+                    working.clone(),
+                ],
+                None => vec![
+                    format!("MESH: DEGRADED   SATLINK: COMPROMISED   {working}"),
+                    format!("SATLINK: COMPROMISED   {working}"),
+                    working.clone(),
+                ],
+            }
+        }
     };
 
     let inner_width = area.width.saturating_sub(2) as usize;
@@ -475,15 +490,21 @@ fn help_lines(state: &AppState) -> Vec<Line<'static>> {
     )));
     lines.push(Line::from("F1 Help          toggle this overlay"));
     lines.push(Line::from("F2 Signals       the intelligence stream"));
-    lines.push(Line::from(
-        "F3 Target        dossier for the current opportunity",
-    ));
-    lines.push(Line::from(
-        "F4 Controller    the Lua editor for the working set",
-    ));
-    lines.push(Line::from(
-        "F5 Operation     the live satellite/telemetry view",
-    ));
+    lines.push(Line::from(if state.view_available(View::Target) {
+        "F3 Target        dossier for the current opportunity"
+    } else {
+        "F3 Target        (unavailable: inspect the [OPEN] signal first)"
+    }));
+    lines.push(Line::from(if state.view_available(View::Controller) {
+        "F4 Controller    the Lua editor for the working set"
+    } else {
+        "F4 Controller    (unavailable: work an opportunity from Target first)"
+    }));
+    lines.push(Line::from(if state.view_available(View::Operation) {
+        "F5 Operation     the live satellite/telemetry view"
+    } else {
+        "F5 Operation     (unavailable: work an opportunity from Target first)"
+    }));
     lines.push(Line::from(
         "F6 Deploy        run the current controller (unavailable, see #44/#45)",
     ));
@@ -975,5 +996,54 @@ mod tests {
 
         assert!(buffer_contains(&terminal, "Starter controller loaded"));
         assert!(!buffer_contains(&terminal, "No controller is loaded yet."));
+    }
+
+    #[test]
+    fn controller_header_shows_the_seeded_controller_state() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        let terminal = render(120, 40, &state);
+
+        assert!(buffer_contains(&terminal, "CONTROLLER: starter"));
+    }
+
+    #[test]
+    fn help_marks_gated_navigation_keys_as_unavailable() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::OpenHelp);
+        let terminal = render(120, 60, &state);
+
+        assert!(buffer_contains(
+            &terminal,
+            "F3 Target        (unavailable: inspect the [OPEN] signal first)"
+        ));
+        assert!(buffer_contains(
+            &terminal,
+            "F4 Controller    (unavailable: work an opportunity from Target first)"
+        ));
+        assert!(buffer_contains(
+            &terminal,
+            "F5 Operation     (unavailable: work an opportunity from Target first)"
+        ));
+    }
+
+    #[test]
+    fn help_marks_target_available_once_inspected() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::OpenHelp);
+        let terminal = render(120, 60, &state);
+
+        assert!(buffer_contains(
+            &terminal,
+            "F3 Target        dossier for the current opportunity"
+        ));
     }
 }

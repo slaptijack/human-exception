@@ -111,9 +111,9 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resu
 /// Applies a single terminal event to `state`, returning whether the frame
 /// needs to be redrawn as a result. `frame_size` is the frame's size as of
 /// the most recent draw — slightly stale for the resize event that changes
-/// it, but accurate again by the time the next key event arrives — and
-/// exists only to bound `help_scroll` against the viewport it will actually
-/// render into.
+/// it, but accurate again by the time the next key event arrives — and is
+/// used both to bound `help_scroll` against the viewport it will actually
+/// render into, and to tell whether only the geometry warning is showing.
 ///
 /// A resize always needs a redraw, since the geometry warning (or the shell
 /// it replaces) depends on the frame size, not on any key event. It also
@@ -132,8 +132,16 @@ fn should_redraw(state: &mut AppState, event: Event, frame_size: (u16, u16)) -> 
         return false;
     }
 
+    // Below the supported minimum, only the geometry warning and `Ctrl+Q`
+    // are shown; every other intent must stay inert instead of silently
+    // mutating state (e.g. committing an opportunity) the player can't see.
+    let undersized = frame_size.0 < ui::MIN_COLUMNS || frame_size.1 < ui::MIN_ROWS;
+
     match event::map(key, state.current_view()) {
         Some(msg) => {
+            if undersized && msg != Msg::Quit {
+                return false;
+            }
             state.apply(msg);
             if matches!(msg, Msg::ScrollHelpUp | Msg::ScrollHelpDown) {
                 let max = ui::help_max_scroll(state, frame_size.0, frame_size.1);
@@ -260,6 +268,30 @@ mod tests {
             "Minimum console geometry: 80x24"
         ));
         assert!(!buffer_contains(&terminal, "SIGNALS"));
+    }
+
+    #[test]
+    fn local_intents_are_ignored_while_the_geometry_warning_is_showing() {
+        let (state, _) = render(
+            60,
+            20,
+            &[
+                press(KeyCode::Enter),
+                press(KeyCode::Enter),
+                press(KeyCode::F(2)),
+            ],
+        );
+
+        assert_eq!(state.current_view(), View::Signals);
+        assert_eq!(state.working_set(), None);
+        assert!(state.controller_source().is_none());
+    }
+
+    #[test]
+    fn ctrl_q_still_quits_while_the_geometry_warning_is_showing() {
+        let (state, _) = render(60, 20, &[press_ctrl(KeyCode::Char('q'))]);
+
+        assert!(state.should_quit());
     }
 
     #[test]
