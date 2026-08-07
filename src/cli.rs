@@ -94,10 +94,20 @@ fn run_operation(script: &Path) -> i32 {
     let mut tick_count = 0u32;
     let result = human_exception::lua_controller::run(script, |record| {
         tick_count = record.tick;
+        println!(
+            "{}",
+            human_exception::render_satellite_view(
+                record.drone_position,
+                record.map_width,
+                record.map_height,
+                &record.discovered,
+            )
+        );
         println!("{}", format_tick_line(&record));
         for line in format_event_lines(&record) {
             println!("{line}");
         }
+        println!();
     });
 
     match result {
