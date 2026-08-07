@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use mlua::{Function, Lua, Table};
 
-use crate::simulation::{Action, ActionError, Observation, Simulation, TickOutcome};
+use crate::simulation::{Action, ActionError, Observation, Position, Simulation, TickOutcome};
 
 /// The name of the one callback a player script must define.
 pub const ON_TICK: &str = "on_tick";
@@ -75,10 +75,28 @@ impl Error for ControllerError {
     }
 }
 
+/// A record of one completed tick, handed to the caller's observer so it
+/// can render telemetry without this module knowing anything about
+/// presentation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TickRecord {
+    pub tick: u32,
+    pub drone_position: Position,
+    pub action: Action,
+    pub ticks_remaining: u32,
+    pub outcome: TickOutcome,
+}
+
 /// Loads `script_path`, then drives a fresh [`Simulation`] to completion by
 /// calling its `on_tick` callback once per tick until the operation
-/// succeeds or fails.
-pub fn run(script_path: &Path) -> Result<TickOutcome, ControllerError> {
+/// succeeds or fails. After each completed tick, `observer` (the Rust-side
+/// caller's hook, not the Lua callback) is invoked with a [`TickRecord`]
+/// describing what happened, so a caller can render live telemetry without
+/// this module knowing anything about presentation.
+pub fn run(
+    script_path: &Path,
+    mut observer: impl FnMut(TickRecord),
+) -> Result<TickOutcome, ControllerError> {
     let source =
         fs::read_to_string(script_path).map_err(|source| ControllerError::ScriptUnreadable {
             path: script_path.to_path_buf(),
@@ -110,6 +128,15 @@ pub fn run(script_path: &Path) -> Result<TickOutcome, ControllerError> {
         let outcome = simulation
             .step(action)
             .map_err(|err| invalid_action_error(&response, err))?;
+
+        let obs = simulation.observe();
+        observer(TickRecord {
+            tick: obs.tick,
+            drone_position: obs.drone_position,
+            action,
+            ticks_remaining: obs.ticks_remaining,
+            outcome,
+        });
 
         if outcome != TickOutcome::Running {
             return Ok(outcome);

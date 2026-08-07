@@ -1,5 +1,9 @@
+use std::path::{Path, PathBuf};
+
 use clap::error::{ContextKind, ContextValue, ErrorKind};
 use clap::{CommandFactory, FromArgMatches, Parser};
+
+use human_exception::{Action, FailureReason, TickOutcome, TickRecord};
 
 const BANNER: &str = "HUMAN EXCEPTION // resistance console";
 
@@ -21,6 +25,9 @@ struct Cli {
     /// Report this build's firmware version and exit
     #[arg(short = 'V', long)]
     version: bool,
+
+    /// Path to the Lua script that will control the operation
+    script: Option<PathBuf>,
 }
 
 /// Parses process arguments and drives the resistance-console startup
@@ -44,7 +51,11 @@ pub fn run() {
             }
 
             println!("{BANNER}");
-            println!("No active satellite link. System bootstrap complete.");
+
+            match cli.script {
+                None => println!("No active satellite link. System bootstrap complete."),
+                Some(script) => std::process::exit(run_operation(&script)),
+            }
         }
         Err(e) if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) => {
             e.exit();
@@ -69,6 +80,71 @@ fn bad_argument_detail(error: &clap::Error) -> String {
     match arg {
         Some(ContextValue::String(value)) => format!("unrecognized directive '{value}'"),
         _ => "unrecognized directive".to_string(),
+    }
+}
+
+/// Runs the training operation controlled by the script at `script`,
+/// printing tick-by-tick telemetry and a final report, and returns the
+/// process exit code: `0` on success, `1` on mission failure, `3` if the
+/// script could not be loaded or executed.
+fn run_operation(script: &Path) -> i32 {
+    println!("Uplink script: {}", script.display());
+    println!();
+
+    let mut tick_count = 0u32;
+    let result = human_exception::lua_controller::run(script, |record| {
+        tick_count = record.tick;
+        println!("{}", format_tick_line(&record));
+    });
+
+    match result {
+        Ok(TickOutcome::Succeeded) => {
+            println!();
+            println!("UPLINK ESTABLISHED. Operation successful after {tick_count} tick(s).");
+            0
+        }
+        Ok(TickOutcome::Failed(reason)) => {
+            println!();
+            println!("OPERATION FAILED: {}", format_failure(reason));
+            1
+        }
+        Ok(TickOutcome::Running) => {
+            unreachable!("lua_controller::run only returns once the operation has ended")
+        }
+        Err(err) => {
+            eprintln!();
+            eprintln!("Uplink rejected: {err}");
+            3
+        }
+    }
+}
+
+fn format_tick_line(record: &TickRecord) -> String {
+    format!(
+        "tick {:>2} | drone ({}, {}) | action: {} | uplink in {} tick(s)",
+        record.tick,
+        record.drone_position.x,
+        record.drone_position.y,
+        format_action(record.action),
+        record.ticks_remaining,
+    )
+}
+
+fn format_action(action: Action) -> &'static str {
+    match action {
+        Action::MoveNorth => "north",
+        Action::MoveSouth => "south",
+        Action::MoveEast => "east",
+        Action::MoveWest => "west",
+        Action::Wait => "wait",
+    }
+}
+
+fn format_failure(reason: FailureReason) -> String {
+    match reason {
+        FailureReason::TickLimitReached => {
+            "the operation ran out of time before reaching the uplink".to_string()
+        }
     }
 }
 
