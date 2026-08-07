@@ -1,8 +1,8 @@
 # Resistance console TUI design
 
-This document defines the product behavior, information hierarchy, and representative layout for the first playable *Human Exception* resistance console.
+This document defines the product behavior, information hierarchy, interaction rules, and representative layout for the first playable *Human Exception* resistance console.
 
-It is the design contract for Epic #41. Implementation issues may choose appropriate Rust libraries, widgets, rendering primitives, and internal architecture, but should not invent a materially different player flow without an explicit product decision.
+It is the design contract for Epic #41. Implementation issues may choose appropriate Rust libraries, widgets, rendering primitives, execution-limit mechanisms, and internal architecture, but should not invent materially different player behavior without an explicit product decision.
 
 ## Design objective
 
@@ -22,8 +22,9 @@ The player should always be able to answer:
 2. Why might I care about it?
 3. What do I currently know, and what is still unknown?
 4. What code am I about to deploy?
-5. What did that code cause the machine to do?
-6. What do I want to try next?
+5. What exact code produced the run I am reviewing?
+6. What did that code cause the machine to do?
+7. What do I want to try next?
 
 ## Resistance model
 
@@ -64,7 +65,7 @@ The major states are:
 
 **Signals → Target → Controller → Operation → After Action**
 
-From After Action, the player may return to **Controller** to iterate or **Signals** to disengage and look elsewhere.
+From After Action, the player may return to **Controller** to iterate or **Signals** to direct their attention elsewhere.
 
 **Help** is contextual and may be opened from any major state without destroying the underlying state.
 
@@ -82,7 +83,28 @@ Function keys are intentional because they remain available while editing Lua an
 
 `F3`, `F4`, `F5`, and `F6` may be unavailable until their prerequisite state exists. Unavailable actions should be visibly disabled rather than silently ignored.
 
-Some views bind additional local keys beyond this global set — for example `F7` resets the controller (see [Controller](#3-controller)). These are documented with the view they apply to, not repeated here.
+Some views bind additional local keys beyond this global set. `F7` resets the controller in Controller. `F8` toggles primary/secondary content in narrow layouts. These are documented with the views they apply to.
+
+### Navigation while a deployment is active
+
+An active deployment does **not** continue executing invisibly in the background when the player leaves Operation.
+
+- `F1` opens Help without changing execution state. If the run was running, presentation and execution pause while Help is open and resume when Help is dismissed. If it was already paused, it remains paused.
+- `F5` returns to Operation and preserves the current paused/running state.
+- `F2`, `F3`, or `F4` while a run is active first pauses the run, then navigates. Returning to Operation leaves the run paused so the player can inspect state before explicitly resuming with `Space`.
+- Navigating away never cancels the run and never advances simulation ticks in the background.
+- `F6` starts a new run from a clean scenario state. If another run is active, require confirmation before replacing it.
+
+This rule keeps the console understandable: no simulation state changes while the player is looking somewhere else.
+
+### Quit safety
+
+Controller source is session-only in this epic, so modified source must not be discarded accidentally.
+
+- `Ctrl+Q` exits immediately only when the current controller is unmodified or no working set exists.
+- If the controller is modified, `Ctrl+Q` opens a confirmation that explicitly states the edits will be lost because cross-launch persistence is not implemented.
+- If a run is active, the same confirmation also states that the active run will be abandoned.
+- Confirming exits and restores terminal state; cancelling returns to the prior view without changing source or simulation state.
 
 ## Persistent frame
 
@@ -180,6 +202,8 @@ The actionable marker should be restrained. `[OPEN]` or an equivalent status is 
 
 Selecting an actionable signal and pressing `Enter` opens **Target**. It does not automatically commit the player to acting.
 
+If the player already has First Contact as the current working set, selecting it again must preserve the current controller source. Re-entering Target never reloads or replaces source by itself.
+
 ## 2. Target
 
 Target is the dossier for an opportunity the player is considering or has chosen to work.
@@ -233,7 +257,11 @@ Do not reveal hidden authoritative scenario state. Specifically, First Contact m
 
 ### Choosing to work an opportunity
 
-Pressing `Enter` on **work this opportunity** creates the current working set and loads the starter controller.
+Pressing `Enter` on **work this opportunity** creates the current working set and loads the starter controller **only when First Contact is not already the active working set**.
+
+If First Contact is already the working set, `Enter` returns to the existing Controller state and preserves all edits. It must not silently reload the starter or replace source.
+
+A future design that intentionally replaces an active working set must either preserve that set's source or ask for explicit confirmation before discarding modified source.
 
 This is the point at which the UI transitions from passive intelligence gathering to active preparation.
 
@@ -254,15 +282,15 @@ The editor owns most of the screen. API help is secondary.
 │  1  local scanned = false                                                  │ on_tick(observation)                 │
 │  2                                                                         │                                      │
 │  3  function on_tick(observation)                                          │ observation.drone.x / .y             │
-│  4    if not scanned then                                                  │ observation.budget_remaining         │
-│  5      scanned = true                                                     │ observation.discovered               │
-│  6      return "scan"                                                      │                                      │
-│  7    end                                                                  │ return:                              │
-│  8                                                                         │ north south east west                │
-│  9    -- choose what the drone should do next                              │ wait scan                            │
-│ 10    return "wait"                                                        │                                      │
-│ 11  end                                                                    │ F1 opens complete reference          │
-│                                                                            │                                      │
+│  4    local budget = observation.budget_remaining                          │ observation.budget_remaining         │
+│  5    if not scanned and budget > 1 then                                   │ observation.discovered               │
+│  6      scanned = true                                                     │                                      │
+│  7      return "scan"                                                      │ return:                              │
+│  8    end                                                                  │ north south east west                │
+│  9                                                                         │ wait scan                            │
+│ 10    -- choose what the drone should do using observation                 │                                      │
+│ 11    return "wait"                                                        │ F1 opens complete reference          │
+│ 12  end                                                                    │                                      │
 ├───────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │ F1 Help   F2 Signals   F3 Target   F4 Controller   F5 Operation   F6 Deploy   F7 Reset                 Ctrl+Q Quit│
 └───────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
@@ -286,10 +314,12 @@ The first-play starter must be **useful but intentionally incomplete**.
 It should demonstrate:
 
 - the `on_tick(observation)` callback;
-- access to observations;
+- reading at least one observation field in executable code;
 - at least one scan;
 - persistent Lua state outside the callback;
 - a clearly understandable place for the player to change behavior.
+
+The representative source above reads `observation.budget_remaining` so a copied implementation cannot accidentally teach a callback that ignores its input.
 
 It should not be the checked-in reference controller that automatically solves First Contact. The point of the first playable loop is to give the player code worth modifying, not to press Deploy on a finished solution.
 
@@ -306,7 +336,7 @@ The compromised satellite feed is visually dominant. Telemetry exists to explain
 │ COMPROMISED SATELLITE FEED                                           │ OPERATION TELEMETRY                        │
 │                                                                      │                                            │
 │              ?   ?   ?   ?   ?                                       │ tick          04                           │
-│              .   #   ?   ?   ?                                       │ budget        10 / 15                      │
+│              .   #   ?   ?   ?                                       │ budget        11 / 15                      │
 │              .   #   ?   ?   ?                                       │ last action   north                        │
 │              .   .   .   ?   ?                                       │ controller    running                      │
 │              ·   #   ?   ?   ?                                       │                                            │
@@ -322,6 +352,8 @@ The compromised satellite feed is visually dominant. Telemetry exists to explain
 │ F1 Help   F2 Signals   F3 Target   F4 Controller   F5 Operation   F6 Redeploy   Space Pause            Ctrl+Q Quit│
 └───────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
+
+The sample budget is mechanically valid: four ordinary completed actions from a 15-point budget leave 11.
 
 ### Satellite-feed rules
 
@@ -349,14 +381,46 @@ The glyphs above are illustrative. Implementation may use stronger Unicode termi
 
 ### Pacing controls
 
-- `Space` pauses/resumes presentation.
-- `Enter` advances one tick while paused.
+- `Space` pauses/resumes execution and presentation.
+- `Enter` advances exactly one tick while paused and remains paused afterward.
 
 Simulation truth must remain deterministic and independent of wall-clock presentation timing.
 
-`F6` during or after a run starts a fresh deployment with the current controller. If a deployment is already active, require a simple confirmation before replacing it.
+`F6` during or after a run starts a fresh deployment with the current controller. If a deployment is already active, require confirmation before replacing it.
+
+### Runaway Lua and responsiveness
+
+Player Lua is untrusted input. Valid syntax does not guarantee that evaluation returns.
+
+The interactive console must remain recoverable when Lua runs forever or consumes an unreasonable amount of execution, including:
+
+- an infinite loop during top-level script evaluation;
+- an infinite loop inside `on_tick`;
+- equivalent non-returning or excessive execution paths.
+
+The product requirement is observable, not architectural:
+
+- each script-load/evaluation phase and each controller callback must have a bounded execution policy or an equivalent cancellation mechanism;
+- exceeding that bound ends the deployment with a controller execution-limit/cancelled failure rather than freezing the UI indefinitely;
+- the terminal event loop remains responsive enough for the player to reach Controller or quit;
+- the player's current editor source remains intact;
+- the failure is shown in Operation with a concise explanation that the controller exceeded its execution allowance and should be revised;
+- the exact instruction-count, hook, thread, process, or other implementation mechanism is left to implementation issues.
 
 Runtime/script failures remain in the Operation view, with the telemetry pane becoming an error explanation and **Controller** presented as the obvious recovery path.
+
+### Run records and source provenance
+
+Every deployment creates an immutable run record that includes, directly or by immutable revision identity:
+
+- the exact controller source deployed for that run;
+- the scenario/working-set identity;
+- authoritative events and final result;
+- discovered state needed to review the run.
+
+Editing the current controller after a run must not change the source associated with the recorded run. **Review Run** must therefore be able to answer “which code produced this behavior?” even after the working copy has changed.
+
+The UI may show a compact revision identifier in After Action or Review Run; the storage mechanism is an implementation choice.
 
 ## 5. After Action
 
@@ -373,13 +437,13 @@ The final discovered satellite frame remains visible so the player can connect t
 │              .   .   ?   ?   ?                                       │ OPERATION FAILED                       │
 │              .   #   ?   ?   ?                                       │ Operational budget exhausted.          │
 │              .   #   ?   ?   ?                                       │                                        │
-│              .   .   .   .   ~                                       │ ticks executed     15                  │
+│              .   .   .   ▲   ~                                       │ ticks executed     15                  │
 │              ·   #   ?   ?   ?                                       │ tiles discovered   12                  │
 │                                                                      │ hazards entered     1                  │
-│                                                                      │                                        │
-│                                                                      │ The controller is unchanged.           │
-│                                                                      │ Revise it and try again, or return to  │
-│                                                                      │ Signals and work on something else.    │
+│                   ▲ DRONE                                             │                                        │
+│                                                                      │ deployed rev       run-07             │
+│                                                                      │ Revise the controller and try again,  │
+│                                                                      │ or return to Signals.                 │
 ├───────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │ F2 Signals   F4 Edit Controller   F5 Review Run   F6 Redeploy                                      Ctrl+Q Quit│
 └───────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
@@ -389,7 +453,9 @@ Success uses the same structure with a clear `OPERATION SUCCESSFUL` result and r
 
 Failure explanations should state the mechanical reason without prescribing the exact solution.
 
-The player's edited source remains intact. Returning to Controller restores the same document state. Redeploy starts from a clean scenario state.
+The player's edited working source remains intact. Returning to Controller restores the same document state. Redeploy starts from a clean scenario state.
+
+**Review Run** displays the immutable source revision and telemetry associated with that recorded run, not whatever source currently happens to be in the editor.
 
 Returning to Signals does not imply abandoning or failing a formal assignment. It simply means the player has chosen to direct their attention elsewhere.
 
@@ -405,6 +471,8 @@ Help has two levels:
 Do not dump the README into the application.
 
 Help should explain unfamiliar fiction terms in conventional language. The fiction should make the interface more legible, not force the player to decode jargon before they can use it.
+
+When opened during a running deployment, Help temporarily pauses execution as defined in [Navigation while a deployment is active](#navigation-while-a-deployment-is-active).
 
 ## Responsive behavior
 
@@ -422,7 +490,7 @@ Use one primary pane. Secondary information becomes a toggled subview:
 - Satellite feed ↔ telemetry;
 - final satellite frame ↔ after-action report.
 
-The footer shows the key used to toggle the secondary view.
+`F8` toggles the primary and secondary subview at 80–99 columns. This binding is global only in narrow-layout mode and is shown in the footer. It remains safe in Controller because it does not insert a normal text character into Lua source.
 
 ### Below 80 columns or 24 rows
 
@@ -436,7 +504,7 @@ Current geometry: 72x20
 Resize the terminal to restore the resistance console.
 ```
 
-Quitting remains available.
+Quitting remains available, subject to the same modified-source confirmation rule.
 
 ## State and information rules
 
@@ -446,7 +514,9 @@ Persistent across the application session:
 - selected signal;
 - current working set, if one has been chosen;
 - current Lua source and modified/reset state;
+- immutable run record for the most recent deployment, including deployed source or revision identity;
 - most recent deployment result;
+- current run paused/running state;
 - navigation target;
 - help dismissal return target.
 
@@ -458,7 +528,9 @@ Reset for every deployment:
 - event history for the new run;
 - success/failure state.
 
-Leaving a working set for Signals does not need to erase the controller during this epic. If the player returns to First Contact in the same application session, preserving their edits is preferable to surprising data loss. Persistence across application launches remains out of scope.
+Leaving a working set for Signals does not erase the controller during this epic. If the player returns to First Contact in the same application session, their edits are preserved. Re-selecting or re-opening the same opportunity must reuse the current source rather than silently loading the starter again.
+
+Persistence across application launches remains out of scope, which is why quit confirmation is required for modified source.
 
 ## Visual hierarchy
 
@@ -515,7 +587,7 @@ This epic does **not** implement those future systems. It establishes the produc
 
 ## Implementation boundary
 
-This specification defines **product behavior, player flow, terminology, and visual hierarchy**.
+This specification defines **product behavior, player flow, terminology, safety/recovery expectations, and visual hierarchy**.
 
 It does not dictate:
 
@@ -525,8 +597,9 @@ It does not dictate:
 - event-dispatch architecture;
 - terminal backend;
 - exact Unicode glyphs;
-- exact colors.
+- exact colors;
+- the internal mechanism used to bound or cancel runaway Lua.
 
 #42 and later issues may make those implementation choices as long as the observable experience remains consistent with this document.
 
-Material deviations from the Signals → Target → Controller → Operation → After Action flow, autonomy model, layout hierarchy, or first-play experience are product-design changes and should not be introduced opportunistically during implementation.
+Material deviations from the Signals → Target → Controller → Operation → After Action flow, autonomy model, navigation semantics, safety/recovery behavior, layout hierarchy, or first-play experience are product-design changes and should not be introduced opportunistically during implementation.
