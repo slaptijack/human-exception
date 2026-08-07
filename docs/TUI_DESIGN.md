@@ -82,6 +82,8 @@ Function keys are intentional because they remain available while editing Lua an
 
 `F3`, `F4`, `F5`, and `F6` may be unavailable until their prerequisite state exists. Unavailable actions should be visibly disabled rather than silently ignored.
 
+Some views bind additional local keys beyond this global set — for example `F7` resets the controller (see [Controller](#3-controller)). These are documented with the view they apply to, not repeated here.
+
 ## Persistent frame
 
 Every major view uses the same outer frame, but the header reflects whether the player has merely observed an opportunity or has chosen to work it.
@@ -89,29 +91,29 @@ Every major view uses the same outer frame, but the header reflects whether the 
 Before selecting a target:
 
 ```text
-┌ HUMAN EXCEPTION // RESISTANCE CONSOLE ─────────────────────────────────────────────────────────────────────────────┐
-│ MESH: DEGRADED        SATLINK: COMPROMISED        SIGNALS: 04        WORKING SET: none                              │
-├─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│                                                                                                                     │
-│                                            ACTIVE WORKSPACE                                                         │
-│                                                                                                                     │
-├─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│ F1 Help   F2 Signals   F3 Target   F4 Controller   F5 Operation   F6 Deploy                           Ctrl+Q Quit    │
-└─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ HUMAN EXCEPTION // RESISTANCE CONSOLE ───────────────────────────────────────────────────────────────────────────┐
+│ MESH: DEGRADED        SATLINK: COMPROMISED        SIGNALS: 04        WORKING SET: none                           │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                                                  │
+│                                            ACTIVE WORKSPACE                                                      │
+│                                                                                                                  │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ F1 Help   F2 Signals   F3 Target   F4 Controller   F5 Operation   F6 Deploy                           Ctrl+Q Quit│
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 After the player chooses an opportunity:
 
 ```text
-┌ HUMAN EXCEPTION // RESISTANCE CONSOLE ─────────────────────────────────────────────────────────────────────────────┐
-│ MESH: DEGRADED   WORKING SET: FIRST CONTACT   LINK: COMPROMISED   CONTROLLER: modified   STATUS: READY              │
-├─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│                                                                                                                     │
-│                                            ACTIVE WORKSPACE                                                         │
-│                                                                                                                     │
-├─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│ F1 Help   F2 Signals   F3 Target   F4 Controller   F5 Operation   F6 Deploy                           Ctrl+Q Quit    │
-└─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ HUMAN EXCEPTION // RESISTANCE CONSOLE ───────────────────────────────────────────────────────────────────────────┐
+│ MESH: DEGRADED   WORKING SET: FIRST CONTACT   LINK: COMPROMISED   CONTROLLER: modified   STATUS: READY           │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                                                  │
+│                                            ACTIVE WORKSPACE                                                      │
+│                                                                                                                  │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ F1 Help   F2 Signals   F3 Target   F4 Controller   F5 Operation   F6 Deploy                           Ctrl+Q Quit│
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 The header should communicate state, not decorate it.
@@ -134,29 +136,29 @@ It should feel like a living intelligence stream assembled from unreliable, dece
 Representative 120×40 layout:
 
 ```text
-┌ HUMAN EXCEPTION // RESISTANCE CONSOLE ─────────────────────────────────────────────────────────────────────────────┐
-│ MESH: DEGRADED        SATLINK: COMPROMISED        SIGNALS: 04        WORKING SET: none                              │
-├───────────────────────────────────────────────────────────────┬─────────────────────────────────────────────────────┤
-│ SIGNALS                                                       │ SELECTED SIGNAL                                     │
-│                                                               │                                                     │
-│ > 11:42  MACHINE INTERCEPT                                    │ MACHINE INTERCEPT // sector 7                       │
-│   Fabricator node 31B resumed local control after mesh loss.  │ confidence: HIGH                                    │
-│   auth state inconsistent.                              [OPEN] │                                                     │
-│                                                               │ A maintenance unit inside an automated facility     │
-│   11:35  rook@pacific // SHARED INTEL                         │ appears to have fallen back to local control.        │
-│   “Lost my relay before I could trace the uplink.             │ Authentication traffic is incomplete.               │
-│    Dumping what I saw in case somebody is closer.”            │                                                     │
-│                                                               │ Correlated fragments suggest a temporary access     │
-│   11:18  CELL/MARE-4 // REQUEST                               │ window through the captured maintenance drone.      │
-│   Looking for anyone who can identify convoy routing          │                                                     │
-│   changes near old I-5. No clean telemetry yet.               │ ACTIONABLE: FIRST CONTACT                            │
-│                                                               │ Enter  inspect opportunity                           │
-│   10:57  PASSIVE SENSOR // ANOMALY                             │                                                     │
-│   Burst traffic from an offline municipal control cluster.    │                                                     │
-│                                                               │                                                     │
-├───────────────────────────────────────────────────────────────┴─────────────────────────────────────────────────────┤
-│ ↑↓ Select   Enter Inspect   F1 Help   F2 Signals                                             Ctrl+Q Quit           │
-└─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ HUMAN EXCEPTION // RESISTANCE CONSOLE ─────────────────────────────────────────────────────────────────────────┐
+│ MESH: DEGRADED        SATLINK: COMPROMISED        SIGNALS: 04        WORKING SET: none                         │
+├───────────────────────────────────────────────────────────────┬────────────────────────────────────────────────┤
+│ SIGNALS                                                       │ SELECTED SIGNAL                                │
+│                                                               │                                                │
+│ > 11:42  MACHINE INTERCEPT                                    │ MACHINE INTERCEPT // sector 7                  │
+│   Fabricator node 31B resumed local control after mesh loss.  │ confidence: HIGH                               │
+│   auth state inconsistent.                              [OPEN]│                                                │
+│                                                               │ A maintenance unit inside an automated facility│
+│   11:35  rook@pacific // SHARED INTEL                         │ appears to have fallen back to local control.  │
+│   “Lost my relay before I could trace the uplink.             │ Authentication traffic is incomplete.          │
+│    Dumping what I saw in case somebody is closer.”            │                                                │
+│                                                               │ Correlated fragments suggest a temporary access│
+│   11:18  CELL/MARE-4 // REQUEST                               │ window through the captured maintenance drone. │
+│   Looking for anyone who can identify convoy routing          │                                                │
+│   changes near old I-5. No clean telemetry yet.               │ ACTIONABLE: FIRST CONTACT                      │
+│                                                               │ Enter  inspect opportunity                     │
+│   10:57  PASSIVE SENSOR // ANOMALY                            │                                                │
+│   Burst traffic from an offline municipal control cluster.    │                                                │
+│                                                               │                                                │
+├────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ ↑↓ Select   Enter Inspect   F1 Help   F2 Signals                                             Ctrl+Q Quit       │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Signals behavior
@@ -187,32 +189,32 @@ It should answer: what is known, how do we know it, what is uncertain, what acce
 Representative layout:
 
 ```text
-┌ HUMAN EXCEPTION // RESISTANCE CONSOLE ─────────────────────────────────────────────────────────────────────────────┐
-│ MESH: DEGRADED        TARGET: FIRST CONTACT        CONFIDENCE: MED/HIGH        WORKING SET: none                    │
-├───────────────────────────────────────────────────────────────┬─────────────────────────────────────────────────────┤
-│ TARGET INTELLIGENCE                                           │ PROVENANCE / ACCESS                                 │
-│                                                               │                                                     │
-│ FIRST CONTACT                                                 │ SOURCE                                              │
-│ Automated production facility // sector 7                     │ machine intercept + shared fragment                 │
-│                                                               │                                                     │
-│ KNOWN                                                         │ ACCESS                                              │
-│ • one maintenance drone responds to our control channel       │ captured maintenance controller                    │
-│ • facility map is incomplete                                  │ compromised satellite feed                         │
-│ • a local network uplink exists somewhere inside              │                                                     │
-│ • drone endurance is limited                                  │ CONFIDENCE                                          │
-│                                                               │ maintenance access      HIGH                       │
-│ UNKNOWN                                                       │ facility layout         LOW                        │
-│ • uplink location                                             │ uplink location         UNKNOWN                    │
-│ • complete floor plan                                         │ hazards                 UNKNOWN                    │
-│ • hazard locations                                            │                                                     │
-│                                                               │ OPPORTUNITY                                         │
-│ If the drone reaches the uplink, we may obtain a foothold     │ No one is waiting for us to do this.                │
-│ in the facility network before the access window closes.      │ The window may not last.                            │
-│                                                               │                                                     │
-│ Enter  work this opportunity                                  │ Esc  back to signals                                │
-├───────────────────────────────────────────────────────────────┴─────────────────────────────────────────────────────┤
-│ F1 Help   F2 Signals   Enter Work Opportunity                                                   Ctrl+Q Quit        │
-└─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ HUMAN EXCEPTION // RESISTANCE CONSOLE ─────────────────────────────────────────────────────────────────────┐
+│ MESH: DEGRADED        TARGET: FIRST CONTACT        CONFIDENCE: MED/HIGH        WORKING SET: none           │
+├───────────────────────────────────────────────────────────────┬────────────────────────────────────────────┤
+│ TARGET INTELLIGENCE                                           │ PROVENANCE / ACCESS                        │
+│                                                               │                                            │
+│ FIRST CONTACT                                                 │ SOURCE                                     │
+│ Automated production facility // sector 7                     │ machine intercept + shared fragment        │
+│                                                               │                                            │
+│ KNOWN                                                         │ ACCESS                                     │
+│ • one maintenance drone responds to our control channel       │ captured maintenance controller            │
+│ • facility map is incomplete                                  │ compromised satellite feed                 │
+│ • a local network uplink exists somewhere inside              │                                            │
+│ • drone endurance is limited                                  │ CONFIDENCE                                 │
+│                                                               │ maintenance access      HIGH               │
+│ UNKNOWN                                                       │ facility layout         LOW                │
+│ • uplink location                                             │ uplink location         UNKNOWN            │
+│ • complete floor plan                                         │ hazards                 UNKNOWN            │
+│ • hazard locations                                            │                                            │
+│                                                               │ OPPORTUNITY                                │
+│ If the drone reaches the uplink, we may obtain a foothold     │ No one is waiting for us to do this.       │
+│ in the facility network before the access window closes.      │ The window may not last.                   │
+│                                                               │                                            │
+│ Enter  work this opportunity                                  │ Esc  back to signals                       │
+├────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ F1 Help   F2 Signals   Enter Work Opportunity                                                   Ctrl+Q Quit│
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Target information model
@@ -244,26 +246,26 @@ The Controller view is available after the player chooses to work an opportunity
 The editor owns most of the screen. API help is secondary.
 
 ```text
-┌ HUMAN EXCEPTION // RESISTANCE CONSOLE ─────────────────────────────────────────────────────────────────────────────┐
-│ WORKING SET: FIRST CONTACT   LINK: COMPROMISED   CONTROLLER: modified   STATUS: READY                              │
-├────────────────────────────────────────────────────────────────────────────┬────────────────────────────────────────┤
-│ CAPTURED CONTROLLER // first_contact.lua                                  │ LUA FIELD REFERENCE                    │
-│                                                                            │                                        │
-│  1  local scanned = false                                                  │ on_tick(observation)                   │
-│  2                                                                         │                                        │
-│  3  function on_tick(observation)                                          │ observation.drone.x / .y               │
-│  4    if not scanned then                                                  │ observation.budget_remaining           │
-│  5      scanned = true                                                     │ observation.discovered                 │
-│  6      return "scan"                                                      │                                        │
-│  7    end                                                                  │ return:                                │
-│  8                                                                         │ north south east west                  │
-│  9    -- choose what the drone should do next                              │ wait scan                              │
-│ 10    return "wait"                                                        │                                        │
-│ 11  end                                                                    │ F1 opens complete reference            │
-│                                                                            │                                        │
-├────────────────────────────────────────────────────────────────────────────┴────────────────────────────────────────┤
-│ F1 Help   F2 Signals   F3 Target   F4 Controller   F5 Operation   F6 Deploy   F7 Reset                 Ctrl+Q Quit  │
-└─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ HUMAN EXCEPTION // RESISTANCE CONSOLE ────────────────────────────────────────────────────────────────────────────┐
+│ WORKING SET: FIRST CONTACT   LINK: COMPROMISED   CONTROLLER: modified   STATUS: READY                             │
+├────────────────────────────────────────────────────────────────────────────┬──────────────────────────────────────┤
+│ CAPTURED CONTROLLER // first_contact.lua                                   │ LUA FIELD REFERENCE                  │
+│                                                                            │                                      │
+│  1  local scanned = false                                                  │ on_tick(observation)                 │
+│  2                                                                         │                                      │
+│  3  function on_tick(observation)                                          │ observation.drone.x / .y             │
+│  4    if not scanned then                                                  │ observation.budget_remaining         │
+│  5      scanned = true                                                     │ observation.discovered               │
+│  6      return "scan"                                                      │                                      │
+│  7    end                                                                  │ return:                              │
+│  8                                                                         │ north south east west                │
+│  9    -- choose what the drone should do next                              │ wait scan                            │
+│ 10    return "wait"                                                        │                                      │
+│ 11  end                                                                    │ F1 opens complete reference          │
+│                                                                            │                                      │
+├───────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ F1 Help   F2 Signals   F3 Target   F4 Controller   F5 Operation   F6 Deploy   F7 Reset                 Ctrl+Q Quit│
+└───────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 Product requirements:
@@ -298,27 +300,27 @@ Operation is the live view of the currently deployed controller.
 The compromised satellite feed is visually dominant. Telemetry exists to explain why the player's program behaved as it did.
 
 ```text
-┌ HUMAN EXCEPTION // RESISTANCE CONSOLE ─────────────────────────────────────────────────────────────────────────────┐
-│ WORKING SET: FIRST CONTACT   LINK: LIVE   CONTROLLER: modified   STATUS: RUNNING                                   │
-├──────────────────────────────────────────────────────────────────────┬──────────────────────────────────────────────┤
-│ COMPROMISED SATELLITE FEED                                          │ OPERATION TELEMETRY                          │
-│                                                                      │                                              │
-│              ?   ?   ?   ?   ?                                     │ tick          04                            │
-│              .   #   ?   ?   ?                                     │ budget        10 / 15                       │
-│              .   #   ?   ?   ?                                     │ last action   north                         │
-│              .   .   .   ?   ?                                     │ controller    running                       │
-│              ·   #   ?   ?   ?                                     │                                              │
-│                                                                      │ RECENT EVENTS                                │
-│                   ▲ DRONE                                            │ 04  moved north                              │
-│                                                                      │ 03  discovered wall                          │
-│ discovered: 9 tiles                                                  │ 02  moved north                              │
-│ signal reconstruction: partial                                      │ 01  scan completed                           │
-│                                                                      │                                              │
-│ ? unknown   · floor   # wall   ~ hazard   U uplink                   │ Space pause                                 │
-│                                                                      │ Enter step (paused)                         │
-├──────────────────────────────────────────────────────────────────────┴──────────────────────────────────────────────┤
-│ F1 Help   F2 Signals   F3 Target   F4 Controller   F5 Operation   F6 Redeploy   Space Pause            Ctrl+Q Quit │
-└─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ HUMAN EXCEPTION // RESISTANCE CONSOLE ────────────────────────────────────────────────────────────────────────────┐
+│ WORKING SET: FIRST CONTACT   LINK: LIVE   CONTROLLER: modified   STATUS: RUNNING                                  │
+├──────────────────────────────────────────────────────────────────────┬────────────────────────────────────────────┤
+│ COMPROMISED SATELLITE FEED                                           │ OPERATION TELEMETRY                        │
+│                                                                      │                                            │
+│              ?   ?   ?   ?   ?                                       │ tick          04                           │
+│              .   #   ?   ?   ?                                       │ budget        10 / 15                      │
+│              .   #   ?   ?   ?                                       │ last action   north                        │
+│              .   .   .   ?   ?                                       │ controller    running                      │
+│              ·   #   ?   ?   ?                                       │                                            │
+│                                                                      │ RECENT EVENTS                              │
+│                   ▲ DRONE                                            │ 04  moved north                            │
+│                                                                      │ 03  discovered wall                        │
+│ discovered: 9 tiles                                                  │ 02  moved north                            │
+│ signal reconstruction: partial                                       │ 01  scan completed                         │
+│                                                                      │                                            │
+│ ? unknown   · floor   # wall   ~ hazard   U uplink                   │ Space pause                                │
+│                                                                      │ Enter step (paused)                        │
+├───────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ F1 Help   F2 Signals   F3 Target   F4 Controller   F5 Operation   F6 Redeploy   Space Pause            Ctrl+Q Quit│
+└───────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Satellite-feed rules
@@ -363,24 +365,24 @@ After Action is an operation state, not a disconnected popup.
 The final discovered satellite frame remains visible so the player can connect the result to what the program actually did.
 
 ```text
-┌ HUMAN EXCEPTION // RESISTANCE CONSOLE ─────────────────────────────────────────────────────────────────────────────┐
-│ WORKING SET: FIRST CONTACT   LINK: RECORDED   CONTROLLER: modified   STATUS: FAILED                                │
-├──────────────────────────────────────────────────────────────────────┬──────────────────────────────────────────────┤
-│ FINAL SATELLITE FRAME                                                │ AFTER-ACTION REPORT                          │
-│                                                                      │                                              │
-│              .   .   ?   ?   ?                                     │ OPERATION FAILED                             │
-│              .   #   ?   ?   ?                                     │ Operational budget exhausted.                │
-│              .   #   ?   ?   ?                                     │                                              │
-│              .   .   .   .   ~                                     │ ticks executed     15                        │
-│              ·   #   ?   ?   ?                                     │ tiles discovered   12                        │
-│                                                                      │ hazards entered     1                         │
-│                                                                      │                                              │
-│                                                                      │ The controller is unchanged.                │
-│                                                                      │ Revise it and try again, or return to        │
-│                                                                      │ Signals and work on something else.          │
-├──────────────────────────────────────────────────────────────────────┴──────────────────────────────────────────────┤
-│ F2 Signals   F4 Edit Controller   F5 Review Run   F6 Redeploy                                      Ctrl+Q Quit     │
-└─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ HUMAN EXCEPTION // RESISTANCE CONSOLE ────────────────────────────────────────────────────────────────────────┐
+│ WORKING SET: FIRST CONTACT   LINK: RECORDED   CONTROLLER: modified   STATUS: FAILED                           │
+├──────────────────────────────────────────────────────────────────────┬────────────────────────────────────────┤
+│ FINAL SATELLITE FRAME                                                │ AFTER-ACTION REPORT                    │
+│                                                                      │                                        │
+│              .   .   ?   ?   ?                                       │ OPERATION FAILED                       │
+│              .   #   ?   ?   ?                                       │ Operational budget exhausted.          │
+│              .   #   ?   ?   ?                                       │                                        │
+│              .   .   .   .   ~                                       │ ticks executed     15                  │
+│              ·   #   ?   ?   ?                                       │ tiles discovered   12                  │
+│                                                                      │ hazards entered     1                  │
+│                                                                      │                                        │
+│                                                                      │ The controller is unchanged.           │
+│                                                                      │ Revise it and try again, or return to  │
+│                                                                      │ Signals and work on something else.    │
+├───────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ F2 Signals   F4 Edit Controller   F5 Review Run   F6 Redeploy                                      Ctrl+Q Quit│
+└───────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 Success uses the same structure with a clear `OPERATION SUCCESSFUL` result and relevant statistics.
