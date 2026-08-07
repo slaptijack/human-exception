@@ -118,7 +118,22 @@ fn each_tick_reports_position_action_and_remaining_time() {
         .expect("binary should run");
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    assert!(stdout.contains("tick  1 | drone (0, 1) | action: north | budget remaining: 14"));
+    assert!(stdout.contains("tick  1 | drone (0, 0) | action: scan | budget remaining: 14"));
+    assert!(stdout.contains("tick  2 | drone (0, 1) | action: north | budget remaining: 13"));
+}
+
+#[test]
+fn the_example_script_scans_before_navigating() {
+    let output = bin()
+        .arg(example_path("first_contact.lua"))
+        .output()
+        .expect("binary should run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains("action: scan"),
+        "expected the reference controller to scan as part of its successful run, got: {stdout}"
+    );
 }
 
 #[test]
@@ -157,8 +172,9 @@ fn each_tick_is_preceded_by_a_satellite_view_of_discovered_terrain() {
         stdout
             .contains("legend: D drone   U uplink   . floor   # wall   ~ hazard   ? undiscovered")
     );
-    // The first frame reflects tick 1's completed move north to (0, 1).
-    assert!(stdout.contains("y=1 |   D   .   ?   ?   ?"));
+    // The first frame reflects tick 1's completed opening scan, which
+    // reveals a 5x5 area around the drone's starting tile (0, 0).
+    assert!(stdout.contains("y=0 |   D   #   #   ?   ?"));
 }
 
 #[test]

@@ -12,17 +12,19 @@
 -- "scan".
 --
 -- The controller starts with no hard-coded knowledge of the facility's
--- layout or the uplink's location. It keeps its own memory of every tile
--- it has discovered, prefers a known non-hazard tile over a known hazard
--- tile whenever both are available, heads for the uplink once it has
--- been discovered, and scans whenever it runs out of confirmed safe
--- moves.
+-- layout or the uplink's location. It opens with a scan to map the
+-- surrounding area before committing to a direction, keeps its own
+-- memory of every tile it has discovered, prefers a known non-hazard
+-- tile over a known hazard tile whenever both are available, heads for
+-- the uplink once it has been discovered, and scans again whenever it
+-- runs out of confirmed safe moves.
 
 -- Persistent memory: every tile discovered so far, indexed by "x,y".
 -- Declared outside on_tick so it survives between ticks instead of being
 -- rebuilt from observation.discovered on every call.
 local known = {}
 local uplink = nil
+local scanned_start = false
 
 local function tile_key(x, y)
   return x .. "," .. y
@@ -49,6 +51,11 @@ end
 function on_tick(observation)
   for _, tile in ipairs(observation.discovered) do
     remember(tile)
+  end
+
+  if not scanned_start then
+    scanned_start = true
+    return "scan"
   end
 
   local x, y = observation.drone.x, observation.drone.y
