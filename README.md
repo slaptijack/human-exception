@@ -63,7 +63,7 @@ Each tick, `on_tick` receives a read-only `observation` table:
 | `observation.tick` | integer | ticks elapsed so far |
 | `observation.ticks_remaining` | integer | ticks left before the operation times out |
 
-`on_tick` must return one of `"north"`, `"south"`, `"east"`, `"west"`, or `"wait"`. Any other value, or a move that would leave the bounded training area, ends the run with an error.
+`on_tick` must return one of `"north"`, `"south"`, `"east"`, `"west"`, or `"wait"`. Any other value, a move that would leave the map, or a move into a wall, ends the run with an error.
 
 Run a controller with:
 
@@ -71,7 +71,19 @@ Run a controller with:
 cargo run -- path/to/your_script.lua
 ```
 
-See [`examples/first_contact.lua`](examples/first_contact.lua) for a working controller against the fixed "first contact" scenario (a 5x5 area, drone starting at `(0, 0)`, uplink at `(4, 4)`, a 20-tick budget).
+See [`examples/first_contact.lua`](examples/first_contact.lua) for a working controller against the fixed "first contact" scenario: a 5x5 facility map, a 20-tick budget, and the layout below (the observation does not expose terrain yet, so this map is the only place to see it).
+
+```
+       x=0  x=1  x=2  x=3  x=4
+y=4  |  .    .    .    .    U
+y=3  |  .    #    #    #    .
+y=2  |  .    #    #    #    ~
+y=1  |  .    #    #    #    .
+y=0  |  S    #    #    #    .
+
+S = drone start   U = uplink objective
+. = floor   # = wall (impassable)   ~ = hazard (traversable, no effect yet)
+```
 
 ### Exit codes
 

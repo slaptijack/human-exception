@@ -77,6 +77,18 @@ fn an_out_of_bounds_move_is_a_clean_error_without_mutating_state() {
 }
 
 #[test]
+fn a_move_into_a_wall_is_a_clean_error_without_mutating_state() {
+    let err = lua_controller::run(&fixture("into_wall.lua"), |_| {}).unwrap_err();
+    match err {
+        ControllerError::InvalidAction(detail) => {
+            assert!(detail.contains("east"));
+            assert!(detail.contains("wall"));
+        }
+        other => panic!("expected InvalidAction, got {other:?}"),
+    }
+}
+
+#[test]
 fn the_observer_receives_one_record_per_tick_in_order() {
     let mut ticks = Vec::new();
     let outcome =

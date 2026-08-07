@@ -1,17 +1,18 @@
 //! The deterministic drone training simulation.
 //!
 //! This module models the fixed "first contact" training operation: a single
-//! captured maintenance drone must reach a network-uplink objective within a
-//! limited number of ticks. All authoritative state transitions live here;
-//! this module has no knowledge of Lua, the command line, or terminal
-//! output.
+//! captured maintenance drone must cross a small facility map, avoiding
+//! walls, to reach a network-uplink objective within a limited number of
+//! ticks. All authoritative state transitions live here; this module has no
+//! knowledge of Lua, the command line, or terminal output.
 
+use std::collections::VecDeque;
 use std::error::Error;
 use std::fmt;
 
-/// A grid coordinate in the training scenario.
+/// A grid coordinate on the facility map.
 ///
-/// Coordinates are signed so that a move off the edge of the scenario is a
+/// Coordinates are signed so that a move off the edge of the map is a
 /// representable (and rejected) value rather than an unsigned underflow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Position {
@@ -19,27 +20,322 @@ pub struct Position {
     pub y: i32,
 }
 
-/// The fixed training scenario: one drone, one uplink, one tick budget,
-/// bounded by a fixed-size area.
+/// The kind of terrain occupying a single map tile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TileKind {
+    /// Open terrain the drone may freely occupy.
+    Floor,
+    /// Impassable terrain; movement into a wall tile is rejected.
+    Wall,
+    /// Traversable terrain flagged for future scenario rules. Hazard tiles
+    /// have no gameplay effect yet.
+    Hazard,
+}
+
+impl TileKind {
+    /// Whether the drone may occupy a tile of this kind.
+    pub fn is_traversable(self) -> bool {
+        matches!(self, TileKind::Floor | TileKind::Hazard)
+    }
+}
+
+/// A validated, fixed-size facility map: terrain, a drone starting tile, and
+/// a network-uplink objective.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FacilityMap {
+    width: i32,
+    height: i32,
+    tiles: Vec<TileKind>,
+    drone_start: Position,
+    uplink: Position,
+}
+
+/// Why a [`FacilityMap`] could not be constructed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapError {
+    /// The map's width or height was not positive.
+    EmptyDimensions { width: i32, height: i32 },
+    /// The tile list's length did not match `width * height`.
+    TileCountMismatch { expected: usize, found: usize },
+    /// The drone start position is outside the map.
+    StartOutOfBounds(Position),
+    /// The uplink position is outside the map.
+    UplinkOutOfBounds(Position),
+    /// The drone start position is not on traversable terrain.
+    StartNotTraversable(Position),
+    /// The uplink position is not on traversable terrain.
+    UplinkNotTraversable(Position),
+    /// The drone start and the uplink are the same tile.
+    StartIsUplink(Position),
+    /// No path of traversable tiles connects the start to the uplink.
+    UplinkUnreachable { start: Position, uplink: Position },
+}
+
+impl fmt::Display for MapError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MapError::EmptyDimensions { width, height } => {
+                write!(f, "map dimensions must be positive, got {width}x{height}")
+            }
+            MapError::TileCountMismatch { expected, found } => {
+                write!(
+                    f,
+                    "map needs exactly {expected} tiles for its dimensions, got {found}"
+                )
+            }
+            MapError::StartOutOfBounds(Position { x, y }) => {
+                write!(f, "the drone start ({x}, {y}) is outside the map")
+            }
+            MapError::UplinkOutOfBounds(Position { x, y }) => {
+                write!(f, "the uplink ({x}, {y}) is outside the map")
+            }
+            MapError::StartNotTraversable(Position { x, y }) => {
+                write!(f, "the drone start ({x}, {y}) is not a traversable tile")
+            }
+            MapError::UplinkNotTraversable(Position { x, y }) => {
+                write!(f, "the uplink ({x}, {y}) is not a traversable tile")
+            }
+            MapError::StartIsUplink(Position { x, y }) => {
+                write!(
+                    f,
+                    "the drone start and the uplink are the same tile ({x}, {y})"
+                )
+            }
+            MapError::UplinkUnreachable { start, uplink } => {
+                write!(
+                    f,
+                    "no route of traversable tiles connects the drone start ({}, {}) to the uplink ({}, {})",
+                    start.x, start.y, uplink.x, uplink.y
+                )
+            }
+        }
+    }
+}
+
+impl Error for MapError {}
+
+impl FacilityMap {
+    /// Builds a facility map from a flat, row-major tile list, validating
+    /// that the map is well-formed: positive dimensions, a tile count
+    /// matching those dimensions, an in-bounds and traversable start and
+    /// uplink that are not the same tile, and an uplink reachable from the
+    /// start through traversable terrain.
+    pub fn new(
+        width: i32,
+        height: i32,
+        tiles: Vec<TileKind>,
+        drone_start: Position,
+        uplink: Position,
+    ) -> Result<Self, MapError> {
+        if width <= 0 || height <= 0 {
+            return Err(MapError::EmptyDimensions { width, height });
+        }
+
+        let expected = width as usize * height as usize;
+        if tiles.len() != expected {
+            return Err(MapError::TileCountMismatch {
+                expected,
+                found: tiles.len(),
+            });
+        }
+
+        let index = |position: Position| -> Option<usize> {
+            if (0..width).contains(&position.x) && (0..height).contains(&position.y) {
+                Some(position.y as usize * width as usize + position.x as usize)
+            } else {
+                None
+            }
+        };
+
+        let start_index = index(drone_start).ok_or(MapError::StartOutOfBounds(drone_start))?;
+        let uplink_index = index(uplink).ok_or(MapError::UplinkOutOfBounds(uplink))?;
+
+        if !tiles[start_index].is_traversable() {
+            return Err(MapError::StartNotTraversable(drone_start));
+        }
+        if !tiles[uplink_index].is_traversable() {
+            return Err(MapError::UplinkNotTraversable(uplink));
+        }
+        if drone_start == uplink {
+            return Err(MapError::StartIsUplink(drone_start));
+        }
+
+        if !uplink_is_reachable(width, height, &tiles, drone_start, uplink) {
+            return Err(MapError::UplinkUnreachable {
+                start: drone_start,
+                uplink,
+            });
+        }
+
+        Ok(FacilityMap {
+            width,
+            height,
+            tiles,
+            drone_start,
+            uplink,
+        })
+    }
+
+    pub fn width(&self) -> i32 {
+        self.width
+    }
+
+    pub fn height(&self) -> i32 {
+        self.height
+    }
+
+    pub fn drone_start(&self) -> Position {
+        self.drone_start
+    }
+
+    pub fn uplink(&self) -> Position {
+        self.uplink
+    }
+
+    /// The terrain at `position`, or `None` if `position` is outside the
+    /// map.
+    pub fn tile_at(&self, position: Position) -> Option<TileKind> {
+        if (0..self.width).contains(&position.x) && (0..self.height).contains(&position.y) {
+            let index = position.y as usize * self.width as usize + position.x as usize;
+            Some(self.tiles[index])
+        } else {
+            None
+        }
+    }
+}
+
+/// Breadth-first search over cardinal neighbours, true if `uplink` is
+/// reachable from `start` through traversable tiles.
+fn uplink_is_reachable(
+    width: i32,
+    height: i32,
+    tiles: &[TileKind],
+    start: Position,
+    uplink: Position,
+) -> bool {
+    let index = |position: Position| -> usize {
+        position.y as usize * width as usize + position.x as usize
+    };
+
+    let mut visited = vec![false; tiles.len()];
+    visited[index(start)] = true;
+
+    let mut frontier = VecDeque::new();
+    frontier.push_back(start);
+
+    while let Some(current) = frontier.pop_front() {
+        if current == uplink {
+            return true;
+        }
+
+        let neighbours = [
+            Position {
+                x: current.x,
+                y: current.y + 1,
+            },
+            Position {
+                x: current.x,
+                y: current.y - 1,
+            },
+            Position {
+                x: current.x + 1,
+                y: current.y,
+            },
+            Position {
+                x: current.x - 1,
+                y: current.y,
+            },
+        ];
+
+        for neighbour in neighbours {
+            if !(0..width).contains(&neighbour.x) || !(0..height).contains(&neighbour.y) {
+                continue;
+            }
+            let neighbour_index = index(neighbour);
+            if visited[neighbour_index] || !tiles[neighbour_index].is_traversable() {
+                continue;
+            }
+            visited[neighbour_index] = true;
+            frontier.push_back(neighbour);
+        }
+    }
+
+    false
+}
+
+/// The fixed training scenario: one drone, one facility map, one tick
+/// budget.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scenario {
-    pub width: i32,
-    pub height: i32,
-    pub drone_start: Position,
-    pub uplink: Position,
-    pub tick_limit: u32,
+    map: FacilityMap,
+    tick_limit: u32,
+}
+
+/// The fixed "first contact" facility map, drawn north-up (the first row is
+/// `y = height - 1`). `S` is the drone start, `U` is the uplink objective,
+/// `.` is floor, `#` is a wall, and `~` is a hazard tile (traversable, with
+/// no effect yet).
+const FIRST_CONTACT_ROWS: [&str; 5] = [
+    "....U", // y = 4
+    ".###.", // y = 3
+    ".###~", // y = 2
+    ".###.", // y = 1
+    "S###.", // y = 0
+];
+
+/// Parses a north-up ASCII map (rows given top-down) into a row-major,
+/// bottom-up tile list matching [`FacilityMap`]'s coordinate system.
+fn tiles_from_rows(rows: &[&str]) -> Vec<TileKind> {
+    rows.iter()
+        .rev()
+        .flat_map(|row| row.chars())
+        .map(|glyph| match glyph {
+            '.' | 'S' | 'U' => TileKind::Floor,
+            '#' => TileKind::Wall,
+            '~' => TileKind::Hazard,
+            other => panic!("unrecognized facility map glyph: {other:?}"),
+        })
+        .collect()
 }
 
 impl Scenario {
+    /// Builds a scenario from a facility map and a tick budget.
+    pub fn new(map: FacilityMap, tick_limit: u32) -> Self {
+        Scenario { map, tick_limit }
+    }
+
     /// The one fixed "first contact" training scenario.
     pub fn first_contact() -> Self {
-        Scenario {
-            width: 5,
-            height: 5,
-            drone_start: Position { x: 0, y: 0 },
-            uplink: Position { x: 4, y: 4 },
-            tick_limit: 20,
-        }
+        let map = FacilityMap::new(
+            5,
+            5,
+            tiles_from_rows(&FIRST_CONTACT_ROWS),
+            Position { x: 0, y: 0 },
+            Position { x: 4, y: 4 },
+        )
+        .expect("the fixed first contact facility map is valid");
+
+        Scenario::new(map, 20)
+    }
+
+    pub fn map(&self) -> &FacilityMap {
+        &self.map
+    }
+
+    pub fn tick_limit(&self) -> u32 {
+        self.tick_limit
+    }
+
+    pub fn drone_start(&self) -> Position {
+        self.map.drone_start()
+    }
+
+    pub fn uplink(&self) -> Position {
+        self.map.uplink()
+    }
+
+    pub fn tile_at(&self, position: Position) -> Option<TileKind> {
+        self.map.tile_at(position)
     }
 }
 
@@ -73,8 +369,10 @@ pub enum ActionError {
     /// The operation has already succeeded or failed; no further actions
     /// are accepted.
     SimulationEnded,
-    /// The requested move would leave the bounded training area.
+    /// The requested move would leave the facility map.
     OutOfBounds,
+    /// The requested move would run the drone into a wall.
+    BlockedByWall,
 }
 
 impl fmt::Display for ActionError {
@@ -88,6 +386,9 @@ impl fmt::Display for ActionError {
             }
             ActionError::OutOfBounds => {
                 write!(f, "that move would leave the bounded training area")
+            }
+            ActionError::BlockedByWall => {
+                write!(f, "that move would run the drone into a wall")
             }
         }
     }
@@ -107,7 +408,7 @@ pub struct Observation {
 }
 
 /// The authoritative, deterministic state of a training operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Simulation {
     scenario: Scenario,
     drone_position: Position,
@@ -124,9 +425,10 @@ impl Simulation {
     }
 
     fn from_scenario(scenario: Scenario) -> Self {
+        let drone_position = scenario.drone_start();
         Simulation {
             scenario,
-            drone_position: scenario.drone_start,
+            drone_position,
             ticks_elapsed: 0,
             outcome: TickOutcome::Running,
         }
@@ -144,13 +446,21 @@ impl Simulation {
         self.outcome
     }
 
+    /// The facility map this operation is being run against.
+    pub fn map(&self) -> &FacilityMap {
+        self.scenario.map()
+    }
+
     /// Returns a read-only snapshot of the current tick's observable state.
     pub fn observe(&self) -> Observation {
         Observation {
             drone_position: self.drone_position,
-            uplink_position: self.scenario.uplink,
+            uplink_position: self.scenario.uplink(),
             tick: self.ticks_elapsed,
-            ticks_remaining: self.scenario.tick_limit.saturating_sub(self.ticks_elapsed),
+            ticks_remaining: self
+                .scenario
+                .tick_limit()
+                .saturating_sub(self.ticks_elapsed),
         }
     }
 
@@ -168,9 +478,9 @@ impl Simulation {
 
         self.drone_position = next_position;
         self.ticks_elapsed += 1;
-        self.outcome = if self.drone_position == self.scenario.uplink {
+        self.outcome = if self.drone_position == self.scenario.uplink() {
             TickOutcome::Succeeded
-        } else if self.ticks_elapsed >= self.scenario.tick_limit {
+        } else if self.ticks_elapsed >= self.scenario.tick_limit() {
             TickOutcome::Failed(FailureReason::TickLimitReached)
         } else {
             TickOutcome::Running
@@ -180,7 +490,8 @@ impl Simulation {
     }
 
     /// Computes the position `action` would produce without mutating state,
-    /// rejecting moves that would leave the bounded training area.
+    /// rejecting moves that would leave the facility map or enter an
+    /// impassable tile.
     fn apply(&self, action: Action) -> Result<Position, ActionError> {
         let Position { x, y } = self.drone_position;
         let candidate = match action {
@@ -191,13 +502,10 @@ impl Simulation {
             Action::Wait => Position { x, y },
         };
 
-        let in_bounds = (0..self.scenario.width).contains(&candidate.x)
-            && (0..self.scenario.height).contains(&candidate.y);
-
-        if in_bounds {
-            Ok(candidate)
-        } else {
-            Err(ActionError::OutOfBounds)
+        match self.scenario.tile_at(candidate) {
+            None => Err(ActionError::OutOfBounds),
+            Some(tile) if tile.is_traversable() => Ok(candidate),
+            Some(_) => Err(ActionError::BlockedByWall),
         }
     }
 }
@@ -212,14 +520,306 @@ impl Default for Simulation {
 mod tests {
     use super::*;
 
-    fn small_scenario(tick_limit: u32) -> Scenario {
-        Scenario {
-            width: 3,
-            height: 3,
-            drone_start: Position { x: 0, y: 0 },
-            uplink: Position { x: 2, y: 2 },
-            tick_limit,
-        }
+    /// A small, fully open 3x3 map with no walls or hazards, for tests that
+    /// only care about movement/tick-limit/observation behavior and would
+    /// otherwise be entangled with the fixed map's wall layout.
+    fn open_scenario(tick_limit: u32) -> Scenario {
+        let map = FacilityMap::new(
+            3,
+            3,
+            vec![TileKind::Floor; 9],
+            Position { x: 0, y: 0 },
+            Position { x: 2, y: 2 },
+        )
+        .unwrap();
+        Scenario::new(map, tick_limit)
+    }
+
+    /// A small map with a wall directly north of the start and a hazard on
+    /// the only route to the uplink, for wall/hazard-specific tests.
+    fn walled_scenario() -> Scenario {
+        // y=2  U  .  .
+        // y=1  #  #  .
+        // y=0  S  .  ~
+        let rows = ["U..", "##.", "S.~"];
+        let map = FacilityMap::new(
+            3,
+            3,
+            tiles_from_rows(&rows),
+            Position { x: 0, y: 0 },
+            Position { x: 0, y: 2 },
+        )
+        .unwrap();
+        Scenario::new(map, 20)
+    }
+
+    #[test]
+    fn a_valid_map_is_constructed_with_its_terrain_and_locations() {
+        let map = FacilityMap::new(
+            2,
+            1,
+            vec![TileKind::Floor, TileKind::Floor],
+            Position { x: 0, y: 0 },
+            Position { x: 1, y: 0 },
+        )
+        .unwrap();
+
+        assert_eq!(map.width(), 2);
+        assert_eq!(map.height(), 1);
+        assert_eq!(map.drone_start(), Position { x: 0, y: 0 });
+        assert_eq!(map.uplink(), Position { x: 1, y: 0 });
+        assert_eq!(map.tile_at(Position { x: 0, y: 0 }), Some(TileKind::Floor));
+    }
+
+    #[test]
+    fn a_map_with_nonpositive_dimensions_is_rejected() {
+        let result = FacilityMap::new(
+            0,
+            3,
+            vec![],
+            Position { x: 0, y: 0 },
+            Position { x: 0, y: 1 },
+        );
+
+        assert_eq!(
+            result,
+            Err(MapError::EmptyDimensions {
+                width: 0,
+                height: 3
+            })
+        );
+    }
+
+    #[test]
+    fn a_map_with_the_wrong_tile_count_is_rejected() {
+        let result = FacilityMap::new(
+            2,
+            2,
+            vec![TileKind::Floor; 3],
+            Position { x: 0, y: 0 },
+            Position { x: 1, y: 1 },
+        );
+
+        assert_eq!(
+            result,
+            Err(MapError::TileCountMismatch {
+                expected: 4,
+                found: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn a_start_outside_the_map_is_rejected() {
+        let result = FacilityMap::new(
+            2,
+            2,
+            vec![TileKind::Floor; 4],
+            Position { x: 5, y: 5 },
+            Position { x: 1, y: 1 },
+        );
+
+        assert_eq!(
+            result,
+            Err(MapError::StartOutOfBounds(Position { x: 5, y: 5 }))
+        );
+    }
+
+    #[test]
+    fn an_uplink_outside_the_map_is_rejected() {
+        let result = FacilityMap::new(
+            2,
+            2,
+            vec![TileKind::Floor; 4],
+            Position { x: 0, y: 0 },
+            Position { x: 5, y: 5 },
+        );
+
+        assert_eq!(
+            result,
+            Err(MapError::UplinkOutOfBounds(Position { x: 5, y: 5 }))
+        );
+    }
+
+    #[test]
+    fn a_start_on_a_wall_is_rejected() {
+        let tiles = vec![
+            TileKind::Wall,
+            TileKind::Floor,
+            TileKind::Floor,
+            TileKind::Floor,
+        ];
+        let result = FacilityMap::new(
+            2,
+            2,
+            tiles,
+            Position { x: 0, y: 0 },
+            Position { x: 1, y: 1 },
+        );
+
+        assert_eq!(
+            result,
+            Err(MapError::StartNotTraversable(Position { x: 0, y: 0 }))
+        );
+    }
+
+    #[test]
+    fn an_uplink_on_a_wall_is_rejected() {
+        let tiles = vec![
+            TileKind::Floor,
+            TileKind::Floor,
+            TileKind::Floor,
+            TileKind::Wall,
+        ];
+        let result = FacilityMap::new(
+            2,
+            2,
+            tiles,
+            Position { x: 0, y: 0 },
+            Position { x: 1, y: 1 },
+        );
+
+        assert_eq!(
+            result,
+            Err(MapError::UplinkNotTraversable(Position { x: 1, y: 1 }))
+        );
+    }
+
+    #[test]
+    fn a_start_that_is_also_the_uplink_is_rejected() {
+        let result = FacilityMap::new(
+            2,
+            2,
+            vec![TileKind::Floor; 4],
+            Position { x: 0, y: 0 },
+            Position { x: 0, y: 0 },
+        );
+
+        assert_eq!(
+            result,
+            Err(MapError::StartIsUplink(Position { x: 0, y: 0 }))
+        );
+    }
+
+    #[test]
+    fn an_unreachable_uplink_is_rejected() {
+        // S # U
+        let tiles = vec![TileKind::Floor, TileKind::Wall, TileKind::Floor];
+        let result = FacilityMap::new(
+            3,
+            1,
+            tiles,
+            Position { x: 0, y: 0 },
+            Position { x: 2, y: 0 },
+        );
+
+        assert_eq!(
+            result,
+            Err(MapError::UplinkUnreachable {
+                start: Position { x: 0, y: 0 },
+                uplink: Position { x: 2, y: 0 },
+            })
+        );
+    }
+
+    #[test]
+    fn an_uplink_reachable_only_around_walls_is_accepted() {
+        // U  .  .
+        // #  #  .
+        // S  .  .
+        let rows = ["U..", "##.", "S.."];
+        let map = FacilityMap::new(
+            3,
+            3,
+            tiles_from_rows(&rows),
+            Position { x: 0, y: 0 },
+            Position { x: 0, y: 2 },
+        );
+
+        assert!(map.is_ok());
+    }
+
+    #[test]
+    fn a_start_on_a_hazard_is_accepted() {
+        let tiles = vec![TileKind::Hazard, TileKind::Floor];
+        let map = FacilityMap::new(
+            2,
+            1,
+            tiles,
+            Position { x: 0, y: 0 },
+            Position { x: 1, y: 0 },
+        );
+
+        assert!(map.is_ok());
+    }
+
+    #[test]
+    fn map_errors_describe_the_problem() {
+        assert_eq!(
+            MapError::StartOutOfBounds(Position { x: 5, y: 5 }).to_string(),
+            "the drone start (5, 5) is outside the map"
+        );
+        assert_eq!(
+            MapError::UplinkUnreachable {
+                start: Position { x: 0, y: 0 },
+                uplink: Position { x: 1, y: 1 },
+            }
+            .to_string(),
+            "no route of traversable tiles connects the drone start (0, 0) to the uplink (1, 1)"
+        );
+    }
+
+    #[test]
+    fn tile_at_reports_terrain_inside_the_map() {
+        let scenario = walled_scenario();
+        assert_eq!(
+            scenario.tile_at(Position { x: 0, y: 1 }),
+            Some(TileKind::Wall)
+        );
+        assert_eq!(
+            scenario.tile_at(Position { x: 2, y: 0 }),
+            Some(TileKind::Hazard)
+        );
+    }
+
+    #[test]
+    fn tile_at_reports_none_outside_the_map() {
+        let scenario = walled_scenario();
+        assert_eq!(scenario.tile_at(Position { x: -1, y: 0 }), None);
+        assert_eq!(scenario.tile_at(Position { x: 0, y: -1 }), None);
+        assert_eq!(scenario.tile_at(Position { x: 3, y: 0 }), None);
+        assert_eq!(scenario.tile_at(Position { x: 0, y: 3 }), None);
+    }
+
+    #[test]
+    fn walls_are_impassable_and_floor_and_hazard_are_traversable() {
+        assert!(TileKind::Floor.is_traversable());
+        assert!(TileKind::Hazard.is_traversable());
+        assert!(!TileKind::Wall.is_traversable());
+    }
+
+    #[test]
+    fn first_contact_map_has_the_fixed_layout() {
+        let scenario = Scenario::first_contact();
+        let map = scenario.map();
+
+        assert_eq!(map.width(), 5);
+        assert_eq!(map.height(), 5);
+        assert_eq!(map.drone_start(), Position { x: 0, y: 0 });
+        assert_eq!(map.uplink(), Position { x: 4, y: 4 });
+
+        // Asymmetric spot checks so an inverted or mistranscribed row order
+        // cannot pass.
+        assert_eq!(map.tile_at(Position { x: 0, y: 4 }), Some(TileKind::Floor));
+        assert_eq!(map.tile_at(Position { x: 4, y: 0 }), Some(TileKind::Floor));
+        assert_eq!(map.tile_at(Position { x: 4, y: 2 }), Some(TileKind::Hazard));
+        assert_eq!(map.tile_at(Position { x: 2, y: 2 }), Some(TileKind::Wall));
+        assert_eq!(map.tile_at(Position { x: 1, y: 0 }), Some(TileKind::Wall));
+    }
+
+    #[test]
+    fn first_contact_scenario_is_identical_on_every_construction() {
+        assert_eq!(Scenario::first_contact(), Scenario::first_contact());
     }
 
     #[test]
@@ -227,7 +827,7 @@ mod tests {
         let sim = Simulation::new();
         let scenario = Scenario::first_contact();
 
-        assert_eq!(sim.drone_position(), scenario.drone_start);
+        assert_eq!(sim.drone_position(), scenario.drone_start());
         assert_eq!(sim.ticks_elapsed(), 0);
         assert_eq!(sim.outcome(), TickOutcome::Running);
     }
@@ -242,8 +842,8 @@ mod tests {
             Action::MoveEast,
         ];
 
-        let mut a = Simulation::from_scenario(small_scenario(20));
-        let mut b = Simulation::from_scenario(small_scenario(20));
+        let mut a = Simulation::from_scenario(open_scenario(20));
+        let mut b = Simulation::from_scenario(open_scenario(20));
 
         for action in actions {
             let outcome_a = a.step(action);
@@ -257,15 +857,34 @@ mod tests {
     }
 
     #[test]
+    fn identical_action_sequences_produce_identical_states_on_the_fixed_map() {
+        let actions = [
+            Action::MoveNorth,
+            Action::MoveNorth,
+            Action::MoveNorth,
+            Action::MoveNorth,
+            Action::MoveEast,
+        ];
+
+        let mut a = Simulation::new();
+        let mut b = Simulation::new();
+
+        for action in actions {
+            assert_eq!(a.step(action), b.step(action));
+            assert_eq!(a.drone_position(), b.drone_position());
+        }
+    }
+
+    #[test]
     fn move_north_updates_position() {
-        let mut sim = Simulation::from_scenario(small_scenario(20));
+        let mut sim = Simulation::from_scenario(open_scenario(20));
         sim.step(Action::MoveNorth).unwrap();
         assert_eq!(sim.drone_position(), Position { x: 0, y: 1 });
     }
 
     #[test]
     fn move_south_updates_position() {
-        let mut sim = Simulation::from_scenario(small_scenario(20));
+        let mut sim = Simulation::from_scenario(open_scenario(20));
         sim.step(Action::MoveNorth).unwrap();
         sim.step(Action::MoveSouth).unwrap();
         assert_eq!(sim.drone_position(), Position { x: 0, y: 0 });
@@ -273,14 +892,14 @@ mod tests {
 
     #[test]
     fn move_east_updates_position() {
-        let mut sim = Simulation::from_scenario(small_scenario(20));
+        let mut sim = Simulation::from_scenario(open_scenario(20));
         sim.step(Action::MoveEast).unwrap();
         assert_eq!(sim.drone_position(), Position { x: 1, y: 0 });
     }
 
     #[test]
     fn move_west_updates_position() {
-        let mut sim = Simulation::from_scenario(small_scenario(20));
+        let mut sim = Simulation::from_scenario(open_scenario(20));
         sim.step(Action::MoveEast).unwrap();
         sim.step(Action::MoveWest).unwrap();
         assert_eq!(sim.drone_position(), Position { x: 0, y: 0 });
@@ -288,7 +907,7 @@ mod tests {
 
     #[test]
     fn wait_does_not_change_position_but_advances_tick() {
-        let mut sim = Simulation::from_scenario(small_scenario(20));
+        let mut sim = Simulation::from_scenario(open_scenario(20));
         sim.step(Action::Wait).unwrap();
         assert_eq!(sim.drone_position(), Position { x: 0, y: 0 });
         assert_eq!(sim.ticks_elapsed(), 1);
@@ -296,7 +915,7 @@ mod tests {
 
     #[test]
     fn valid_route_to_uplink_succeeds() {
-        let mut sim = Simulation::from_scenario(small_scenario(20));
+        let mut sim = Simulation::from_scenario(open_scenario(20));
 
         assert_eq!(sim.step(Action::MoveNorth).unwrap(), TickOutcome::Running);
         assert_eq!(sim.step(Action::MoveNorth).unwrap(), TickOutcome::Running);
@@ -308,8 +927,41 @@ mod tests {
     }
 
     #[test]
+    fn the_fixed_route_reaches_the_uplink() {
+        let mut sim = Simulation::new();
+        let route = [
+            Action::MoveNorth,
+            Action::MoveNorth,
+            Action::MoveNorth,
+            Action::MoveNorth,
+            Action::MoveEast,
+            Action::MoveEast,
+            Action::MoveEast,
+            Action::MoveEast,
+        ];
+
+        let mut outcome = TickOutcome::Running;
+        for action in route {
+            outcome = sim.step(action).unwrap();
+        }
+
+        assert_eq!(outcome, TickOutcome::Succeeded);
+        assert_eq!(sim.drone_position(), Position { x: 4, y: 4 });
+        assert_eq!(sim.ticks_elapsed(), 8);
+    }
+
+    #[test]
+    fn moving_into_the_wall_block_is_rejected() {
+        let mut sim = Simulation::new();
+
+        let result = sim.step(Action::MoveEast);
+
+        assert_eq!(result, Err(ActionError::BlockedByWall));
+    }
+
+    #[test]
     fn waiting_until_tick_limit_fails() {
-        let mut sim = Simulation::from_scenario(small_scenario(3));
+        let mut sim = Simulation::from_scenario(open_scenario(3));
 
         assert_eq!(sim.step(Action::Wait).unwrap(), TickOutcome::Running);
         assert_eq!(sim.step(Action::Wait).unwrap(), TickOutcome::Running);
@@ -323,8 +975,8 @@ mod tests {
 
     #[test]
     fn out_of_bounds_move_is_rejected_without_mutating_state() {
-        let mut sim = Simulation::from_scenario(small_scenario(20));
-        let before = sim;
+        let mut sim = Simulation::from_scenario(open_scenario(20));
+        let before = sim.clone();
 
         let result = sim.step(Action::MoveSouth);
 
@@ -333,8 +985,44 @@ mod tests {
     }
 
     #[test]
+    fn a_move_into_a_wall_is_rejected_without_mutating_state() {
+        let mut sim = Simulation::from_scenario(walled_scenario());
+        let before = sim.clone();
+
+        let result = sim.step(Action::MoveNorth);
+
+        assert_eq!(result, Err(ActionError::BlockedByWall));
+        assert_eq!(sim, before);
+    }
+
+    #[test]
+    fn moving_onto_a_hazard_tile_succeeds_with_no_other_effect() {
+        let mut sim = Simulation::from_scenario(walled_scenario());
+        sim.step(Action::MoveEast).unwrap();
+
+        let outcome = sim.step(Action::MoveEast).unwrap();
+
+        assert_eq!(sim.drone_position(), Position { x: 2, y: 0 });
+        assert_eq!(sim.ticks_elapsed(), 2);
+        assert_eq!(outcome, TickOutcome::Running);
+    }
+
+    #[test]
+    fn waiting_on_a_hazard_tile_has_no_effect() {
+        let mut sim = Simulation::from_scenario(walled_scenario());
+        sim.step(Action::MoveEast).unwrap();
+        sim.step(Action::MoveEast).unwrap();
+        let before_wait = sim.drone_position();
+
+        let outcome = sim.step(Action::Wait).unwrap();
+
+        assert_eq!(sim.drone_position(), before_wait);
+        assert_eq!(outcome, TickOutcome::Running);
+    }
+
+    #[test]
     fn observe_reports_fixed_scenario_details_at_start() {
-        let sim = Simulation::from_scenario(small_scenario(5));
+        let sim = Simulation::from_scenario(open_scenario(5));
 
         assert_eq!(
             sim.observe(),
@@ -349,7 +1037,7 @@ mod tests {
 
     #[test]
     fn observe_reflects_elapsed_ticks_after_moves() {
-        let mut sim = Simulation::from_scenario(small_scenario(5));
+        let mut sim = Simulation::from_scenario(open_scenario(5));
         sim.step(Action::MoveNorth).unwrap();
         sim.step(Action::MoveEast).unwrap();
 
@@ -366,7 +1054,7 @@ mod tests {
 
     #[test]
     fn observe_does_not_underflow_ticks_remaining_past_the_limit() {
-        let mut sim = Simulation::from_scenario(small_scenario(1));
+        let mut sim = Simulation::from_scenario(open_scenario(1));
         sim.step(Action::Wait).unwrap();
 
         assert_eq!(sim.observe().ticks_remaining, 0);
@@ -374,17 +1062,41 @@ mod tests {
 
     #[test]
     fn step_after_completion_is_rejected() {
-        let mut sim = Simulation::from_scenario(small_scenario(1));
+        let mut sim = Simulation::from_scenario(open_scenario(1));
         sim.step(Action::Wait).unwrap();
         assert_eq!(
             sim.outcome(),
             TickOutcome::Failed(FailureReason::TickLimitReached)
         );
 
-        let before = sim;
+        let before = sim.clone();
         let result = sim.step(Action::Wait);
 
         assert_eq!(result, Err(ActionError::SimulationEnded));
         assert_eq!(sim, before);
+    }
+
+    #[test]
+    fn repeated_runs_of_the_fixed_map_produce_identical_final_states() {
+        let route = [
+            Action::MoveNorth,
+            Action::MoveNorth,
+            Action::MoveNorth,
+            Action::MoveNorth,
+            Action::MoveEast,
+            Action::MoveEast,
+            Action::MoveEast,
+            Action::MoveEast,
+        ];
+
+        let mut a = Simulation::new();
+        let mut b = Simulation::new();
+
+        for action in route {
+            let outcome_a = a.step(action).unwrap();
+            let outcome_b = b.step(action).unwrap();
+            assert_eq!(outcome_a, outcome_b);
+            assert_eq!(a, b);
+        }
     }
 }
