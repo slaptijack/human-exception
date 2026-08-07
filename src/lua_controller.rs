@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use mlua::{Function, Lua, Table};
 
 use crate::simulation::{
-    Action, ActionError, Observation, Position, Simulation, TickOutcome, TileKind,
+    Action, ActionError, Observation, Position, SimEvent, Simulation, TickOutcome, TileKind,
 };
 
 /// The name of the one callback a player script must define.
@@ -80,13 +80,14 @@ impl Error for ControllerError {
 /// A record of one completed tick, handed to the caller's observer so it
 /// can render telemetry without this module knowing anything about
 /// presentation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TickRecord {
     pub tick: u32,
     pub drone_position: Position,
     pub action: Action,
-    pub ticks_remaining: u32,
+    pub budget_remaining: u32,
     pub outcome: TickOutcome,
+    pub events: Vec<SimEvent>,
 }
 
 /// Loads `script_path`, then drives a fresh [`Simulation`] to completion by
@@ -127,7 +128,7 @@ pub fn run(
 
         let action = parse_action(&response)?;
 
-        let outcome = simulation
+        let report = simulation
             .step(action)
             .map_err(|err| invalid_action_error(&response, err))?;
 
@@ -136,12 +137,13 @@ pub fn run(
             tick: obs.tick,
             drone_position: obs.drone_position,
             action,
-            ticks_remaining: obs.ticks_remaining,
-            outcome,
+            budget_remaining: obs.budget_remaining,
+            outcome: report.outcome,
+            events: report.events,
         });
 
-        if outcome != TickOutcome::Running {
-            return Ok(outcome);
+        if report.outcome != TickOutcome::Running {
+            return Ok(report.outcome);
         }
     }
 }
@@ -155,7 +157,7 @@ fn observation_to_table(lua: &Lua, observation: Observation) -> mlua::Result<Tab
     table.set("drone", drone)?;
 
     table.set("tick", observation.tick)?;
-    table.set("ticks_remaining", observation.ticks_remaining)?;
+    table.set("budget_remaining", observation.budget_remaining)?;
 
     let discovered = lua.create_table()?;
     for (index, tile) in observation.discovered.iter().enumerate() {

@@ -118,7 +118,7 @@ fn each_tick_reports_position_action_and_remaining_time() {
         .expect("binary should run");
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    assert!(stdout.contains("tick  1 | drone (0, 1) | action: north | uplink in 19 tick(s)"));
+    assert!(stdout.contains("tick  1 | drone (0, 1) | action: north | budget remaining: 14"));
 }
 
 #[test]

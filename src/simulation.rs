@@ -27,8 +27,8 @@ pub enum TileKind {
     Floor,
     /// Impassable terrain; movement into a wall tile is rejected.
     Wall,
-    /// Traversable terrain flagged for future scenario rules. Hazard tiles
-    /// have no gameplay effect yet.
+    /// Traversable terrain. Entering a hazard tile costs additional budget;
+    /// see [`HAZARD_ENTRY_COST`].
     Hazard,
 }
 
@@ -266,23 +266,33 @@ fn uplink_is_reachable(
     false
 }
 
-/// The fixed training scenario: one drone, one facility map, one tick
-/// budget.
+/// The fixed budget cost of any single action (move, wait, or scan alike).
+pub const ACTION_COST: u32 = 1;
+
+/// The additional budget cost of entering a hazard tile, on top of the
+/// action's [`ACTION_COST`]. Charged only on the tick the drone moves onto
+/// the hazard tile, not for continuing to occupy or waiting on it.
+pub const HAZARD_ENTRY_COST: u32 = 5;
+
+/// The fixed training scenario: one drone, one facility map, one
+/// operational budget.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scenario {
     map: FacilityMap,
-    tick_limit: u32,
+    starting_budget: u32,
 }
 
 /// The fixed "first contact" facility map, drawn north-up (the first row is
 /// `y = height - 1`). `S` is the drone start, `U` is the uplink objective,
-/// `.` is floor, `#` is a wall, and `~` is a hazard tile (traversable, with
-/// no effect yet).
+/// `.` is floor, `#` is a wall, and `~` is a hazard tile (traversable, but
+/// costly to enter). Row `y = 1` is open floor across its whole width, so a
+/// route through the hazard (row `y = 1` then column `x = 4`) and a route
+/// around it (column `x = 0` then row `y = 4`) are both eight actions long.
 const FIRST_CONTACT_ROWS: [&str; 5] = [
     "....U", // y = 4
     ".###.", // y = 3
     ".###~", // y = 2
-    ".###.", // y = 1
+    ".....", // y = 1
     "S###.", // y = 0
 ];
 
@@ -302,9 +312,13 @@ fn tiles_from_rows(rows: &[&str]) -> Vec<TileKind> {
 }
 
 impl Scenario {
-    /// Builds a scenario from a facility map and a tick budget.
-    pub fn new(map: FacilityMap, tick_limit: u32) -> Self {
-        Scenario { map, tick_limit }
+    /// Builds a scenario from a facility map and a starting operational
+    /// budget.
+    pub fn new(map: FacilityMap, starting_budget: u32) -> Self {
+        Scenario {
+            map,
+            starting_budget,
+        }
     }
 
     /// The one fixed "first contact" training scenario.
@@ -318,15 +332,15 @@ impl Scenario {
         )
         .expect("the fixed first contact facility map is valid");
 
-        Scenario::new(map, 20)
+        Scenario::new(map, 15)
     }
 
     pub fn map(&self) -> &FacilityMap {
         &self.map
     }
 
-    pub fn tick_limit(&self) -> u32 {
-        self.tick_limit
+    pub fn starting_budget(&self) -> u32 {
+        self.starting_budget
     }
 
     pub fn drone_start(&self) -> Position {
@@ -366,7 +380,31 @@ pub enum TickOutcome {
 /// Why an operation failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureReason {
-    TickLimitReached,
+    BudgetExhausted,
+}
+
+/// A structured record of something that happened as a result of one
+/// [`Simulation::step`] call, so callers can present exactly what occurred
+/// without re-deriving cost or outcome rules from raw state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SimEvent {
+    /// The documented base cost of the action just taken.
+    ActionCost { action: Action, amount: u32 },
+    /// The drone moved onto a hazard tile this tick, incurring an
+    /// additional cost on top of the action's base cost.
+    HazardEntered { position: Position, amount: u32 },
+    /// The drone reached the uplink with budget remaining.
+    OperationSucceeded,
+    /// The budget was exhausted before the uplink was reached.
+    BudgetExhausted,
+}
+
+/// The outcome and structured events produced by a single
+/// [`Simulation::step`] call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepReport {
+    pub outcome: TickOutcome,
+    pub events: Vec<SimEvent>,
 }
 
 /// An action that was rejected without mutating simulation state.
@@ -423,7 +461,7 @@ pub struct DiscoveredTile {
 pub struct Observation {
     pub drone_position: Position,
     pub tick: u32,
-    pub ticks_remaining: u32,
+    pub budget_remaining: u32,
     pub discovered: Vec<DiscoveredTile>,
 }
 
@@ -433,6 +471,7 @@ pub struct Simulation {
     scenario: Scenario,
     drone_position: Position,
     ticks_elapsed: u32,
+    budget_remaining: u32,
     outcome: TickOutcome,
     discovered: HashSet<Position>,
 }
@@ -447,10 +486,12 @@ impl Simulation {
 
     fn from_scenario(scenario: Scenario) -> Self {
         let drone_position = scenario.drone_start();
+        let budget_remaining = scenario.starting_budget();
         let mut simulation = Simulation {
             scenario,
             drone_position,
             ticks_elapsed: 0,
+            budget_remaining,
             outcome: TickOutcome::Running,
             discovered: HashSet::new(),
         };
@@ -500,25 +541,25 @@ impl Simulation {
         Observation {
             drone_position: self.drone_position,
             tick: self.ticks_elapsed,
-            ticks_remaining: self
-                .scenario
-                .tick_limit()
-                .saturating_sub(self.ticks_elapsed),
+            budget_remaining: self.budget_remaining,
             discovered,
         }
     }
 
     /// Submits one action for this tick and advances the simulation by one
-    /// tick, returning the resulting outcome.
+    /// tick, returning the resulting outcome and the structured events it
+    /// produced.
     ///
     /// If the action is invalid or impossible, or the operation has already
     /// ended, this returns an error and leaves state unchanged.
-    pub fn step(&mut self, action: Action) -> Result<TickOutcome, ActionError> {
+    pub fn step(&mut self, action: Action) -> Result<StepReport, ActionError> {
         if self.outcome != TickOutcome::Running {
             return Err(ActionError::SimulationEnded);
         }
 
         let next_position = self.apply(action)?;
+        let entered_hazard = next_position != self.drone_position
+            && self.scenario.tile_at(next_position) == Some(TileKind::Hazard);
 
         self.drone_position = next_position;
         self.ticks_elapsed += 1;
@@ -526,15 +567,41 @@ impl Simulation {
         if action == Action::Scan {
             self.reveal_scan();
         }
+
+        let cost = ACTION_COST + if entered_hazard { HAZARD_ENTRY_COST } else { 0 };
+        self.budget_remaining = self.budget_remaining.saturating_sub(cost);
+
+        let mut events = vec![SimEvent::ActionCost {
+            action,
+            amount: ACTION_COST,
+        }];
+        if entered_hazard {
+            events.push(SimEvent::HazardEntered {
+                position: next_position,
+                amount: HAZARD_ENTRY_COST,
+            });
+        }
+
         self.outcome = if self.drone_position == self.scenario.uplink() {
             TickOutcome::Succeeded
-        } else if self.ticks_elapsed >= self.scenario.tick_limit() {
-            TickOutcome::Failed(FailureReason::TickLimitReached)
+        } else if self.budget_remaining == 0 {
+            TickOutcome::Failed(FailureReason::BudgetExhausted)
         } else {
             TickOutcome::Running
         };
 
-        Ok(self.outcome)
+        match self.outcome {
+            TickOutcome::Succeeded => events.push(SimEvent::OperationSucceeded),
+            TickOutcome::Failed(FailureReason::BudgetExhausted) => {
+                events.push(SimEvent::BudgetExhausted)
+            }
+            TickOutcome::Running => {}
+        }
+
+        Ok(StepReport {
+            outcome: self.outcome,
+            events,
+        })
     }
 
     /// Computes the position `action` would produce without mutating state,
@@ -601,9 +668,9 @@ mod tests {
     use super::*;
 
     /// A small, fully open 3x3 map with no walls or hazards, for tests that
-    /// only care about movement/tick-limit/observation behavior and would
+    /// only care about movement/budget/observation behavior and would
     /// otherwise be entangled with the fixed map's wall layout.
-    fn open_scenario(tick_limit: u32) -> Scenario {
+    fn open_scenario(starting_budget: u32) -> Scenario {
         let map = FacilityMap::new(
             3,
             3,
@@ -612,12 +679,16 @@ mod tests {
             Position { x: 2, y: 2 },
         )
         .unwrap();
-        Scenario::new(map, tick_limit)
+        Scenario::new(map, starting_budget)
     }
 
     /// A small map with a wall directly north of the start and a hazard on
     /// the only route to the uplink, for wall/hazard-specific tests.
     fn walled_scenario() -> Scenario {
+        walled_scenario_with_budget(20)
+    }
+
+    fn walled_scenario_with_budget(starting_budget: u32) -> Scenario {
         // y=2  U  .  .
         // y=1  #  #  .
         // y=0  S  .  ~
@@ -630,7 +701,7 @@ mod tests {
             Position { x: 0, y: 2 },
         )
         .unwrap();
-        Scenario::new(map, 20)
+        Scenario::new(map, starting_budget)
     }
 
     #[test]
@@ -895,6 +966,9 @@ mod tests {
         assert_eq!(map.tile_at(Position { x: 4, y: 2 }), Some(TileKind::Hazard));
         assert_eq!(map.tile_at(Position { x: 2, y: 2 }), Some(TileKind::Wall));
         assert_eq!(map.tile_at(Position { x: 1, y: 0 }), Some(TileKind::Wall));
+        // Row y=1 is the open corridor that lets a controller reach the
+        // hazard via an alternate route instead of only the safe one.
+        assert_eq!(map.tile_at(Position { x: 2, y: 1 }), Some(TileKind::Floor));
     }
 
     #[test]
@@ -910,6 +984,7 @@ mod tests {
         assert_eq!(sim.drone_position(), scenario.drone_start());
         assert_eq!(sim.ticks_elapsed(), 0);
         assert_eq!(sim.outcome(), TickOutcome::Running);
+        assert_eq!(sim.observe().budget_remaining, scenario.starting_budget());
     }
 
     #[test]
@@ -997,10 +1072,19 @@ mod tests {
     fn valid_route_to_uplink_succeeds() {
         let mut sim = Simulation::from_scenario(open_scenario(20));
 
-        assert_eq!(sim.step(Action::MoveNorth).unwrap(), TickOutcome::Running);
-        assert_eq!(sim.step(Action::MoveNorth).unwrap(), TickOutcome::Running);
-        assert_eq!(sim.step(Action::MoveEast).unwrap(), TickOutcome::Running);
-        let outcome = sim.step(Action::MoveEast).unwrap();
+        assert_eq!(
+            sim.step(Action::MoveNorth).unwrap().outcome,
+            TickOutcome::Running
+        );
+        assert_eq!(
+            sim.step(Action::MoveNorth).unwrap().outcome,
+            TickOutcome::Running
+        );
+        assert_eq!(
+            sim.step(Action::MoveEast).unwrap().outcome,
+            TickOutcome::Running
+        );
+        let outcome = sim.step(Action::MoveEast).unwrap().outcome;
 
         assert_eq!(outcome, TickOutcome::Succeeded);
         assert_eq!(sim.drone_position(), Position { x: 2, y: 2 });
@@ -1022,12 +1106,13 @@ mod tests {
 
         let mut outcome = TickOutcome::Running;
         for action in route {
-            outcome = sim.step(action).unwrap();
+            outcome = sim.step(action).unwrap().outcome;
         }
 
         assert_eq!(outcome, TickOutcome::Succeeded);
         assert_eq!(sim.drone_position(), Position { x: 4, y: 4 });
         assert_eq!(sim.ticks_elapsed(), 8);
+        assert_eq!(sim.observe().budget_remaining, 15 - 8);
     }
 
     #[test]
@@ -1040,17 +1125,26 @@ mod tests {
     }
 
     #[test]
-    fn waiting_until_tick_limit_fails() {
+    fn waiting_until_budget_exhausted_fails() {
         let mut sim = Simulation::from_scenario(open_scenario(3));
 
-        assert_eq!(sim.step(Action::Wait).unwrap(), TickOutcome::Running);
-        assert_eq!(sim.step(Action::Wait).unwrap(), TickOutcome::Running);
-        let outcome = sim.step(Action::Wait).unwrap();
+        assert_eq!(
+            sim.step(Action::Wait).unwrap().outcome,
+            TickOutcome::Running
+        );
+        assert_eq!(sim.observe().budget_remaining, 2);
+        assert_eq!(
+            sim.step(Action::Wait).unwrap().outcome,
+            TickOutcome::Running
+        );
+        assert_eq!(sim.observe().budget_remaining, 1);
+        let report = sim.step(Action::Wait).unwrap();
 
         assert_eq!(
-            outcome,
-            TickOutcome::Failed(FailureReason::TickLimitReached)
+            report.outcome,
+            TickOutcome::Failed(FailureReason::BudgetExhausted)
         );
+        assert_eq!(sim.observe().budget_remaining, 0);
     }
 
     #[test]
@@ -1076,28 +1170,197 @@ mod tests {
     }
 
     #[test]
-    fn moving_onto_a_hazard_tile_succeeds_with_no_other_effect() {
+    fn moving_onto_a_hazard_tile_costs_the_action_cost_plus_the_hazard_entry_cost() {
         let mut sim = Simulation::from_scenario(walled_scenario());
         sim.step(Action::MoveEast).unwrap();
+        let before = sim.observe().budget_remaining;
 
-        let outcome = sim.step(Action::MoveEast).unwrap();
+        let report = sim.step(Action::MoveEast).unwrap();
 
         assert_eq!(sim.drone_position(), Position { x: 2, y: 0 });
         assert_eq!(sim.ticks_elapsed(), 2);
-        assert_eq!(outcome, TickOutcome::Running);
+        assert_eq!(report.outcome, TickOutcome::Running);
+        assert_eq!(
+            sim.observe().budget_remaining,
+            before - ACTION_COST - HAZARD_ENTRY_COST
+        );
+        assert!(report.events.contains(&SimEvent::HazardEntered {
+            position: Position { x: 2, y: 0 },
+            amount: HAZARD_ENTRY_COST,
+        }));
     }
 
     #[test]
-    fn waiting_on_a_hazard_tile_has_no_effect() {
+    fn waiting_on_a_hazard_tile_costs_only_the_action_cost() {
         let mut sim = Simulation::from_scenario(walled_scenario());
         sim.step(Action::MoveEast).unwrap();
         sim.step(Action::MoveEast).unwrap();
-        let before_wait = sim.drone_position();
+        let before_position = sim.drone_position();
+        let before_budget = sim.observe().budget_remaining;
 
-        let outcome = sim.step(Action::Wait).unwrap();
+        let report = sim.step(Action::Wait).unwrap();
 
-        assert_eq!(sim.drone_position(), before_wait);
-        assert_eq!(outcome, TickOutcome::Running);
+        assert_eq!(sim.drone_position(), before_position);
+        assert_eq!(report.outcome, TickOutcome::Running);
+        assert_eq!(sim.observe().budget_remaining, before_budget - ACTION_COST);
+        assert!(
+            !report
+                .events
+                .iter()
+                .any(|event| matches!(event, SimEvent::HazardEntered { .. }))
+        );
+    }
+
+    #[test]
+    fn leaving_and_reentering_a_hazard_tile_charges_the_entry_cost_again() {
+        let mut sim = Simulation::from_scenario(walled_scenario());
+        sim.step(Action::MoveEast).unwrap(); // (1, 0), floor
+        let first_entry = sim.step(Action::MoveEast).unwrap(); // (2, 0), hazard
+        sim.step(Action::MoveWest).unwrap(); // back to (1, 0), leaving the hazard
+        let second_entry = sim.step(Action::MoveEast).unwrap(); // (2, 0) again
+
+        for report in [&first_entry, &second_entry] {
+            assert!(
+                report
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, SimEvent::HazardEntered { .. }))
+            );
+        }
+        assert_eq!(
+            sim.observe().budget_remaining,
+            20 - ACTION_COST * 4 - HAZARD_ENTRY_COST * 2
+        );
+    }
+
+    #[test]
+    fn each_action_type_costs_the_documented_action_cost() {
+        for action in [Action::MoveNorth, Action::Wait, Action::Scan] {
+            let mut sim = Simulation::from_scenario(open_scenario(20));
+            let before = sim.observe().budget_remaining;
+
+            sim.step(action).unwrap();
+
+            assert_eq!(sim.observe().budget_remaining, before - ACTION_COST);
+        }
+    }
+
+    #[test]
+    fn a_rejected_action_does_not_consume_budget() {
+        let mut sim = Simulation::from_scenario(open_scenario(20));
+        let budget_before = sim.observe().budget_remaining;
+
+        let result = sim.step(Action::MoveSouth);
+
+        assert_eq!(result, Err(ActionError::OutOfBounds));
+        assert_eq!(sim.observe().budget_remaining, budget_before);
+    }
+
+    #[test]
+    fn reaching_the_uplink_takes_precedence_over_exhausting_the_budget_on_the_same_action() {
+        let map = FacilityMap::new(
+            2,
+            1,
+            vec![TileKind::Floor; 2],
+            Position { x: 0, y: 0 },
+            Position { x: 1, y: 0 },
+        )
+        .unwrap();
+        let mut sim = Simulation::from_scenario(Scenario::new(map, ACTION_COST));
+
+        let report = sim.step(Action::MoveEast).unwrap();
+
+        assert_eq!(report.outcome, TickOutcome::Succeeded);
+        assert_eq!(sim.observe().budget_remaining, 0);
+    }
+
+    #[test]
+    fn a_hazard_entry_that_exhausts_the_budget_emits_events_in_order() {
+        let tiles = vec![TileKind::Floor, TileKind::Hazard, TileKind::Floor];
+        let map = FacilityMap::new(
+            3,
+            1,
+            tiles,
+            Position { x: 0, y: 0 },
+            Position { x: 2, y: 0 },
+        )
+        .unwrap();
+        let mut sim =
+            Simulation::from_scenario(Scenario::new(map, ACTION_COST + HAZARD_ENTRY_COST));
+
+        let report = sim.step(Action::MoveEast).unwrap();
+
+        assert_eq!(
+            report.events,
+            vec![
+                SimEvent::ActionCost {
+                    action: Action::MoveEast,
+                    amount: ACTION_COST,
+                },
+                SimEvent::HazardEntered {
+                    position: Position { x: 1, y: 0 },
+                    amount: HAZARD_ENTRY_COST,
+                },
+                SimEvent::BudgetExhausted,
+            ]
+        );
+        assert_eq!(
+            report.outcome,
+            TickOutcome::Failed(FailureReason::BudgetExhausted)
+        );
+    }
+
+    #[test]
+    fn first_contact_scenario_admits_a_hazard_free_route_and_a_costlier_hazard_route() {
+        let safe_route = [
+            Action::MoveNorth,
+            Action::MoveNorth,
+            Action::MoveNorth,
+            Action::MoveNorth,
+            Action::MoveEast,
+            Action::MoveEast,
+            Action::MoveEast,
+            Action::MoveEast,
+        ];
+        let risky_route = [
+            Action::MoveNorth,
+            Action::MoveEast,
+            Action::MoveEast,
+            Action::MoveEast,
+            Action::MoveEast,
+            Action::MoveNorth,
+            Action::MoveNorth,
+            Action::MoveNorth,
+        ];
+
+        let mut safe = Simulation::new();
+        let mut safe_events = Vec::new();
+        for action in safe_route {
+            safe_events.push(safe.step(action).unwrap());
+        }
+
+        let mut risky = Simulation::new();
+        let mut risky_events = Vec::new();
+        for action in risky_route {
+            risky_events.push(risky.step(action).unwrap());
+        }
+
+        assert_eq!(safe.outcome(), TickOutcome::Succeeded);
+        assert_eq!(risky.outcome(), TickOutcome::Succeeded);
+        assert_eq!(safe.observe().budget_remaining, 15 - 8);
+        assert_eq!(risky.observe().budget_remaining, 15 - 8 - HAZARD_ENTRY_COST);
+        assert!(!safe_events.iter().any(|report| {
+            report
+                .events
+                .iter()
+                .any(|event| matches!(event, SimEvent::HazardEntered { .. }))
+        }));
+        assert!(risky_events.iter().any(|report| {
+            report
+                .events
+                .iter()
+                .any(|event| matches!(event, SimEvent::HazardEntered { .. }))
+        }));
     }
 
     /// A discovered floor tile, for building expected `discovered` lists in
@@ -1120,7 +1383,7 @@ mod tests {
             Observation {
                 drone_position: Position { x: 0, y: 0 },
                 tick: 0,
-                ticks_remaining: 5,
+                budget_remaining: 5,
                 discovered: vec![floor_tile(0, 0), floor_tile(1, 0), floor_tile(0, 1)],
             }
         );
@@ -1137,7 +1400,7 @@ mod tests {
             Observation {
                 drone_position: Position { x: 1, y: 1 },
                 tick: 2,
-                ticks_remaining: 3,
+                budget_remaining: 3,
                 discovered: vec![
                     floor_tile(0, 0),
                     floor_tile(1, 0),
@@ -1152,11 +1415,16 @@ mod tests {
     }
 
     #[test]
-    fn observe_does_not_underflow_ticks_remaining_past_the_limit() {
-        let mut sim = Simulation::from_scenario(open_scenario(1));
-        sim.step(Action::Wait).unwrap();
+    fn budget_does_not_underflow_when_a_single_action_costs_more_than_remains() {
+        let mut sim = Simulation::from_scenario(walled_scenario_with_budget(2));
+        sim.step(Action::MoveEast).unwrap(); // (1, 0), floor, budget 2 -> 1
+        let report = sim.step(Action::MoveEast).unwrap(); // (2, 0), hazard, cost 6 > 1 remaining
 
-        assert_eq!(sim.observe().ticks_remaining, 0);
+        assert_eq!(sim.observe().budget_remaining, 0);
+        assert_eq!(
+            report.outcome,
+            TickOutcome::Failed(FailureReason::BudgetExhausted)
+        );
     }
 
     #[test]
@@ -1165,7 +1433,7 @@ mod tests {
         sim.step(Action::Wait).unwrap();
         assert_eq!(
             sim.outcome(),
-            TickOutcome::Failed(FailureReason::TickLimitReached)
+            TickOutcome::Failed(FailureReason::BudgetExhausted)
         );
 
         let before = sim.clone();
@@ -1201,7 +1469,7 @@ mod tests {
 
     /// A 7x7 fully open map, for scan tests that need room for the 5x5 scan
     /// area to not simply cover the whole map.
-    fn big_open_scenario(tick_limit: u32) -> Scenario {
+    fn big_open_scenario(starting_budget: u32) -> Scenario {
         let map = FacilityMap::new(
             7,
             7,
@@ -1210,7 +1478,7 @@ mod tests {
             Position { x: 6, y: 6 },
         )
         .unwrap();
-        Scenario::new(map, tick_limit)
+        Scenario::new(map, starting_budget)
     }
 
     #[test]
@@ -1244,7 +1512,7 @@ mod tests {
     fn scan_does_not_move_the_drone_but_advances_the_tick() {
         let mut sim = Simulation::from_scenario(open_scenario(20));
 
-        let outcome = sim.step(Action::Scan).unwrap();
+        let outcome = sim.step(Action::Scan).unwrap().outcome;
 
         assert_eq!(sim.drone_position(), Position { x: 0, y: 0 });
         assert_eq!(sim.ticks_elapsed(), 1);
