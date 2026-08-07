@@ -52,6 +52,15 @@ cargo test --locked --all-targets --all-features
 
 These commands must remain aligned with `.github/workflows/ci.yml`. If the project adds another required check, update CI and this file together.
 
+To generate a coverage report locally:
+
+```console
+cargo install cargo-llvm-cov
+cargo llvm-cov --open
+```
+
+CI runs the same tool and posts a coverage summary on pull requests; coverage is informational only and is not a required check.
+
 ## Engineering principles
 
 - Keep the simulation core deterministic. The same initial state and ordered inputs must produce the same outputs.
