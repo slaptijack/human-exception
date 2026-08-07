@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use human_exception::lua_controller;
-use human_exception::{ControllerError, FailureReason, TickOutcome};
+use human_exception::{Action, ControllerError, FailureReason, TickOutcome};
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -16,6 +16,18 @@ fn fixture(name: &str) -> PathBuf {
 fn a_navigating_controller_reaches_the_uplink() {
     let outcome = lua_controller::run(&fixture("success.lua"), |_| {}).unwrap();
     assert_eq!(outcome, TickOutcome::Succeeded);
+}
+
+#[test]
+fn a_controller_that_scans_before_navigating_still_reaches_the_uplink() {
+    let mut ticks = Vec::new();
+    let outcome = lua_controller::run(&fixture("scan_then_navigate.lua"), |record| {
+        ticks.push(record)
+    })
+    .unwrap();
+
+    assert_eq!(outcome, TickOutcome::Succeeded);
+    assert_eq!(ticks[0].action, Action::Scan);
 }
 
 #[test]

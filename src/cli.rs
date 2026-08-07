@@ -137,6 +137,7 @@ fn format_action(action: Action) -> &'static str {
         Action::MoveEast => "east",
         Action::MoveWest => "west",
         Action::Wait => "wait",
+        Action::Scan => "scan",
     }
 }
 
