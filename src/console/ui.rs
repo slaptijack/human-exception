@@ -528,10 +528,27 @@ fn help_lines(state: &AppState) -> Vec<Line<'static>> {
         "valid return values: north south east west wait scan",
     ));
     lines.push(Line::from(format!(
-        "each action costs {} budget; entering a hazard tile costs {} more",
+        "each action costs {} budget; entering a hazard tile costs {} more,",
         crate::simulation::ACTION_COST,
         crate::simulation::HAZARD_ENTRY_COST
     )));
+    lines.push(Line::from("charged only on the tick the drone enters it"));
+    lines.push(Line::from(
+        "scan does not move the drone; it reveals every tile within 2 tiles",
+    ));
+    lines.push(Line::from(
+        "in any direction (5x5), regardless of walls in the way",
+    ));
+    lines.push(Line::from(
+        "discoveries, whether passive or from a scan, persist for the run",
+    ));
+    lines.push(Line::from(
+        "the operation fails if budget runs out before reaching the uplink;",
+    ));
+    lines.push(Line::from(
+        "reaching it always succeeds, even on the action that would have",
+    ));
+    lines.push(Line::from("exhausted the budget"));
     lines.push(Line::from(""));
 
     lines.push(Line::from(Span::styled(
@@ -571,9 +588,10 @@ fn help_lines(state: &AppState) -> Vec<Line<'static>> {
 fn view_specific_help(view: View) -> Vec<Line<'static>> {
     match view {
         View::Signals => vec![
-            Line::from("Up/Down  move the selection; its detail follows automatically"),
+            Line::from("Up/Down  move the selection"),
             Line::from("Enter    open Target (only signals marked [OPEN] respond)"),
-            Line::from("F8       (80-99 columns) switch to the selected signal's detail"),
+            Line::from("at 100+ columns its detail shows alongside the list automatically;"),
+            Line::from("at 80-99 columns, F8 switches to that detail"),
         ],
         View::Target => vec![
             Line::from("Enter  work this opportunity"),
@@ -883,6 +901,32 @@ mod tests {
         ));
         assert!(buffer_contains(&terminal, "whether the drone could occupy"));
         assert!(buffer_contains(&terminal, "network-uplink objective"));
+    }
+
+    #[test]
+    fn help_documents_action_mechanics() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::OpenHelp);
+        let terminal = render(120, 60, &state);
+
+        assert!(buffer_contains(&terminal, "scan does not move the drone"));
+        assert!(buffer_contains(&terminal, "regardless of walls in the way"));
+        assert!(buffer_contains(&terminal, "persist for the run"));
+        assert!(buffer_contains(&terminal, "reaching it always succeeds"));
+    }
+
+    #[test]
+    fn signals_help_describes_the_narrow_layout_toggle_accurately() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::OpenHelp);
+        let terminal = render(120, 40, &state);
+
+        assert!(!buffer_contains(&terminal, "follows automatically"));
+        assert!(buffer_contains(&terminal, "at 80-99 columns, F8 switches"));
     }
 
     #[test]
