@@ -548,6 +548,12 @@ fn help_lines(state: &AppState) -> Vec<Line<'static>> {
     lines.push(Line::from(
         "valid return values: north south east west wait scan",
     ));
+    lines.push(Line::from(
+        "any other value, a move off the map, or a move into a wall ends",
+    ));
+    lines.push(Line::from(
+        "the run with an error and does not consume budget",
+    ));
     lines.push(Line::from(format!(
         "each action costs {} budget; entering a hazard tile costs {} more,",
         crate::simulation::ACTION_COST,
@@ -936,6 +942,11 @@ mod tests {
         assert!(buffer_contains(&terminal, "regardless of walls in the way"));
         assert!(buffer_contains(&terminal, "persist for the run"));
         assert!(buffer_contains(&terminal, "reaching it always succeeds"));
+        assert!(buffer_contains(
+            &terminal,
+            "move off the map, or a move into a wall"
+        ));
+        assert!(buffer_contains(&terminal, "does not consume budget"));
     }
 
     #[test]
@@ -959,7 +970,7 @@ mod tests {
         // without needing to scroll.
         let mut state = AppState::new();
         state.apply(Msg::OpenHelp);
-        let terminal = render(120, 60, &state);
+        let terminal = render(120, 70, &state);
 
         assert!(buffer_contains(&terminal, "Terminology"));
         assert!(buffer_contains(&terminal, "MACHINE INTERCEPT"));
