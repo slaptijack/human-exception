@@ -47,6 +47,17 @@ const SANDBOX_MEMORY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 /// process, or module-loading access, and `print` writes straight to
 /// process stdout — including raw escape sequences — which would corrupt
 /// the alternate screen ratatui owns while the console is running.
+/// The fixed seed every sandboxed `Lua`'s `math.random` is reseeded with.
+/// Lua 5.4 otherwise auto-seeds `math.random` from wall-clock time and the
+/// Lua state's memory address at library-open time, which would make
+/// identical controller source produce different `math.random` sequences
+/// — and therefore potentially different validation results or deployed
+/// behavior — across separate runs. `docs/AGENTS.md`'s "Keep the
+/// simulation core deterministic" requirement applies here exactly as it
+/// does to the rest of the simulation: the same source must behave the
+/// same way every time.
+const SANDBOX_RANDOM_SEED: i64 = 1;
+
 fn sandboxed_lua() -> Lua {
     let libs = StdLib::TABLE | StdLib::STRING | StdLib::MATH;
     let lua = Lua::new_with(libs, LuaOptions::default())
@@ -56,6 +67,11 @@ fn sandboxed_lua() -> Lua {
     let _ = globals.set("loadfile", Value::Nil);
     let _ = globals.set("print", Value::Nil);
     let _ = lua.set_memory_limit(SANDBOX_MEMORY_LIMIT_BYTES);
+    if let Ok(math) = globals.get::<Table>("math")
+        && let Ok(randomseed) = math.get::<Function>("randomseed")
+    {
+        let _ = randomseed.call::<()>(SANDBOX_RANDOM_SEED);
+    }
     lua
 }
 

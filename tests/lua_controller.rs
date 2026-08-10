@@ -60,6 +60,33 @@ fn rerunning_the_same_script_is_deterministic() {
 }
 
 #[test]
+fn a_script_using_math_random_is_deterministic_across_separate_runs() {
+    // The sandbox reseeds math.random with a fixed constant on every fresh
+    // Lua instance specifically so this holds: without it, Lua 5.4 would
+    // auto-seed from wall-clock time, and the same source could choose a
+    // different action sequence (or even a different validation outcome)
+    // on every run, breaking the "same initial state and ordered inputs
+    // produce the same outputs" guarantee the rest of the simulation core
+    // already relies on.
+    let mut first = Vec::new();
+    let outcome_first =
+        lua_controller::run(&fixture("random_actions.lua"), |record| first.push(record)).unwrap();
+
+    let mut second = Vec::new();
+    let outcome_second =
+        lua_controller::run(&fixture("random_actions.lua"), |record| second.push(record)).unwrap();
+
+    assert_eq!(outcome_first, outcome_second);
+    assert_eq!(first, second);
+    assert!(
+        first.iter().any(|record| record.action == Action::Scan)
+            && first.iter().any(|record| record.action != Action::Scan),
+        "the fixture should exercise both branches of the random choice, \
+         not accidentally always take the same one"
+    );
+}
+
+#[test]
 fn a_nonexistent_script_is_a_clean_error() {
     let err = lua_controller::run(&fixture("does_not_exist.lua"), |_| {}).unwrap_err();
     assert!(matches!(err, ControllerError::ScriptUnreadable { .. }));

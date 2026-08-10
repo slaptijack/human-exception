@@ -262,9 +262,10 @@ fn draw_controller_reference(frame: &mut Frame, area: Rect, state: &AppState) {
     frame.render_widget(block, area);
 
     let banner = controller_banner(state);
-    let (content_area, banner_area) = if banner.is_some() {
+    let (content_area, banner_area) = if let Some(banner) = &banner {
+        let rows = banner_height(banner, inner.width);
         let [content, banner_row] =
-            Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
+            Layout::vertical([Constraint::Min(0), Constraint::Length(rows)]).areas(inner);
         (content, Some(banner_row))
     } else {
         (inner, None)
@@ -276,8 +277,23 @@ fn draw_controller_reference(frame: &mut Frame, area: Rect, state: &AppState) {
     );
 
     if let (Some(banner_area), Some(banner)) = (banner_area, banner) {
-        frame.render_widget(Paragraph::new(banner), banner_area);
+        frame.render_widget(
+            Paragraph::new(banner).wrap(Wrap { trim: false }),
+            banner_area,
+        );
     }
+}
+
+/// An upper bound on how many rows [`controller_banner`] can claim, so one
+/// long message can't swallow the whole pane.
+const MAX_BANNER_ROWS: u16 = 4;
+
+/// How many rows to reserve for `banner` at `width`, wrapping instead of
+/// clipping a message that runs past one row — a Lua syntax error easily
+/// exceeds the supported 80-column pane's width, and clipping it can lose
+/// the `:line:` location `docs/TUI_DESIGN.md` requires stay visible.
+fn banner_height(banner: &Line<'static>, width: u16) -> u16 {
+    (wrapped_row_count(std::slice::from_ref(banner), width) as u16).clamp(1, MAX_BANNER_ROWS)
 }
 
 fn draw_controller_source(frame: &mut Frame, area: Rect, state: &AppState) {
@@ -288,9 +304,10 @@ fn draw_controller_source(frame: &mut Frame, area: Rect, state: &AppState) {
     frame.render_widget(block, area);
 
     let banner = controller_banner(state);
-    let (content_area, banner_area) = if banner.is_some() {
+    let (content_area, banner_area) = if let Some(banner) = &banner {
+        let rows = banner_height(banner, inner.width);
         let [content, banner_row] =
-            Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
+            Layout::vertical([Constraint::Min(0), Constraint::Length(rows)]).areas(inner);
         (content, Some(banner_row))
     } else {
         (inner, None)
@@ -339,7 +356,10 @@ fn draw_controller_source(frame: &mut Frame, area: Rect, state: &AppState) {
     frame.render_widget(Paragraph::new(visible_lines), content_area);
 
     if let (Some(banner_area), Some(banner)) = (banner_area, banner) {
-        frame.render_widget(Paragraph::new(banner), banner_area);
+        frame.render_widget(
+            Paragraph::new(banner).wrap(Wrap { trim: false }),
+            banner_area,
+        );
     }
 }
 

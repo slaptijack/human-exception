@@ -28,25 +28,24 @@ pub fn map(
         return Some(Msg::RequestQuit);
     }
 
-    // A confirmation dialog swallows every key except its own yes/no so the
-    // player can't accidentally act past it (e.g. keep typing Lua while a
-    // reset prompt is showing).
+    // A confirmation dialog swallows every key except its own unmodified
+    // yes/no so the player can't accidentally act past it (e.g. keep
+    // typing Lua while a reset prompt is showing) or trigger it by
+    // accident via some other binding's modified form — `Ctrl+Enter`
+    // (validate) and `Ctrl+Y` both have unmodified forms that must not
+    // silently confirm a destructive action instead.
+    let unmodified = key.modifiers.is_empty();
     if quit_confirmation_pending {
         return match key.code {
-            // Requiring an unmodified key here specifically matters for
-            // `Ctrl+Enter`: without it, that would silently confirm and
-            // discard the controller instead of doing nothing (its
-            // ordinary meaning, validate, isn't offered while a
-            // confirmation is pending — see the fallthrough below).
-            KeyCode::Enter | KeyCode::Char('y') if !ctrl => Some(Msg::ConfirmQuit),
-            KeyCode::Esc | KeyCode::Char('n') if !ctrl => Some(Msg::CancelQuit),
+            KeyCode::Enter | KeyCode::Char('y') if unmodified => Some(Msg::ConfirmQuit),
+            KeyCode::Esc | KeyCode::Char('n') if unmodified => Some(Msg::CancelQuit),
             _ => None,
         };
     }
     if reset_confirmation_pending {
         return match key.code {
-            KeyCode::Enter | KeyCode::Char('y') if !ctrl => Some(Msg::ConfirmResetController),
-            KeyCode::Esc | KeyCode::Char('n') if !ctrl => Some(Msg::CancelResetController),
+            KeyCode::Enter | KeyCode::Char('y') if unmodified => Some(Msg::ConfirmResetController),
+            KeyCode::Esc | KeyCode::Char('n') if unmodified => Some(Msg::CancelResetController),
             _ => None,
         };
     }
@@ -488,6 +487,28 @@ mod tests {
         assert_eq!(map(ctrl_y, View::Controller, true, false, true), None);
         assert_eq!(map(ctrl_esc, View::Controller, true, false, true), None);
         assert_eq!(map(ctrl_n, View::Controller, true, false, true), None);
+    }
+
+    #[test]
+    fn any_modifier_at_all_blocks_confirmation_dialog_keys() {
+        for modifiers in [
+            KeyModifiers::SHIFT,
+            KeyModifiers::ALT,
+            KeyModifiers::CONTROL,
+        ] {
+            let enter = key_with_modifiers(KeyCode::Enter, modifiers);
+            let y = key_with_modifiers(KeyCode::Char('y'), modifiers);
+            assert_eq!(
+                map(enter, View::Controller, false, true, true),
+                None,
+                "{modifiers:?}+Enter must not confirm quit"
+            );
+            assert_eq!(
+                map(y, View::Controller, true, false, true),
+                None,
+                "{modifiers:?}+y must not confirm reset"
+            );
+        }
     }
 
     #[test]
