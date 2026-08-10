@@ -15,6 +15,7 @@ pub mod ui;
 use std::io;
 use std::panic::{self, PanicHookInfo};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossterm::cursor::Show;
 use crossterm::event::{
@@ -32,6 +33,17 @@ use ratatui::backend::CrosstermBackend;
 use state::{AppState, Msg};
 
 type PanicHook = dyn Fn(&PanicHookInfo<'_>) + Sync + Send + 'static;
+
+/// Whether [`event_loop`] successfully pushed the Kitty keyboard-protocol
+/// flags, so [`restore_terminal`] (called from several places: normal
+/// exit, an early `Terminal::new` failure, and the panic hook) only pops
+/// them when there's actually a matching push to undo. Popping
+/// unconditionally would remove one level from the terminal's own
+/// keyboard-protocol stack even when nothing was ever pushed — e.g. the
+/// query timed out, the push itself failed, or startup never reached that
+/// point at all — which can disturb a mode a parent terminal or
+/// multiplexer had already established.
+static KEYBOARD_ENHANCEMENT_PUSHED: AtomicBool = AtomicBool::new(false);
 
 /// Enters the interactive resistance-console session against a real
 /// terminal, and restores the terminal on every exit path, including a
@@ -82,7 +94,9 @@ fn restore_panic_hook(previous: Arc<PanicHook>) {
 
 fn restore_terminal() -> io::Result<()> {
     disable_raw_mode()?;
-    let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+    if KEYBOARD_ENHANCEMENT_PUSHED.swap(false, Ordering::SeqCst) {
+        let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+    }
     execute!(io::stdout(), LeaveAlternateScreen, Show)?;
     Ok(())
 }
@@ -111,11 +125,14 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resu
     // every terminal sends correctly) is the guaranteed fallback binding
     // for validation regardless, so this is just a nicer default, not the
     // only path to it.
-    if supports_keyboard_enhancement().unwrap_or(false) {
-        let _ = execute!(
+    if supports_keyboard_enhancement().unwrap_or(false)
+        && execute!(
             io::stdout(),
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-        );
+        )
+        .is_ok()
+    {
+        KEYBOARD_ENHANCEMENT_PUSHED.store(true, Ordering::SeqCst);
     }
 
     while !state.should_quit() {

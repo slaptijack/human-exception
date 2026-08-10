@@ -314,10 +314,16 @@ pub fn validate(source: &str) -> Result<(), ControllerError> {
                 "controller failed to load for an unexpected reason".to_string(),
             ),
         };
-        // Only now does this thread's slot free up for a future `validate`
-        // call; if this thread never reaches here (the runaway case this
-        // whole mechanism exists for), the slot stays taken forever, which
-        // is the point.
+        // Dropping `lua` runs any pending Lua finalizers — a table with a
+        // `__gc` metamethod is collectible source-controlled Lua just like
+        // anything else `load_controller` ran, and one wrapping its own
+        // `pcall`-protected infinite loop can hang exactly like the
+        // top-level-script case `VALIDATE_TIMEOUT`/the instruction hook
+        // exist for. Drop it, and only *then* free this thread's
+        // concurrency-cap slot, so a hung teardown still counts against
+        // `MAX_CONCURRENT_VALIDATIONS` instead of quietly making room for
+        // another thread while this one keeps running forever.
+        drop(lua);
         VALIDATIONS_IN_PROGRESS.fetch_sub(1, Ordering::SeqCst);
         // If the receiver already timed out and dropped, there's nowhere
         // left to report this; the thread just exits.

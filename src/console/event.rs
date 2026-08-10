@@ -33,15 +33,20 @@ pub fn map(
     // reset prompt is showing).
     if quit_confirmation_pending {
         return match key.code {
-            KeyCode::Enter | KeyCode::Char('y') => Some(Msg::ConfirmQuit),
-            KeyCode::Esc | KeyCode::Char('n') => Some(Msg::CancelQuit),
+            // Requiring an unmodified key here specifically matters for
+            // `Ctrl+Enter`: without it, that would silently confirm and
+            // discard the controller instead of doing nothing (its
+            // ordinary meaning, validate, isn't offered while a
+            // confirmation is pending — see the fallthrough below).
+            KeyCode::Enter | KeyCode::Char('y') if !ctrl => Some(Msg::ConfirmQuit),
+            KeyCode::Esc | KeyCode::Char('n') if !ctrl => Some(Msg::CancelQuit),
             _ => None,
         };
     }
     if reset_confirmation_pending {
         return match key.code {
-            KeyCode::Enter | KeyCode::Char('y') => Some(Msg::ConfirmResetController),
-            KeyCode::Esc | KeyCode::Char('n') => Some(Msg::CancelResetController),
+            KeyCode::Enter | KeyCode::Char('y') if !ctrl => Some(Msg::ConfirmResetController),
+            KeyCode::Esc | KeyCode::Char('n') if !ctrl => Some(Msg::CancelResetController),
             _ => None,
         };
     }
@@ -462,6 +467,27 @@ mod tests {
             None,
             "ordinary keys must not leak through while the reset dialog is open"
         );
+    }
+
+    #[test]
+    fn ctrl_modified_confirm_keys_do_not_confirm_destructive_dialogs() {
+        let ctrl_enter = key_with_modifiers(KeyCode::Enter, KeyModifiers::CONTROL);
+        let ctrl_y = key_with_modifiers(KeyCode::Char('y'), KeyModifiers::CONTROL);
+        let ctrl_esc = key_with_modifiers(KeyCode::Esc, KeyModifiers::CONTROL);
+        let ctrl_n = key_with_modifiers(KeyCode::Char('n'), KeyModifiers::CONTROL);
+
+        // Quit dialog: Ctrl+Enter must not silently discard the modified
+        // controller just because it would otherwise mean "validate".
+        assert_eq!(map(ctrl_enter, View::Controller, false, true, true), None);
+        assert_eq!(map(ctrl_y, View::Controller, false, true, true), None);
+        assert_eq!(map(ctrl_esc, View::Controller, false, true, true), None);
+        assert_eq!(map(ctrl_n, View::Controller, false, true, true), None);
+
+        // Reset dialog: same requirement.
+        assert_eq!(map(ctrl_enter, View::Controller, true, false, true), None);
+        assert_eq!(map(ctrl_y, View::Controller, true, false, true), None);
+        assert_eq!(map(ctrl_esc, View::Controller, true, false, true), None);
+        assert_eq!(map(ctrl_n, View::Controller, true, false, true), None);
     }
 
     #[test]

@@ -433,7 +433,16 @@ fn chars_to_skip_for_cell_offset(text: &str, cells: usize) -> usize {
         if consumed >= cells {
             break;
         }
-        consumed += c.width().unwrap_or(0).max(1);
+        // No `.max(1)`: a zero-width character (e.g. a combining mark)
+        // must count as zero cells here too, matching `display_width_of_
+        // prefix`'s accounting exactly. Forcing a minimum of one cell per
+        // `char` skipped more characters than the requested cell offset
+        // while consuming fewer real terminal cells than intended, so the
+        // two functions could disagree about where column `cells` actually
+        // falls on a line with combining marks before the cursor. `skip`
+        // still advances once per iteration regardless, so a run of
+        // zero-width characters can't stall this loop.
+        consumed += c.width().unwrap_or(0);
         skip += 1;
     }
     skip
@@ -1602,6 +1611,28 @@ mod tests {
         assert_eq!(chars_to_skip_for_cell_offset("中文abc", 2), 1);
         assert_eq!(chars_to_skip_for_cell_offset("中文abc", 4), 2);
         assert_eq!(chars_to_skip_for_cell_offset("abc", 2), 2);
+    }
+
+    #[test]
+    fn chars_to_skip_for_cell_offset_treats_zero_width_marks_as_zero_cells() {
+        // Previously this function clamped every character's contribution
+        // to at least one cell, so three zero-width combining marks were
+        // (wrongly) treated as consuming three whole display columns —
+        // disagreeing with `display_width_of_prefix`'s accounting of the
+        // very same text and potentially leaving the cursor's true screen
+        // column outside the scrolled viewport.
+        let text = "\u{0301}\u{0301}\u{0301}X"; // three combining marks, then "X"
+        assert_eq!(
+            chars_to_skip_for_cell_offset(text, 0),
+            0,
+            "nothing needs skipping to reach the very first cell"
+        );
+        assert_eq!(
+            chars_to_skip_for_cell_offset(text, 1),
+            4,
+            "reaching cell 1 (where X starts) must skip past all three \
+             zero-width marks and X itself, not stop after the first mark"
+        );
     }
 
     #[test]
