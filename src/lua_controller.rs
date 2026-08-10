@@ -20,7 +20,10 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use mlua::{Function, HookTriggers, Lua, LuaOptions, StdLib, Table, Value, VmState};
+use mlua::{
+    Function, HookTriggers, IntoLuaMulti, Lua, LuaOptions, MultiValue, StdLib, Table, Value,
+    VmState,
+};
 
 use crate::simulation::{
     Action, ActionError, DiscoveredTile, Observation, Position, SimEvent, Simulation, TickOutcome,
@@ -83,7 +86,43 @@ fn sandboxed_lua() -> Lua {
             "deterministic pairs/next install should not fail: {err}"
         );
     }
+    if let Err(err) = install_deterministic_tostring(&lua) {
+        debug_assert!(
+            false,
+            "deterministic tostring install should not fail: {err}"
+        );
+    }
     lua
+}
+
+/// Overrides the global `tostring` so the default (no `__tostring`
+/// metamethod) representation of a table, function, thread, or userdata —
+/// normally `"<type>: 0x<address>"`, baking in that value's actual process
+/// memory address — reports a fixed placeholder address instead. Without
+/// this, a script branching on that address (e.g. a digit of
+/// `tostring({})`) could behave differently between separate runs of
+/// byte-identical source purely because of address-space layout
+/// randomization, the same class of leak the fixed `math.random` seed and
+/// deterministic `pairs`/`next` close for other sources of entropy. Any
+/// other `tostring` result — numbers, strings, booleans, nil, or a value
+/// with its own `__tostring` metamethod — passes through unchanged.
+fn install_deterministic_tostring(lua: &Lua) -> mlua::Result<()> {
+    let globals = lua.globals();
+    let real_tostring: Function = globals.get("tostring")?;
+    let det_tostring = lua.create_function(move |_, value: Value| -> mlua::Result<String> {
+        let text: mlua::LuaString = real_tostring.call(value)?;
+        let text = text.to_str()?.to_string();
+        for prefix in ["table: ", "function: ", "thread: ", "userdata: "] {
+            if let Some(rest) = text.strip_prefix(prefix)
+                && rest.starts_with("0x")
+            {
+                return Ok(format!("{prefix}0x0"));
+            }
+        }
+        Ok(text)
+    })?;
+    globals.set("tostring", det_tostring)?;
+    Ok(())
 }
 
 /// Overrides the global `pairs`/`next` with versions that iterate a
@@ -115,8 +154,20 @@ fn install_deterministic_table_iteration(lua: &Lua) -> mlua::Result<()> {
     })?;
 
     let pairs_next = det_next.clone();
-    let det_pairs =
-        lua.create_function(move |_, table: Table| Ok((pairs_next.clone(), table, Value::Nil)))?;
+    let det_pairs = lua.create_function(move |lua, table: Table| -> mlua::Result<MultiValue> {
+        // Real Lua 5.4 defers entirely to a table's `__pairs` metamethod
+        // when present (checked before ever calling the real `next`);
+        // match that instead of silently overriding a proxy/wrapper
+        // table's own iteration behavior with ours. A script's own
+        // `__pairs` is responsible for its own determinism, same as a
+        // custom `__tostring` is for its own output.
+        if let Some(metatable) = table.metatable()
+            && let Ok(pairs_mm) = metatable.get::<Function>("__pairs")
+        {
+            return pairs_mm.call::<MultiValue>(table);
+        }
+        (pairs_next.clone(), table, Value::Nil).into_lua_multi(lua)
+    })?;
 
     let globals = lua.globals();
     globals.set("next", det_next)?;
@@ -604,6 +655,53 @@ mod tests {
             end
             assert(table.concat(order, ",") == "east,north,south,wait,west",
                    table.concat(order, ","))
+            function on_tick(observation) return "wait" end
+        "#;
+        assert!(validate(source).is_ok());
+    }
+
+    #[test]
+    fn a_table_with_pairs_metamethod_still_iterates_through_it() {
+        // Real Lua 5.4 defers entirely to `__pairs` when a table has one;
+        // the deterministic override must do the same, not silently
+        // replace a proxy table's own iteration with the underlying raw
+        // table's entries.
+        let source = r#"
+            local proxy = setmetatable({}, {
+                __pairs = function(self)
+                    local done = false
+                    return function()
+                        if done then return nil end
+                        done = true
+                        return "only", "value"
+                    end, self, nil
+                end,
+            })
+            local seen = {}
+            for k, v in pairs(proxy) do
+                seen[#seen + 1] = k .. "=" .. v
+            end
+            assert(#seen == 1 and seen[1] == "only=value", table.concat(seen, ","))
+            function on_tick(observation) return "wait" end
+        "#;
+        assert!(validate(source).is_ok());
+    }
+
+    #[test]
+    fn tostring_hides_the_process_address_of_a_table() {
+        let lua_source = "local text = tostring({})\n\
+                           assert(text == 'table: 0x0', text)\n\
+                           function on_tick(observation) return 'wait' end";
+        assert!(validate(lua_source).is_ok());
+    }
+
+    #[test]
+    fn tostring_still_respects_a_custom_tostring_metamethod() {
+        let source = r#"
+            local labeled = setmetatable({}, {__tostring = function(_) return "named" end})
+            assert(tostring(labeled) == "named", tostring(labeled))
+            assert(tostring(42) == "42")
+            assert(tostring(true) == "true")
             function on_tick(observation) return "wait" end
         "#;
         assert!(validate(source).is_ok());
