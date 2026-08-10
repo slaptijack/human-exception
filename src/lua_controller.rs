@@ -16,7 +16,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use mlua::{Function, Lua, Table};
+use mlua::{Function, HookTriggers, Lua, Table, VmState};
 
 use crate::simulation::{
     Action, ActionError, DiscoveredTile, Observation, Position, SimEvent, Simulation, TickOutcome,
@@ -171,12 +171,38 @@ fn load_controller(lua: &Lua, source: &str) -> Result<(), ControllerError> {
         .map_err(|_| ControllerError::MissingCallback)
 }
 
+/// The number of Lua VM instructions [`validate`] allows the player's
+/// top-level source to execute before treating it as runaway. Valid
+/// controllers only define functions and a little local state at load
+/// time, so this is generous for legitimate scripts while still bounding an
+/// accidental `while true do end` to a short, recoverable pause instead of
+/// hanging the console. See `docs/TUI_DESIGN.md`, "Runaway Lua and
+/// responsiveness".
+const VALIDATE_INSTRUCTION_BUDGET: u32 = 2_000_000;
+
 /// Checks whether `source` is loadable Lua that defines the required
 /// `on_tick` callback, without running anything. Used by the console's
 /// Controller view to validate/prepare a controller for deployment ahead of
 /// time; running the operation itself is a separate step (see [`run`]).
+///
+/// Only the top-level load is bounded here (not `on_tick` itself, which
+/// isn't called): bounding a live deployment's per-tick execution is #45's
+/// concern, and applying the same hook to [`run`]'s shared `Lua` would risk
+/// tripping on an ordinary multi-tick operation's cumulative instruction
+/// count.
 pub fn validate(source: &str) -> Result<(), ControllerError> {
     let lua = Lua::new();
+    let _ = lua.set_hook(
+        HookTriggers {
+            every_nth_instruction: Some(VALIDATE_INSTRUCTION_BUDGET),
+            ..HookTriggers::default()
+        },
+        |_, _| -> mlua::Result<VmState> {
+            Err(mlua::Error::RuntimeError(
+                "controller exceeded its execution allowance while loading".to_string(),
+            ))
+        },
+    );
     load_controller(&lua, source)
 }
 
@@ -284,5 +310,12 @@ mod tests {
         // instead of validate succeeding; validate must only load the
         // script and check the callback exists.
         assert!(validate("function on_tick(observation) error('should not run') end").is_ok());
+    }
+
+    #[test]
+    fn validate_bounds_a_runaway_top_level_loop_instead_of_hanging() {
+        let err = validate("while true do end").unwrap_err();
+        assert!(matches!(err, ControllerError::ScriptInvalid(_)));
+        assert!(err.to_string().contains("execution allowance"));
     }
 }

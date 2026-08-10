@@ -40,8 +40,34 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
     .areas(area);
 
     draw_header(frame, header, state);
-    draw_body(frame, body, state);
+    // The quit-confirmation prompt can be triggered from any view (`Ctrl+Q`
+    // is global), so it has to replace the body regardless of what's
+    // currently showing — rendering it only inside Controller would leave
+    // every other view looking frozen while player input was actually being
+    // swallowed by the pending confirmation.
+    if state.quit_confirmation_pending() {
+        draw_quit_confirmation(frame, body);
+    } else {
+        draw_body(frame, body, state);
+    }
     draw_footer(frame, footer, state, area.width);
+}
+
+fn draw_quit_confirmation(frame: &mut Frame, area: Rect) {
+    let block = Block::default().borders(Borders::ALL).title("QUIT?");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let lines = vec![
+        Line::from(Span::styled(
+            "Modified controller source will be lost.",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from("Cross-launch persistence isn't implemented, so this edit can't be saved."),
+        Line::from(""),
+        Line::from("Enter / y  confirm and quit"),
+        Line::from("Esc / n    cancel and return"),
+    ];
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn draw_geometry_warning(frame: &mut Frame, area: Rect) {
@@ -59,6 +85,23 @@ fn draw_geometry_warning(frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(text), area);
 }
 
+/// `CONTROLLER: starter/modified/invalid`, or `None` before a working set
+/// has seeded any source. Shared by every header branch so a modified
+/// controller's at-risk status stays visible no matter which view the
+/// player is currently looking at (`docs/TUI_DESIGN.md`, "Persistent
+/// header").
+fn controller_status_field(state: &AppState) -> Option<String> {
+    state.controller_source()?;
+    let status = if matches!(state.validation(), Validation::Invalid(_)) {
+        "invalid"
+    } else if state.controller_modified() {
+        "modified"
+    } else {
+        "starter"
+    };
+    Some(format!("CONTROLLER: {status}"))
+}
+
 fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
     let working_set = match state.working_set() {
         Some(WorkingSet::FirstContact) => "FIRST CONTACT",
@@ -70,46 +113,61 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
     // always the last-dropped field, since it's the one status the header
     // priorities in `docs/TUI_DESIGN.md` ("Persistent header") most need to
     // stay visible at the supported minimum width.
+    let controller_field = controller_status_field(state);
+
     let candidates: Vec<String> = match state.current_view() {
         View::Signals => {
             let signals = format!("SIGNALS: {:02}", authored_signals().len());
-            vec![
-                format!("MESH: DEGRADED   {signals}   {working}"),
-                format!("{signals}   {working}"),
-            ]
+            let mut candidates = Vec::new();
+            // A modified controller is session-only and can be lost, so its
+            // status stays visible even while the player is elsewhere in the
+            // console — but every MESH-preserving candidate is tried before
+            // any candidate that drops MESH, so adding it can never cost
+            // Signals its link condition at a width that already showed one.
+            if let Some(controller) = &controller_field {
+                candidates.push(format!(
+                    "MESH: DEGRADED   {signals}   {controller}   {working}"
+                ));
+            }
+            candidates.push(format!("MESH: DEGRADED   {signals}   {working}"));
+            if let Some(controller) = &controller_field {
+                candidates.push(format!("{signals}   {controller}   {working}"));
+            }
+            candidates.push(format!("{signals}   {working}"));
+            candidates
         }
         View::Target => {
             let dossier = first_contact_dossier();
             let target = format!("TARGET: {}", dossier.title);
             let confidence = format!("CONFIDENCE: {}", dossier.confidence_summary);
-            vec![
-                format!("MESH: DEGRADED   {target}   {confidence}   {working}"),
-                // Confidence is the lowest-priority field here — drop it,
-                // not MESH, so Target doesn't lose link condition while
-                // every other view keeps it at the same widths.
-                format!("MESH: DEGRADED   {target}   {working}"),
-                format!("{target}   {confidence}   {working}"),
-                format!("{target}   {working}"),
-            ]
-        }
-        _ => match state.controller_source() {
-            Some(_) => {
-                let status = if matches!(state.validation(), Validation::Invalid(_)) {
-                    "invalid"
-                } else if state.controller_modified() {
-                    "modified"
-                } else {
-                    "starter"
-                };
-                vec![
-                    format!(
-                        "MESH: DEGRADED   SATLINK: COMPROMISED   CONTROLLER: {status}   {working}"
-                    ),
-                    format!("SATLINK: COMPROMISED   CONTROLLER: {status}   {working}"),
-                    format!("CONTROLLER: {status}   {working}"),
-                    working.clone(),
-                ]
+            let mut candidates = Vec::new();
+            if let Some(controller) = &controller_field {
+                candidates.push(format!(
+                    "MESH: DEGRADED   {target}   {controller}   {working}"
+                ));
             }
+            candidates.push(format!(
+                "MESH: DEGRADED   {target}   {confidence}   {working}"
+            ));
+            // Confidence and controller status are both lower-priority than
+            // MESH here — drop them first, not MESH, so Target doesn't lose
+            // link condition while every other view keeps it at the same
+            // widths.
+            candidates.push(format!("MESH: DEGRADED   {target}   {working}"));
+            if let Some(controller) = &controller_field {
+                candidates.push(format!("{target}   {controller}   {working}"));
+            }
+            candidates.push(format!("{target}   {confidence}   {working}"));
+            candidates.push(format!("{target}   {working}"));
+            candidates
+        }
+        _ => match &controller_field {
+            Some(controller) => vec![
+                format!("MESH: DEGRADED   SATLINK: COMPROMISED   {controller}   {working}"),
+                format!("SATLINK: COMPROMISED   {controller}   {working}"),
+                format!("{controller}   {working}"),
+                working.clone(),
+            ],
             None => vec![
                 format!("MESH: DEGRADED   SATLINK: COMPROMISED   {working}"),
                 format!("SATLINK: COMPROMISED   {working}"),
@@ -189,12 +247,23 @@ fn draw_controller_source(frame: &mut Frame, area: Rect, state: &AppState) {
 
     let source = state.controller_source().unwrap_or_default();
     let (cursor_line, cursor_col) = state.controller_cursor().unwrap_or((0, 0));
-    let lines = controller_editor_lines(source, cursor_line, cursor_col);
+    let total_lines = source.split('\n').count();
+    let gutter_width = source_gutter_width(total_lines);
+    let text_width = (content_area.width as usize).saturating_sub(gutter_width);
+    let first_visible_col = first_visible_offset(cursor_col, text_width);
+    let lines = controller_editor_lines(source, cursor_line, cursor_col, first_visible_col);
     let viewport_height = content_area.height as usize;
-    let first_visible = first_visible_line(cursor_line, lines.len(), viewport_height);
+    let first_visible_row = first_visible_offset(cursor_line, viewport_height);
+    // Clamp is separate from `first_visible_offset` itself so a document
+    // shorter than the viewport never scrolls past its own last line, which
+    // matters vertically (there's a fixed document length to respect) but
+    // not horizontally (each line has its own length, so there's no single
+    // "last column" to clamp against).
+    let max_first_row = total_lines.saturating_sub(viewport_height);
+    let first_visible_row = first_visible_row.min(max_first_row);
     let visible_lines: Vec<Line<'static>> = lines
         .into_iter()
-        .skip(first_visible)
+        .skip(first_visible_row)
         .take(viewport_height)
         .collect();
     frame.render_widget(Paragraph::new(visible_lines), content_area);
@@ -208,12 +277,9 @@ fn draw_controller_source(frame: &mut Frame, area: Rect, state: &AppState) {
 /// under the source, or `None` when there's nothing to say (an unmodified,
 /// unchecked controller keeps the full pane for source).
 fn controller_banner(state: &AppState) -> Option<Line<'static>> {
-    if state.quit_confirmation_pending() {
-        return Some(Line::from(Span::styled(
-            "Quit? Modified controller source will be lost. Enter/y confirm  Esc/n cancel",
-            Style::default().add_modifier(Modifier::BOLD),
-        )));
-    }
+    // The quit-confirmation prompt is drawn globally by `draw` (it can be
+    // triggered from any view), so it isn't handled here even though it's
+    // Controller-adjacent state.
     if state.reset_confirmation_pending() {
         return Some(Line::from(Span::styled(
             "Reset controller? Edits will be lost. Enter/y confirm  Esc/n cancel",
@@ -233,16 +299,27 @@ fn controller_banner(state: &AppState) -> Option<Line<'static>> {
     }
 }
 
+/// The gutter column width (digits plus one trailing space) for a document
+/// of `total_lines` lines. Shared between the line-rendering and the
+/// horizontal-viewport-width calculation so they can't drift apart.
+fn source_gutter_width(total_lines: usize) -> usize {
+    total_lines.to_string().len().max(2) + 1
+}
+
 /// Renders `source` as line-numbered rows with the cursor shown as a
 /// reversed-style character (or a reversed space at end-of-line/on an empty
-/// line), one [`Line`] per source line.
+/// line), one [`Line`] per source line. `first_visible_col` horizontally
+/// scrolls every line together (the same offset for all of them, as
+/// ordinary editors do), so a line longer than the pane doesn't leave the
+/// cursor invisible off the right edge once it moves or types past it.
 fn controller_editor_lines(
     source: &str,
     cursor_line: usize,
     cursor_col: usize,
+    first_visible_col: usize,
 ) -> Vec<Line<'static>> {
     let raw_lines: Vec<&str> = source.split('\n').collect();
-    let gutter_width = raw_lines.len().to_string().len().max(2);
+    let gutter_width = source_gutter_width(raw_lines.len()) - 1;
     raw_lines
         .iter()
         .enumerate()
@@ -252,10 +329,12 @@ fn controller_editor_lines(
                 Style::default().add_modifier(Modifier::DIM),
             );
             let mut spans = vec![number];
+            let visible: String = text.chars().skip(first_visible_col).collect();
             if idx == cursor_line {
-                spans.extend(cursor_line_spans(text, cursor_col));
+                let visible_cursor_col = cursor_col.saturating_sub(first_visible_col);
+                spans.extend(cursor_line_spans(&visible, visible_cursor_col));
             } else {
-                spans.push(Span::raw(text.to_string()));
+                spans.push(Span::raw(visible));
             }
             Line::from(spans)
         })
@@ -284,16 +363,18 @@ fn cursor_line_spans(text: &str, cursor_col: usize) -> Vec<Span<'static>> {
     }
 }
 
-/// The first source line to render so that `cursor_line` stays within a
-/// `viewport_height`-row window, without scrolling past the end of a
-/// document shorter than the viewport.
-fn first_visible_line(cursor_line: usize, total_lines: usize, viewport_height: usize) -> usize {
-    if viewport_height == 0 {
+/// The first line/column to render so that `cursor` stays within a
+/// `viewport_len`-cell window, scrolling only as far as needed. Used both
+/// vertically (rows) and horizontally (columns); the vertical caller
+/// additionally clamps against the document's total length (see
+/// `draw_controller_source`) so it never scrolls past a short document's
+/// last line — there's no equivalent "last column" to clamp against
+/// horizontally, since each line has its own length.
+fn first_visible_offset(cursor: usize, viewport_len: usize) -> usize {
+    if viewport_len == 0 {
         return 0;
     }
-    let max_first = total_lines.saturating_sub(viewport_height);
-    let wanted_first = cursor_line.saturating_sub(viewport_height.saturating_sub(1));
-    wanted_first.min(max_first)
+    cursor.saturating_sub(viewport_len.saturating_sub(1))
 }
 
 /// A short, representative subset of the Lua contract shown as a cheat
@@ -838,7 +919,7 @@ fn footer_hint_items(state: &AppState, show_f8: bool) -> Vec<(&'static str, &'st
     if state.current_view() == View::Controller {
         let has_controller = state.controller_source().is_some();
         items.push(("F7 Reset", "F7 Rst", has_controller));
-        items.push(("Ctrl+Enter Validate", "^Enter Val", has_controller));
+        items.push(("Ctrl+Enter Validate", "^Ent Val", has_controller));
     }
     if show_f8 {
         items.push(("F8 Toggle Pane", "F8 Pane", true));
@@ -1069,6 +1150,21 @@ mod tests {
     }
 
     #[test]
+    fn footer_keeps_the_quit_hint_visible_in_controller_at_minimum_width() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+
+        assert!(
+            buffer_contains(&terminal, "Ctrl+Q Quit"),
+            "Controller's extra F7/Ctrl+Enter hints must not crowd out the global quit hint"
+        );
+    }
+
+    #[test]
     fn header_keeps_working_set_visible_at_minimum_width() {
         use super::super::state::Msg;
 
@@ -1211,6 +1307,67 @@ mod tests {
         let terminal = render(120, 40, &state);
 
         assert!(buffer_contains(&terminal, "CONTROLLER: starter"));
+    }
+
+    #[test]
+    fn controller_status_stays_visible_after_navigating_away() {
+        use super::super::state::Msg;
+        use super::super::state::View;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.apply(Msg::EditController(super::super::editor::EditOp::Insert(
+            'x',
+        )));
+        state.apply(Msg::Navigate(View::Signals));
+        let terminal = render(120, 40, &state);
+
+        assert!(
+            buffer_contains(&terminal, "CONTROLLER: modified"),
+            "a session-only edit at risk of being lost must stay visible from Signals too"
+        );
+    }
+
+    #[test]
+    fn quit_confirmation_is_visible_from_every_view_not_only_controller() {
+        use super::super::state::Msg;
+        use super::super::state::View;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.apply(Msg::EditController(super::super::editor::EditOp::Insert(
+            'x',
+        )));
+        state.apply(Msg::Navigate(View::Signals));
+        state.apply(Msg::RequestQuit);
+        let terminal = render(120, 40, &state);
+
+        assert!(state.quit_confirmation_pending());
+        assert!(buffer_contains(
+            &terminal,
+            "Modified controller source will be lost."
+        ));
+    }
+
+    #[test]
+    fn a_long_source_line_keeps_the_cursor_visible_by_scrolling_horizontally() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        let long_marker = "Z".repeat(100);
+        for c in long_marker.chars() {
+            state.apply(Msg::EditController(super::super::editor::EditOp::Insert(c)));
+        }
+        let terminal = render(120, 40, &state);
+
+        assert!(
+            buffer_contains(&terminal, "ZZZZZZZZZZ"),
+            "the tail of a long line (where the cursor now is) must still be on screen"
+        );
     }
 
     #[test]

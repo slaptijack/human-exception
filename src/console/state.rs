@@ -262,7 +262,9 @@ impl AppState {
             Msg::EditController(op) => {
                 if let Some(controller) = self.controller.as_mut() {
                     controller.apply(op);
-                    self.validation = Validation::Unchecked;
+                    if op.is_mutating() {
+                        self.validation = Validation::Unchecked;
+                    }
                 }
             }
             Msg::ValidateController => {
@@ -522,6 +524,24 @@ mod tests {
 
         assert!(state.controller_modified());
         assert_eq!(state.validation(), &Validation::Unchecked);
+    }
+
+    #[test]
+    fn moving_the_cursor_after_validating_preserves_the_result() {
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.apply(Msg::ValidateController);
+        assert_eq!(state.validation(), &Validation::Valid);
+
+        state.apply(Msg::EditController(EditOp::MoveLeft));
+        state.apply(Msg::EditController(EditOp::MoveDown));
+
+        assert_eq!(
+            state.validation(),
+            &Validation::Valid,
+            "cursor movement doesn't change the source, so a prior validation is still accurate"
+        );
     }
 
     #[test]

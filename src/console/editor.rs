@@ -23,6 +23,20 @@ pub enum EditOp {
     PageDown,
 }
 
+impl EditOp {
+    /// Whether this operation changes the source text, as opposed to only
+    /// moving the cursor. Callers use this to decide whether a prior
+    /// validation result is still trustworthy: moving the cursor after a
+    /// successful or failed check shouldn't silently clear the READY/error
+    /// banner, since the source it describes hasn't changed.
+    pub fn is_mutating(self) -> bool {
+        matches!(
+            self,
+            EditOp::Insert(_) | EditOp::Newline | EditOp::Backspace | EditOp::DeleteForward
+        )
+    }
+}
+
 /// How many lines a `PageUp`/`PageDown` moves the cursor by. Not tied to any
 /// real viewport height (the document model doesn't know one); it's simply
 /// a fixed jump big enough to be useful for scrolling through a short
