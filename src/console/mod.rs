@@ -42,20 +42,6 @@ pub fn run() -> io::Result<()> {
         let _ = disable_raw_mode();
         return Err(err);
     }
-    // Best-effort: without this, most terminals report Ctrl+Enter with the
-    // same escape sequence as plain Enter, so Controller's Ctrl+Enter
-    // "validate" shortcut would silently behave like Enter (insert a
-    // newline) instead. Where the terminal doesn't support the Kitty
-    // keyboard protocol, that's exactly what happens; `Ctrl+V` (an
-    // ordinary control character every terminal can send) is the
-    // guaranteed fallback binding for validation either way, so this is
-    // just a nicer default, not the only path to it.
-    if supports_keyboard_enhancement().unwrap_or(false) {
-        let _ = execute!(
-            io::stdout(),
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-        );
-    }
 
     let previous_hook = install_panic_hook();
 
@@ -113,6 +99,24 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resu
         frame_size = (area.width, area.height);
         ui::draw(frame, &state);
     })?;
+
+    // Deliberately probed only after the first draw, not before: querying
+    // terminal support blocks on a reply crossterm waits up to ~2s for, and
+    // on a terminal that never answers, probing first would leave the
+    // player staring at a blank, unresponsive screen for that whole window
+    // instead of the console they just launched. Best-effort either way —
+    // without it, most terminals report Ctrl+Enter identically to plain
+    // Enter, so Controller's Ctrl+Enter "validate" shortcut would silently
+    // insert a newline instead; `Ctrl+V` (an ordinary control character
+    // every terminal sends correctly) is the guaranteed fallback binding
+    // for validation regardless, so this is just a nicer default, not the
+    // only path to it.
+    if supports_keyboard_enhancement().unwrap_or(false) {
+        let _ = execute!(
+            io::stdout(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        );
+    }
 
     while !state.should_quit() {
         let event = term_event::read()?;

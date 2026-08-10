@@ -448,17 +448,35 @@ fn cursor_line_spans(text: &str, cursor_col: usize) -> Vec<Span<'static>> {
             spans.push(Span::raw(chars.iter().collect::<String>()));
         }
         spans.push(Span::styled(" ", cursor_style));
-        spans
-    } else {
-        let before: String = chars[..cursor_col].iter().collect();
-        let at: String = chars[cursor_col].to_string();
-        let after: String = chars[cursor_col + 1..].iter().collect();
-        vec![
-            Span::raw(before),
-            Span::styled(at, cursor_style),
-            Span::raw(after),
-        ]
+        return spans;
     }
+
+    // A zero-width character at the cursor (a combining mark, e.g. the
+    // U+0301 in a decomposed "e\u{301}") can't carry its own highlighted
+    // cell — ratatui drops a standalone zero-width glyph, so highlighting
+    // just that one `char` renders no visible cursor at all. Fold it
+    // together with the base character it combines with into one
+    // highlighted unit instead, matching how a terminal renders the pair
+    // as a single visual cell; this covers the cursor landing on either
+    // the base character (marks trail it) or the mark itself (a base
+    // character precedes it).
+    let mut at_start = cursor_col;
+    while at_start > 0 && chars[at_start].width().unwrap_or(1) == 0 {
+        at_start -= 1;
+    }
+    let mut at_end = cursor_col + 1;
+    while at_end < chars.len() && chars[at_end].width().unwrap_or(1) == 0 {
+        at_end += 1;
+    }
+
+    let before: String = chars[..at_start].iter().collect();
+    let at: String = chars[at_start..at_end].iter().collect();
+    let after: String = chars[at_end..].iter().collect();
+    vec![
+        Span::raw(before),
+        Span::styled(at, cursor_style),
+        Span::raw(after),
+    ]
 }
 
 /// The first line/column to render so that `cursor` stays within a
@@ -1553,6 +1571,27 @@ mod tests {
         assert_eq!(display_width_of_prefix("中文", 1), 2);
         assert_eq!(display_width_of_prefix("中文", 2), 4);
         assert_eq!(display_width_of_prefix("ab", 2), 2);
+    }
+
+    #[test]
+    fn cursor_on_a_combining_mark_is_highlighted_together_with_its_base_character() {
+        // "e" + U+0301 (combining acute accent) is a decomposed grapheme:
+        // the mark alone is zero-width, so highlighting it by itself would
+        // render no visible cursor cell at all.
+        let text = "e\u{0301}bc";
+        let cursor_span = |cursor_col: usize| {
+            cursor_line_spans(text, cursor_col)
+                .into_iter()
+                .find(|span| span.style.add_modifier.contains(Modifier::REVERSED))
+                .expect("one span should carry the cursor style")
+        };
+
+        // Cursor on the mark itself (col 1): the highlighted unit must
+        // include the base character before it.
+        assert_eq!(cursor_span(1).content, "e\u{0301}");
+        // Cursor on the base character (col 0): the highlighted unit must
+        // include the mark trailing it.
+        assert_eq!(cursor_span(0).content, "e\u{0301}");
     }
 
     #[test]
