@@ -234,18 +234,49 @@ fn draw_controller(frame: &mut Frame, area: Rect, state: &AppState) {
             lua_field_reference_lines(),
         );
     } else if state.narrow_secondary_visible() && !state.reset_confirmation_pending() {
-        draw_pane(
-            frame,
-            area,
-            "LUA FIELD REFERENCE",
-            lua_field_reference_lines(),
-        );
+        // Unlike the wide two-pane layout above (where the source pane and
+        // its banner are always visible alongside the reference), this is
+        // the only place the reference pane can be shown *instead of* the
+        // source, so validation/reset feedback needs its own copy of the
+        // banner here too — otherwise pressing Ctrl+Enter/Ctrl+V while
+        // looking at the reference would appear to do nothing.
+        draw_controller_reference(frame, area, state);
     } else {
         // A pending reset confirmation always wins the narrow-layout toggle:
         // its banner only ever renders inside the source pane, so showing
         // the reference pane instead while it's pending would leave the
         // prompt (and the `Enter`/`Esc` it's waiting on) invisible.
         draw_controller_source(frame, area, state);
+    }
+}
+
+/// The narrow-layout (80-99 column) stand-in for the source pane when `F8`
+/// has swapped the Lua reference in instead. Renders the same validation
+/// banner `draw_controller_source` would, since that pane isn't on screen
+/// to show it.
+fn draw_controller_reference(frame: &mut Frame, area: Rect, state: &AppState) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("LUA FIELD REFERENCE");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let banner = controller_banner(state);
+    let (content_area, banner_area) = if banner.is_some() {
+        let [content, banner_row] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
+        (content, Some(banner_row))
+    } else {
+        (inner, None)
+    };
+
+    frame.render_widget(
+        Paragraph::new(lua_field_reference_lines()).wrap(Wrap { trim: false }),
+        content_area,
+    );
+
+    if let (Some(banner_area), Some(banner)) = (banner_area, banner) {
+        frame.render_widget(Paragraph::new(banner), banner_area);
     }
 }
 

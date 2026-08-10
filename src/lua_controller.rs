@@ -15,6 +15,7 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -38,12 +39,14 @@ const SANDBOX_MEMORY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 
 /// Builds a `Lua` instance exposing only the standard libraries a
 /// controller's `on_tick` contract needs (tables, strings, numbers), never
-/// `io`, `os`, `package`, `coroutine`, or `debug`, with `dofile`/`loadfile`
-/// additionally stripped (the base library installs them regardless of
-/// which `StdLib` flags are requested) and a bounded memory ceiling. Player
-/// Lua is untrusted input (AGENTS.md, "Treat Lua programs as untrusted
-/// input"); nothing in the on_tick contract needs filesystem, process, or
-/// module-loading access.
+/// `io`, `os`, `package`, `coroutine`, or `debug`, with `dofile`/`loadfile`/
+/// `print` additionally stripped (the base library installs them
+/// regardless of which `StdLib` flags are requested) and a bounded memory
+/// ceiling. Player Lua is untrusted input (AGENTS.md, "Treat Lua programs
+/// as untrusted input"); nothing in the on_tick contract needs filesystem,
+/// process, or module-loading access, and `print` writes straight to
+/// process stdout — including raw escape sequences — which would corrupt
+/// the alternate screen ratatui owns while the console is running.
 fn sandboxed_lua() -> Lua {
     let libs = StdLib::TABLE | StdLib::STRING | StdLib::MATH;
     let lua = Lua::new_with(libs, LuaOptions::default())
@@ -51,6 +54,7 @@ fn sandboxed_lua() -> Lua {
     let globals = lua.globals();
     let _ = globals.set("dofile", Value::Nil);
     let _ = globals.set("loadfile", Value::Nil);
+    let _ = globals.set("print", Value::Nil);
     let _ = lua.set_memory_limit(SANDBOX_MEMORY_LIMIT_BYTES);
     lua
 }
@@ -236,6 +240,23 @@ enum ValidationOutcome {
     Invalid(String),
 }
 
+/// An upper bound on how many `validate` background threads can be
+/// outstanding at once. In production there's only ever one caller — the
+/// console's single-threaded event loop — calling `validate` synchronously,
+/// so concurrent callers never legitimately happen there; this cap exists
+/// so that a player repeatedly pressing `Ctrl+Enter`/`Ctrl+V` against a
+/// script that caught the instruction-hook error with `pcall` (see
+/// [`VALIDATE_TIMEOUT`]) leaves at most this many permanently-abandoned
+/// threads behind, not one per press. Comfortably larger than the number of
+/// tests in this crate that call `validate` concurrently, so ordinary test
+/// parallelism (which the single production caller never exhibits) doesn't
+/// trip it.
+const MAX_CONCURRENT_VALIDATIONS: usize = 16;
+
+/// How many `validate` background threads are currently outstanding. See
+/// [`MAX_CONCURRENT_VALIDATIONS`].
+static VALIDATIONS_IN_PROGRESS: AtomicUsize = AtomicUsize::new(0);
+
 /// Checks whether `source` is loadable Lua that defines the required
 /// `on_tick` callback, without running anything. Used by the console's
 /// Controller view to validate/prepare a controller for deployment ahead of
@@ -253,9 +274,22 @@ enum ValidationOutcome {
 /// player's source actually does. A thread that doesn't finish in time is
 /// abandoned rather than force-killed — Rust has no safe way to do that —
 /// but the sandbox's stripped standard-library set and memory ceiling
-/// (`sandboxed_lua`) keep an abandoned thread's worst case bounded rather
-/// than unbounded host resource use.
+/// (`sandboxed_lua`) keep an abandoned thread's worst case bounded, and
+/// [`VALIDATIONS_IN_PROGRESS`] caps the number of such threads at
+/// [`MAX_CONCURRENT_VALIDATIONS`] rather than letting repeated validation
+/// attempts against the same runaway script accumulate without limit.
 pub fn validate(source: &str) -> Result<(), ControllerError> {
+    if VALIDATIONS_IN_PROGRESS
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+            (count < MAX_CONCURRENT_VALIDATIONS).then_some(count + 1)
+        })
+        .is_err()
+    {
+        return Err(ControllerError::ScriptInvalid(mlua::Error::RuntimeError(
+            "too many validations are still finishing; try again in a moment".to_string(),
+        )));
+    }
+
     let source = source.to_string();
     let (tx, rx) = mpsc::channel();
 
@@ -280,6 +314,11 @@ pub fn validate(source: &str) -> Result<(), ControllerError> {
                 "controller failed to load for an unexpected reason".to_string(),
             ),
         };
+        // Only now does this thread's slot free up for a future `validate`
+        // call; if this thread never reaches here (the runaway case this
+        // whole mechanism exists for), the slot stays taken forever, which
+        // is the point.
+        VALIDATIONS_IN_PROGRESS.fetch_sub(1, Ordering::SeqCst);
         // If the receiver already timed out and dropped, there's nowhere
         // left to report this; the thread just exits.
         let _ = tx.send(outcome);
@@ -410,18 +449,16 @@ mod tests {
         assert!(err.to_string().contains("execution allowance"));
     }
 
-    #[test]
-    fn validate_bounds_a_loop_that_catches_the_instruction_hook_with_pcall() {
-        // The instruction-count hook's error is an ordinary Lua error, so a
-        // script that wraps its own infinite loop in `pcall` can catch it
-        // and immediately re-trigger another one, forever, from Lua's own
-        // point of view. Only the thread-timeout backstop in `validate`
-        // actually bounds this.
-        let err =
-            validate("while true do pcall(function() while true do end end) end").unwrap_err();
-        assert!(matches!(err, ControllerError::ScriptInvalid(_)));
-        assert!(err.to_string().contains("execution allowance"));
-    }
+    // The pcall-wrapped-instruction-hook-bypass regression test lives in its
+    // own integration test binary
+    // (`tests/lua_controller_execution_limit.rs`), not here: that script
+    // genuinely never lets its background thread finish, which permanently
+    // holds `VALIDATION_IN_PROGRESS`'s single slot for the rest of whatever
+    // process runs it — harmless in a dedicated process with no other
+    // `validate` calls after it, but it would spuriously fail every other
+    // test in this file (and every other unit test in the crate, since
+    // `cargo test`'s unit tests all share one binary/process) that happens
+    // to run afterward.
 
     #[test]
     fn validate_rejects_dofile_and_loadfile() {
