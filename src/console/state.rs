@@ -4,6 +4,14 @@
 //! library so it can be tested without a real terminal and so later issues
 //! can grow the state model without coupling it to widget code.
 
+use super::intel::authored_signals;
+
+/// An upper bound on how far Help can scroll. The full contextual + Lua
+/// reference content is well under this many lines; capping here just
+/// guarantees `ScrollHelpDown` can never run away toward `u16::MAX` and
+/// leave the player pressing `Up` an impractical number of times to recover.
+const MAX_HELP_SCROLL: u16 = 60;
+
 /// A major state the console can be showing.
 ///
 /// Mirrors the `Signals -> Target -> Controller -> Operation -> After
@@ -20,14 +28,7 @@ pub enum View {
 }
 
 /// The opportunity the player has chosen to work.
-///
-/// No opportunity can be selected yet (that's #43), so this exists only as
-/// the seam later issues will populate; it is always `None` in this issue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[allow(
-    dead_code,
-    reason = "constructed starting in #43 once selection exists"
-)]
 pub enum WorkingSet {
     FirstContact,
 }
@@ -38,6 +39,14 @@ pub enum Msg {
     Navigate(View),
     OpenHelp,
     DismissHelp,
+    SelectPreviousSignal,
+    SelectNextSignal,
+    /// Context-sensitive "Enter": inspects the selected signal in Signals,
+    /// or commits to working the current dossier's opportunity in Target.
+    Activate,
+    ToggleSecondaryPane,
+    ScrollHelpUp,
+    ScrollHelpDown,
     Quit,
 }
 
@@ -47,6 +56,19 @@ pub struct AppState {
     current_view: View,
     help_return_view: Option<View>,
     working_set: Option<WorkingSet>,
+    /// Index into [`authored_signals`], moved by `SelectPreviousSignal` /
+    /// `SelectNextSignal`.
+    selected_signal: usize,
+    /// True once the player has inspected the actionable signal, making
+    /// Target reachable even before a working set is committed.
+    target_known: bool,
+    /// The player's current Lua source for the working set, seeded from the
+    /// starter controller the first time an opportunity is committed to.
+    controller_source: Option<String>,
+    /// At 80-99 columns, whether the secondary (detail/provenance) pane is
+    /// showing instead of the primary one.
+    narrow_secondary_visible: bool,
+    help_scroll: u16,
     should_quit: bool,
 }
 
@@ -56,6 +78,11 @@ impl Default for AppState {
             current_view: View::Signals,
             help_return_view: None,
             working_set: None,
+            selected_signal: 0,
+            target_known: false,
+            controller_source: None,
+            narrow_secondary_visible: false,
+            help_scroll: 0,
             should_quit: false,
         }
     }
@@ -70,25 +97,81 @@ impl AppState {
         self.current_view
     }
 
+    /// The view Help was opened from, if Help is currently showing.
+    pub fn help_return_view(&self) -> Option<View> {
+        self.help_return_view
+    }
+
     pub fn working_set(&self) -> Option<WorkingSet> {
         self.working_set
+    }
+
+    pub fn selected_signal(&self) -> usize {
+        self.selected_signal
+    }
+
+    pub fn target_known(&self) -> bool {
+        self.target_known
+    }
+
+    pub fn controller_source(&self) -> Option<&str> {
+        self.controller_source.as_deref()
+    }
+
+    pub fn narrow_secondary_visible(&self) -> bool {
+        self.narrow_secondary_visible
+    }
+
+    pub fn help_scroll(&self) -> u16 {
+        self.help_scroll
+    }
+
+    /// Bounds the stored scroll offset itself against `max`, not just the
+    /// value used for a single render. Without this, repeated `Down`
+    /// presses can advance `help_scroll` toward `MAX_HELP_SCROLL` even once
+    /// the content is fully visible, and `Up` then appears to do nothing
+    /// until the stored offset drops back below the real maximum.
+    pub fn clamp_help_scroll(&mut self, max: u16) {
+        self.help_scroll = self.help_scroll.min(max);
     }
 
     pub fn should_quit(&self) -> bool {
         self.should_quit
     }
 
+    /// Resets narrow-layout state that only makes sense for the geometry it
+    /// was toggled under: a `ToggleSecondaryPane` while wide has no visible
+    /// effect, but without this it would still silently flip the flag, so a
+    /// later resize into narrow layout could show the secondary pane
+    /// without the player ever having pressed `F8` in that layout.
+    pub fn handle_resize(&mut self) {
+        self.narrow_secondary_visible = false;
+    }
+
+    /// Whether `view` is currently reachable via `Navigate`, given what the
+    /// player has inspected or committed to so far.
+    pub fn view_available(&self, view: View) -> bool {
+        match view {
+            View::Signals | View::AfterAction | View::Help => true,
+            View::Target => self.target_known || self.working_set.is_some(),
+            View::Controller | View::Operation => self.working_set.is_some(),
+        }
+    }
+
     /// Applies a single player intent, transitioning session state.
     pub fn apply(&mut self, msg: Msg) {
         match msg {
-            // TODO(#43): gate Navigate on prerequisite state (a selected
-            // signal/working set) once that state exists. Every view is
-            // reachable for now because there is nothing yet to gate on.
-            Msg::Navigate(view) => self.current_view = view,
+            Msg::Navigate(view) => {
+                if self.view_available(view) {
+                    self.current_view = view;
+                    self.narrow_secondary_visible = false;
+                }
+            }
             Msg::OpenHelp => {
                 if self.current_view != View::Help {
                     self.help_return_view = Some(self.current_view);
                     self.current_view = View::Help;
+                    self.help_scroll = 0;
                 }
             }
             Msg::DismissHelp => {
@@ -96,7 +179,44 @@ impl AppState {
                     self.current_view = view;
                 }
             }
+            Msg::SelectPreviousSignal => {
+                self.selected_signal = self.selected_signal.saturating_sub(1);
+            }
+            Msg::SelectNextSignal => {
+                let last = authored_signals().len().saturating_sub(1);
+                self.selected_signal = (self.selected_signal + 1).min(last);
+            }
+            Msg::Activate => self.activate(),
+            Msg::ToggleSecondaryPane => {
+                self.narrow_secondary_visible = !self.narrow_secondary_visible;
+            }
+            Msg::ScrollHelpUp => self.help_scroll = self.help_scroll.saturating_sub(1),
+            Msg::ScrollHelpDown => {
+                self.help_scroll = self.help_scroll.saturating_add(1).min(MAX_HELP_SCROLL);
+            }
             Msg::Quit => self.should_quit = true,
+        }
+    }
+
+    fn activate(&mut self) {
+        match self.current_view {
+            View::Signals => {
+                let selected = authored_signals().get(self.selected_signal);
+                if selected.is_some_and(|signal| signal.is_actionable()) {
+                    self.target_known = true;
+                    self.current_view = View::Target;
+                    self.narrow_secondary_visible = false;
+                }
+            }
+            View::Target => {
+                if self.working_set != Some(WorkingSet::FirstContact) {
+                    self.working_set = Some(WorkingSet::FirstContact);
+                    self.controller_source = Some(super::intel::STARTER_CONTROLLER.to_string());
+                }
+                self.current_view = View::Controller;
+                self.narrow_secondary_visible = false;
+            }
+            _ => {}
         }
     }
 }
@@ -115,15 +235,45 @@ mod tests {
     }
 
     #[test]
-    fn navigate_switches_the_current_view() {
-        for view in [
-            View::Signals,
-            View::Target,
-            View::Controller,
-            View::Operation,
-            View::AfterAction,
-        ] {
+    fn navigate_switches_the_current_view_for_always_available_views() {
+        for view in [View::Signals, View::AfterAction] {
             let mut state = AppState::new();
+            state.apply(Msg::Navigate(view));
+            assert_eq!(state.current_view(), view);
+        }
+    }
+
+    #[test]
+    fn target_controller_and_operation_are_unreachable_before_their_prerequisites() {
+        for view in [View::Target, View::Controller, View::Operation] {
+            let mut state = AppState::new();
+            state.apply(Msg::Navigate(view));
+            assert_eq!(
+                state.current_view(),
+                View::Signals,
+                "{view:?} should not be reachable from a fresh session"
+            );
+        }
+    }
+
+    #[test]
+    fn target_becomes_reachable_once_the_actionable_signal_is_inspected() {
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+
+        state.apply(Msg::Navigate(View::Signals));
+        state.apply(Msg::Navigate(View::Target));
+
+        assert_eq!(state.current_view(), View::Target);
+    }
+
+    #[test]
+    fn controller_and_operation_become_reachable_once_a_working_set_exists() {
+        let mut state = AppState::new();
+        state.apply(Msg::Activate); // inspect First Contact
+        state.apply(Msg::Activate); // commit to working it
+
+        for view in [View::Controller, View::Operation] {
             state.apply(Msg::Navigate(view));
             assert_eq!(state.current_view(), view);
         }
@@ -132,7 +282,7 @@ mod tests {
     #[test]
     fn opening_help_remembers_the_prior_view() {
         let mut state = AppState::new();
-        state.apply(Msg::Navigate(View::Controller));
+        state.apply(Msg::Navigate(View::AfterAction));
 
         state.apply(Msg::OpenHelp);
 
@@ -142,34 +292,157 @@ mod tests {
     #[test]
     fn dismissing_help_restores_the_exact_prior_view() {
         let mut state = AppState::new();
-        state.apply(Msg::Navigate(View::Operation));
+        state.apply(Msg::Navigate(View::AfterAction));
         state.apply(Msg::OpenHelp);
 
         state.apply(Msg::DismissHelp);
 
-        assert_eq!(state.current_view(), View::Operation);
+        assert_eq!(state.current_view(), View::AfterAction);
     }
 
     #[test]
     fn dismissing_help_without_opening_it_is_a_no_op() {
         let mut state = AppState::new();
-        state.apply(Msg::Navigate(View::Target));
+        state.apply(Msg::Navigate(View::AfterAction));
 
         state.apply(Msg::DismissHelp);
 
-        assert_eq!(state.current_view(), View::Target);
+        assert_eq!(state.current_view(), View::AfterAction);
     }
 
     #[test]
     fn opening_help_twice_keeps_the_original_return_view() {
         let mut state = AppState::new();
-        state.apply(Msg::Navigate(View::Target));
+        state.apply(Msg::Navigate(View::AfterAction));
 
         state.apply(Msg::OpenHelp);
         state.apply(Msg::OpenHelp);
         state.apply(Msg::DismissHelp);
 
+        assert_eq!(state.current_view(), View::AfterAction);
+    }
+
+    #[test]
+    fn signal_selection_does_not_move_past_the_ends_of_the_list() {
+        let mut state = AppState::new();
+
+        state.apply(Msg::SelectPreviousSignal);
+        assert_eq!(state.selected_signal(), 0);
+
+        for _ in 0..authored_signals().len() + 2 {
+            state.apply(Msg::SelectNextSignal);
+        }
+        assert_eq!(state.selected_signal(), authored_signals().len() - 1);
+    }
+
+    #[test]
+    fn activating_the_actionable_signal_marks_target_known_and_opens_it() {
+        let mut state = AppState::new();
+        let actionable = authored_signals()
+            .iter()
+            .position(|signal| signal.is_actionable())
+            .expect("exactly one signal is actionable");
+        for _ in 0..actionable {
+            state.apply(Msg::SelectNextSignal);
+        }
+
+        state.apply(Msg::Activate);
+
+        assert!(state.target_known());
         assert_eq!(state.current_view(), View::Target);
+    }
+
+    #[test]
+    fn activating_a_non_actionable_signal_is_a_no_op() {
+        let mut state = AppState::new();
+        let non_actionable = authored_signals()
+            .iter()
+            .position(|signal| !signal.is_actionable())
+            .expect("at least one signal is non-actionable");
+        for _ in 0..non_actionable {
+            state.apply(Msg::SelectNextSignal);
+        }
+
+        state.apply(Msg::Activate);
+
+        assert!(!state.target_known());
+        assert_eq!(state.current_view(), View::Signals);
+    }
+
+    #[test]
+    fn activating_target_commits_the_working_set_and_seeds_the_starter_controller() {
+        let mut state = AppState::new();
+        state.apply(Msg::Activate); // inspect
+        state.apply(Msg::Activate); // commit
+
+        assert_eq!(state.working_set(), Some(WorkingSet::FirstContact));
+        assert_eq!(
+            state.controller_source(),
+            Some(super::super::intel::STARTER_CONTROLLER)
+        );
+        assert_eq!(state.current_view(), View::Controller);
+    }
+
+    #[test]
+    fn reactivating_target_preserves_edited_controller_source() {
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.controller_source = Some("-- edited by the player".to_string());
+
+        state.apply(Msg::Navigate(View::Target));
+        state.apply(Msg::Activate);
+
+        assert_eq!(state.controller_source(), Some("-- edited by the player"));
+    }
+
+    #[test]
+    fn toggling_the_secondary_pane_flips_visibility_and_navigation_resets_it() {
+        let mut state = AppState::new();
+        state.apply(Msg::ToggleSecondaryPane);
+        assert!(state.narrow_secondary_visible());
+
+        state.apply(Msg::Navigate(View::Signals));
+        assert!(!state.narrow_secondary_visible());
+    }
+
+    #[test]
+    fn help_scroll_moves_up_and_down_and_saturates_at_zero() {
+        let mut state = AppState::new();
+        state.apply(Msg::ScrollHelpDown);
+        state.apply(Msg::ScrollHelpDown);
+        assert_eq!(state.help_scroll(), 2);
+
+        state.apply(Msg::ScrollHelpUp);
+        state.apply(Msg::ScrollHelpUp);
+        state.apply(Msg::ScrollHelpUp);
+        assert_eq!(state.help_scroll(), 0);
+    }
+
+    #[test]
+    fn help_scroll_is_capped_and_recoverable() {
+        let mut state = AppState::new();
+        for _ in 0..1000 {
+            state.apply(Msg::ScrollHelpDown);
+        }
+        let capped = state.help_scroll();
+        assert!(capped < 1000);
+
+        for _ in 0..capped {
+            state.apply(Msg::ScrollHelpUp);
+        }
+        assert_eq!(state.help_scroll(), 0);
+    }
+
+    #[test]
+    fn resizing_clears_the_narrow_secondary_pane_flag() {
+        let mut state = AppState::new();
+        state.apply(Msg::ToggleSecondaryPane);
+        assert!(state.narrow_secondary_visible());
+
+        state.handle_resize();
+
+        assert!(!state.narrow_secondary_visible());
     }
 
     #[test]
