@@ -12,12 +12,15 @@ use super::state::{Msg, View};
 /// Maps a key event to a player intent, given the view currently showing
 /// (several keys are context-sensitive: `F1`/`Esc` need to know whether
 /// Help is open, `Esc`/arrows/`Enter` behave differently in Signals, Target,
-/// and Help) and whether either confirmation dialog is currently open.
+/// and Help), whether either confirmation dialog is currently open, and
+/// whether Controller's source pane (rather than the Lua reference pane,
+/// which `F8` can swap in at 80-99 columns) is what's actually on screen.
 pub fn map(
     key: KeyEvent,
     current_view: View,
     reset_confirmation_pending: bool,
     quit_confirmation_pending: bool,
+    controller_source_visible: bool,
 ) -> Option<Msg> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
@@ -74,7 +77,16 @@ pub fn map(
         {
             Some(Msg::ToggleSecondaryPane)
         }
-        KeyCode::Enter if ctrl && controller_is_open => Some(Msg::ValidateController),
+        // `Ctrl+Enter` is the advertised binding, but plenty of terminals
+        // report it identically to plain `Enter` without the Kitty keyboard
+        // protocol (see `console::run`'s best-effort attempt to enable it).
+        // `Ctrl+V` is an ordinary control character every terminal can
+        // send, so it works everywhere as a guaranteed fallback — without
+        // it, players on those terminals would have no way to validate at
+        // all, since `Ctrl+Enter` would just insert a newline instead.
+        KeyCode::Enter | KeyCode::Char('v') if ctrl && controller_is_open => {
+            Some(Msg::ValidateController)
+        }
         KeyCode::Enter
             if !ctrl && (current_view == View::Signals || current_view == View::Target) =>
         {
@@ -84,7 +96,10 @@ pub fn map(
         KeyCode::Down if current_view == View::Signals => Some(Msg::SelectNextSignal),
         KeyCode::Up if help_is_open => Some(Msg::ScrollHelpUp),
         KeyCode::Down if help_is_open => Some(Msg::ScrollHelpDown),
-        _ if controller_is_open => map_controller_edit(key.code, ctrl),
+        // While the reference pane is swapped in at 80-99 columns, the
+        // source isn't on screen at all, so ordinary editing keys must not
+        // silently mutate it — only F8 (handled above) can bring it back.
+        _ if controller_is_open && controller_source_visible => map_controller_edit(key.code, ctrl),
         _ => None,
     }
 }
@@ -127,9 +142,10 @@ mod tests {
         KeyEvent::new(code, modifiers)
     }
 
-    /// Shorthand for the common case: neither confirmation dialog is open.
+    /// Shorthand for the common case: neither confirmation dialog is open
+    /// and Controller's source pane (if relevant) is visible.
     fn map_in(key: KeyEvent, view: View) -> Option<Msg> {
-        map(key, view, false, false)
+        map(key, view, false, false, true)
     }
 
     #[test]
@@ -222,6 +238,71 @@ mod tests {
             Some(Msg::ValidateController)
         );
         assert_eq!(map_in(ctrl_enter, View::Signals), None);
+    }
+
+    #[test]
+    fn ctrl_v_also_validates_as_a_fallback_for_terminals_without_ctrl_enter() {
+        let ctrl_v = key_with_modifiers(KeyCode::Char('v'), KeyModifiers::CONTROL);
+        assert_eq!(
+            map_in(ctrl_v, View::Controller),
+            Some(Msg::ValidateController)
+        );
+        assert_eq!(map_in(ctrl_v, View::Signals), None);
+    }
+
+    #[test]
+    fn editing_keys_are_inert_while_the_reference_pane_is_shown_instead_of_source() {
+        let source_hidden = false;
+        assert_eq!(
+            map(
+                key(KeyCode::Char('x')),
+                View::Controller,
+                false,
+                false,
+                source_hidden
+            ),
+            None
+        );
+        assert_eq!(
+            map(
+                key(KeyCode::Backspace),
+                View::Controller,
+                false,
+                false,
+                source_hidden
+            ),
+            None
+        );
+        assert_eq!(
+            map(
+                key(KeyCode::Left),
+                View::Controller,
+                false,
+                false,
+                source_hidden
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn f7_and_validate_still_work_while_the_reference_pane_is_shown() {
+        let source_hidden = false;
+        assert_eq!(
+            map(
+                key(KeyCode::F(7)),
+                View::Controller,
+                false,
+                false,
+                source_hidden
+            ),
+            Some(Msg::RequestResetController)
+        );
+        let ctrl_enter = key_with_modifiers(KeyCode::Enter, KeyModifiers::CONTROL);
+        assert_eq!(
+            map(ctrl_enter, View::Controller, false, false, source_hidden),
+            Some(Msg::ValidateController)
+        );
     }
 
     #[test]
@@ -344,23 +425,23 @@ mod tests {
     #[test]
     fn quit_confirmation_pending_only_accepts_confirm_or_cancel() {
         assert_eq!(
-            map(key(KeyCode::Enter), View::Controller, false, true),
+            map(key(KeyCode::Enter), View::Controller, false, true, true),
             Some(Msg::ConfirmQuit)
         );
         assert_eq!(
-            map(key(KeyCode::Char('y')), View::Controller, false, true),
+            map(key(KeyCode::Char('y')), View::Controller, false, true, true),
             Some(Msg::ConfirmQuit)
         );
         assert_eq!(
-            map(key(KeyCode::Esc), View::Controller, false, true),
+            map(key(KeyCode::Esc), View::Controller, false, true, true),
             Some(Msg::CancelQuit)
         );
         assert_eq!(
-            map(key(KeyCode::Char('n')), View::Controller, false, true),
+            map(key(KeyCode::Char('n')), View::Controller, false, true, true),
             Some(Msg::CancelQuit)
         );
         assert_eq!(
-            map(key(KeyCode::Char('x')), View::Controller, false, true),
+            map(key(KeyCode::Char('x')), View::Controller, false, true, true),
             None,
             "ordinary keys must not leak through while the quit dialog is open"
         );
@@ -369,15 +450,15 @@ mod tests {
     #[test]
     fn reset_confirmation_pending_only_accepts_confirm_or_cancel() {
         assert_eq!(
-            map(key(KeyCode::Enter), View::Controller, true, false),
+            map(key(KeyCode::Enter), View::Controller, true, false, true),
             Some(Msg::ConfirmResetController)
         );
         assert_eq!(
-            map(key(KeyCode::Esc), View::Controller, true, false),
+            map(key(KeyCode::Esc), View::Controller, true, false, true),
             Some(Msg::CancelResetController)
         );
         assert_eq!(
-            map(key(KeyCode::Char('x')), View::Controller, true, false),
+            map(key(KeyCode::Char('x')), View::Controller, true, false, true),
             None,
             "ordinary keys must not leak through while the reset dialog is open"
         );
@@ -386,7 +467,7 @@ mod tests {
     #[test]
     fn quit_confirmation_takes_priority_over_reset_confirmation() {
         assert_eq!(
-            map(key(KeyCode::Enter), View::Controller, true, true),
+            map(key(KeyCode::Enter), View::Controller, true, true, true),
             Some(Msg::ConfirmQuit)
         );
     }
@@ -395,7 +476,7 @@ mod tests {
     fn ctrl_q_quits_even_while_the_reset_dialog_is_open() {
         let quit = key_with_modifiers(KeyCode::Char('q'), KeyModifiers::CONTROL);
         assert_eq!(
-            map(quit, View::Controller, true, false),
+            map(quit, View::Controller, true, false, true),
             Some(Msg::RequestQuit)
         );
     }

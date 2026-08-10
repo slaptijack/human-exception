@@ -46,9 +46,10 @@ pub fn run() -> io::Result<()> {
     // same escape sequence as plain Enter, so Controller's Ctrl+Enter
     // "validate" shortcut would silently behave like Enter (insert a
     // newline) instead. Where the terminal doesn't support the Kitty
-    // keyboard protocol, that's exactly what happens, which is an
-    // acceptable degradation since Ctrl+Enter is a convenience shortcut,
-    // not the only way to reach validation.
+    // keyboard protocol, that's exactly what happens; `Ctrl+V` (an
+    // ordinary control character every terminal can send) is the
+    // guaranteed fallback binding for validation either way, so this is
+    // just a nicer default, not the only path to it.
     if supports_keyboard_enhancement().unwrap_or(false) {
         let _ = execute!(
             io::stdout(),
@@ -161,6 +162,7 @@ fn should_redraw(state: &mut AppState, event: Event, frame_size: (u16, u16)) -> 
         state.current_view(),
         state.reset_confirmation_pending(),
         state.quit_confirmation_pending(),
+        ui::controller_source_visible(state, frame_size.0),
     ) {
         Some(msg) => {
             let is_quit_related =
@@ -372,6 +374,24 @@ mod tests {
         }
 
         assert!(buffer_contains(&terminal, "SIGNALS"));
+    }
+
+    #[test]
+    fn typing_while_the_narrow_reference_pane_is_shown_does_not_edit_the_hidden_source() {
+        let (state, _) = render(
+            90,
+            30,
+            &[
+                press(KeyCode::Enter), // inspect the actionable signal, opening Target
+                press(KeyCode::Enter), // commit, opening Controller
+                press(KeyCode::F(8)),  // swap to the Lua reference pane
+                press(KeyCode::Char('x')),
+                press(KeyCode::Backspace),
+            ],
+        );
+
+        assert!(state.narrow_secondary_visible());
+        assert_eq!(state.controller_source(), Some(intel::STARTER_CONTROLLER));
     }
 
     #[test]

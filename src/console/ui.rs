@@ -9,6 +9,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use unicode_width::UnicodeWidthChar;
 
 use super::intel::{Signal, TargetDossier, authored_signals, first_contact_dossier};
 use super::state::{AppState, Validation, View, WorkingSet};
@@ -205,6 +206,15 @@ fn draw_body(frame: &mut Frame, area: Rect, state: &AppState) {
     }
 }
 
+/// Whether Controller's source pane (rather than the Lua reference pane
+/// `F8` can swap in at 80-99 columns) is what's actually on screen for
+/// `frame_width`. Exposed so the event mapper can gate editing keys on it —
+/// typing while the reference pane is showing must not silently edit an
+/// invisible source (see `event::map`).
+pub(crate) fn controller_source_visible(state: &AppState, frame_width: u16) -> bool {
+    frame_width >= TWO_PANE_MIN_COLUMNS || !state.narrow_secondary_visible()
+}
+
 fn draw_controller(frame: &mut Frame, area: Rect, state: &AppState) {
     if area.width >= TWO_PANE_MIN_COLUMNS {
         let [left, right] =
@@ -250,8 +260,15 @@ fn draw_controller_source(frame: &mut Frame, area: Rect, state: &AppState) {
     let total_lines = source.split('\n').count();
     let gutter_width = source_gutter_width(total_lines);
     let text_width = (content_area.width as usize).saturating_sub(gutter_width);
-    let first_visible_col = first_visible_offset(cursor_col, text_width);
-    let lines = controller_editor_lines(source, cursor_line, cursor_col, first_visible_col);
+    // Scrolling is computed in terminal display cells, not `char`s: a
+    // double-width character (e.g. CJK text in a comment or string) still
+    // costs two columns on screen even though it's one `char`, so indexing
+    // by `char` count alone can leave the cursor's true screen column
+    // outside a narrow pane while this thinks it's still visible.
+    let cursor_line_text = source.split('\n').nth(cursor_line).unwrap_or("");
+    let cursor_display_col = display_width_of_prefix(cursor_line_text, cursor_col);
+    let first_visible_cell = first_visible_offset(cursor_display_col, text_width);
+    let lines = controller_editor_lines(source, cursor_line, cursor_col, first_visible_cell);
     let viewport_height = content_area.height as usize;
     let first_visible_row = first_visible_offset(cursor_line, viewport_height);
     // Clamp is separate from `first_visible_offset` itself so a document
@@ -316,7 +333,7 @@ fn controller_editor_lines(
     source: &str,
     cursor_line: usize,
     cursor_col: usize,
-    first_visible_col: usize,
+    first_visible_cell: usize,
 ) -> Vec<Line<'static>> {
     let raw_lines: Vec<&str> = source.split('\n').collect();
     let gutter_width = source_gutter_width(raw_lines.len()) - 1;
@@ -329,9 +346,10 @@ fn controller_editor_lines(
                 Style::default().add_modifier(Modifier::DIM),
             );
             let mut spans = vec![number];
-            let visible: String = text.chars().skip(first_visible_col).collect();
+            let skip_chars = chars_to_skip_for_cell_offset(text, first_visible_cell);
+            let visible: String = text.chars().skip(skip_chars).collect();
             if idx == cursor_line {
-                let visible_cursor_col = cursor_col.saturating_sub(first_visible_col);
+                let visible_cursor_col = cursor_col.saturating_sub(skip_chars);
                 spans.extend(cursor_line_spans(&visible, visible_cursor_col));
             } else {
                 spans.push(Span::raw(visible));
@@ -339,6 +357,33 @@ fn controller_editor_lines(
             Line::from(spans)
         })
         .collect()
+}
+
+/// The display-cell width of the first `char_count` characters of `text`.
+/// Characters `unicode-width` doesn't assign a width to (control
+/// characters) count as zero, matching how they'd render.
+fn display_width_of_prefix(text: &str, char_count: usize) -> usize {
+    text.chars()
+        .take(char_count)
+        .map(|c| c.width().unwrap_or(0))
+        .sum()
+}
+
+/// How many leading characters of `text` to skip so that they, combined,
+/// consume at least `cells` display-cell columns — the character-count
+/// equivalent of a cell-based horizontal scroll offset, since `chars()`
+/// iterates by character, not display width.
+fn chars_to_skip_for_cell_offset(text: &str, cells: usize) -> usize {
+    let mut consumed = 0usize;
+    let mut skip = 0usize;
+    for c in text.chars() {
+        if consumed >= cells {
+            break;
+        }
+        consumed += c.width().unwrap_or(0).max(1);
+        skip += 1;
+    }
+    skip
 }
 
 fn cursor_line_spans(text: &str, cursor_col: usize) -> Vec<Span<'static>> {
@@ -757,6 +802,12 @@ fn help_lines(state: &AppState) -> Vec<Line<'static>> {
     lines.push(Line::from(
         "Ctrl+Enter       (Controller) check the source loads, without running it",
     ));
+    lines.push(Line::from(
+        "Ctrl+V           (Controller) same as Ctrl+Enter, for terminals that",
+    ));
+    lines.push(Line::from(
+        "                 can't tell Ctrl+Enter apart from plain Enter",
+    ));
     lines.push(Line::from("Ctrl+Q Quit      exit and restore the terminal"));
     lines.push(Line::from(""));
 
@@ -885,6 +936,7 @@ fn view_specific_help(view: View) -> Vec<Line<'static>> {
             Line::from("Type to edit; arrows/Home/End/PageUp/PageDown move the cursor"),
             Line::from("F7          reset to the starter controller (confirms if modified)"),
             Line::from("Ctrl+Enter  check whether the source loads, without running it"),
+            Line::from("Ctrl+V      same as Ctrl+Enter (works on every terminal)"),
             Line::from("F8          (80-99 columns) switch between source and reference"),
         ],
         View::Operation => vec![Line::from("Live telemetry arrives in a later build (#45).")],
@@ -1368,6 +1420,26 @@ mod tests {
             buffer_contains(&terminal, "ZZZZZZZZZZ"),
             "the tail of a long line (where the cursor now is) must still be on screen"
         );
+    }
+
+    #[test]
+    fn display_width_of_prefix_counts_double_width_characters_as_two_cells() {
+        // "中" (CJK) occupies two terminal columns despite being one `char`;
+        // a scroll calculation based on `char` count alone would place the
+        // cursor two columns short of its true screen position.
+        assert_eq!(display_width_of_prefix("中文", 1), 2);
+        assert_eq!(display_width_of_prefix("中文", 2), 4);
+        assert_eq!(display_width_of_prefix("ab", 2), 2);
+    }
+
+    #[test]
+    fn chars_to_skip_for_cell_offset_accounts_for_double_width_characters() {
+        // Skipping 2 display cells must skip exactly one CJK character, not
+        // zero (which char-count-only scrolling would do, since 2 chars
+        // would be requested but only 1 exists at that cell offset).
+        assert_eq!(chars_to_skip_for_cell_offset("中文abc", 2), 1);
+        assert_eq!(chars_to_skip_for_cell_offset("中文abc", 4), 2);
+        assert_eq!(chars_to_skip_for_cell_offset("abc", 2), 2);
     }
 
     #[test]

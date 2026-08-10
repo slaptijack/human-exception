@@ -72,6 +72,12 @@ fn invalid_lua_syntax_is_a_clean_error() {
 }
 
 #[test]
+fn a_script_reaching_for_a_host_capability_is_a_clean_error() {
+    let err = lua_controller::run(&fixture("host_capability.lua"), |_| {}).unwrap_err();
+    assert!(matches!(err, ControllerError::ScriptInvalid(_)));
+}
+
+#[test]
 fn a_missing_callback_is_a_clean_error() {
     let err = lua_controller::run(&fixture("missing_callback.lua"), |_| {}).unwrap_err();
     assert!(matches!(err, ControllerError::MissingCallback));

@@ -16,7 +16,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use mlua::{Function, HookTriggers, Lua, Table, VmState};
+use mlua::{Function, HookTriggers, Lua, LuaOptions, StdLib, Table, VmState};
 
 use crate::simulation::{
     Action, ActionError, DiscoveredTile, Observation, Position, SimEvent, Simulation, TickOutcome,
@@ -25,6 +25,21 @@ use crate::simulation::{
 
 /// The name of the one callback a player script must define.
 pub const ON_TICK: &str = "on_tick";
+
+/// Builds a `Lua` instance exposing only the standard libraries a
+/// controller's `on_tick` contract needs (tables, strings, numbers), never
+/// `io`, `os`, `package`, `coroutine`, or `debug`. Player Lua is untrusted
+/// input (AGENTS.md, "Treat Lua programs as untrusted input"); nothing in
+/// the on_tick contract needs filesystem, process, or module-loading
+/// access, and granting it would let a player script block or escape the
+/// sandbox in ways the instruction-count hook in [`validate`] can't catch
+/// (a hook only fires between Lua VM instructions, not while blocked inside
+/// a host call like `os.execute`).
+fn sandboxed_lua() -> Lua {
+    let libs = StdLib::TABLE | StdLib::STRING | StdLib::MATH;
+    Lua::new_with(libs, LuaOptions::default())
+        .expect("sandboxed stdlib set excludes debug/ffi, so this cannot fail")
+}
 
 /// A failure at the Lua controller boundary. Every variant is returned
 /// without the simulation having advanced or mutated as a result of the
@@ -110,7 +125,7 @@ pub fn run(
             source,
         })?;
 
-    let lua = Lua::new();
+    let lua = sandboxed_lua();
     load_controller(&lua, &source)?;
 
     let callback: Function = lua
@@ -191,7 +206,7 @@ const VALIDATE_INSTRUCTION_BUDGET: u32 = 2_000_000;
 /// tripping on an ordinary multi-tick operation's cumulative instruction
 /// count.
 pub fn validate(source: &str) -> Result<(), ControllerError> {
-    let lua = Lua::new();
+    let lua = sandboxed_lua();
     let _ = lua.set_hook(
         HookTriggers {
             every_nth_instruction: Some(VALIDATE_INSTRUCTION_BUDGET),
@@ -317,5 +332,20 @@ mod tests {
         let err = validate("while true do end").unwrap_err();
         assert!(matches!(err, ControllerError::ScriptInvalid(_)));
         assert!(err.to_string().contains("execution allowance"));
+    }
+
+    #[test]
+    fn validate_rejects_scripts_that_reach_for_host_capabilities() {
+        for source in [
+            "os.execute('true')",
+            "io.open('/etc/passwd')",
+            "require('os')",
+        ] {
+            let err = validate(source).unwrap_err();
+            assert!(
+                matches!(err, ControllerError::ScriptInvalid(_)),
+                "{source} should fail to load without host library access"
+            );
+        }
     }
 }
