@@ -28,6 +28,18 @@ const TITLE: &str = "HUMAN EXCEPTION // RESISTANCE CONSOLE";
 pub fn draw(frame: &mut Frame, state: &AppState) {
     let area = frame.area();
 
+    // Checked before the undersized-geometry return, and drawn without the
+    // header/body/footer layout that return skips past: `Ctrl+Q` is global
+    // and the confirmation must stay reachable at any size (`docs/
+    // TUI_DESIGN.md`, "Below 80 columns" — "Quitting remains available,
+    // subject to the same modified-source confirmation rule"). Rendering it
+    // only after the geometry check would make it swallow input invisibly
+    // whenever a modified session got resized below the minimum.
+    if state.quit_confirmation_pending() {
+        draw_quit_confirmation(frame, area);
+        return;
+    }
+
     if area.width < MIN_COLUMNS || area.height < MIN_ROWS {
         draw_geometry_warning(frame, area);
         return;
@@ -41,24 +53,16 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
     .areas(area);
 
     draw_header(frame, header, state);
-    // The quit-confirmation prompt can be triggered from any view (`Ctrl+Q`
-    // is global), so it has to replace the body regardless of what's
-    // currently showing — rendering it only inside Controller would leave
-    // every other view looking frozen while player input was actually being
-    // swallowed by the pending confirmation.
-    if state.quit_confirmation_pending() {
-        draw_quit_confirmation(frame, body);
-    } else {
-        draw_body(frame, body, state);
-    }
+    draw_body(frame, body, state);
     draw_footer(frame, footer, state, area.width);
 }
 
+/// Rendered in place of the entire frame (like [`draw_geometry_warning`]),
+/// not just the body, so it stays visible even below the supported minimum
+/// geometry.
 fn draw_quit_confirmation(frame: &mut Frame, area: Rect) {
-    let block = Block::default().borders(Borders::ALL).title("QUIT?");
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
     let lines = vec![
+        Line::from("HUMAN EXCEPTION // resistance console"),
         Line::from(Span::styled(
             "Modified controller source will be lost.",
             Style::default().add_modifier(Modifier::BOLD),
@@ -68,7 +72,7 @@ fn draw_quit_confirmation(frame: &mut Frame, area: Rect) {
         Line::from("Enter / y  confirm and quit"),
         Line::from("Esc / n    cancel and return"),
     ];
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn draw_geometry_warning(frame: &mut Frame, area: Rect) {
@@ -212,7 +216,9 @@ fn draw_body(frame: &mut Frame, area: Rect, state: &AppState) {
 /// typing while the reference pane is showing must not silently edit an
 /// invisible source (see `event::map`).
 pub(crate) fn controller_source_visible(state: &AppState, frame_width: u16) -> bool {
-    frame_width >= TWO_PANE_MIN_COLUMNS || !state.narrow_secondary_visible()
+    frame_width >= TWO_PANE_MIN_COLUMNS
+        || !state.narrow_secondary_visible()
+        || state.reset_confirmation_pending()
 }
 
 fn draw_controller(frame: &mut Frame, area: Rect, state: &AppState) {
@@ -227,7 +233,7 @@ fn draw_controller(frame: &mut Frame, area: Rect, state: &AppState) {
             "LUA FIELD REFERENCE",
             lua_field_reference_lines(),
         );
-    } else if state.narrow_secondary_visible() {
+    } else if state.narrow_secondary_visible() && !state.reset_confirmation_pending() {
         draw_pane(
             frame,
             area,
@@ -235,6 +241,10 @@ fn draw_controller(frame: &mut Frame, area: Rect, state: &AppState) {
             lua_field_reference_lines(),
         );
     } else {
+        // A pending reset confirmation always wins the narrow-layout toggle:
+        // its banner only ever renders inside the source pane, so showing
+        // the reference pane instead while it's pending would leave the
+        // prompt (and the `Enter`/`Esc` it's waiting on) invisible.
         draw_controller_source(frame, area, state);
     }
 }
@@ -267,7 +277,19 @@ fn draw_controller_source(frame: &mut Frame, area: Rect, state: &AppState) {
     // outside a narrow pane while this thinks it's still visible.
     let cursor_line_text = source.split('\n').nth(cursor_line).unwrap_or("");
     let cursor_display_col = display_width_of_prefix(cursor_line_text, cursor_col);
-    let first_visible_cell = first_visible_offset(cursor_display_col, text_width);
+    // Scroll far enough to fit the cursor glyph's *far* edge, not just its
+    // start column: reserving only one cell for a double-width character
+    // (e.g. CJK) leaves it straddling the pane's right edge, and ratatui
+    // won't render a two-cell glyph that doesn't fully fit, making the
+    // cursor disappear.
+    let cursor_glyph_width = cursor_line_text
+        .chars()
+        .nth(cursor_col)
+        .and_then(|c| c.width())
+        .unwrap_or(1)
+        .max(1);
+    let cursor_display_end = cursor_display_col + cursor_glyph_width - 1;
+    let first_visible_cell = first_visible_offset(cursor_display_end, text_width);
     let lines = controller_editor_lines(source, cursor_line, cursor_col, first_visible_cell);
     let viewport_height = content_area.height as usize;
     let first_visible_row = first_visible_offset(cursor_line, viewport_height);
@@ -444,6 +466,12 @@ fn lua_field_reference_lines() -> Vec<Line<'static>> {
         )),
         Line::from("north south east west"),
         Line::from("wait scan"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "libraries:",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from("table, string, math only"),
         Line::from(""),
         Line::from("F1 opens the complete reference"),
     ]
@@ -821,6 +849,16 @@ fn help_lines(state: &AppState) -> Vec<Line<'static>> {
     lines.push(Line::from("tick and must return the name of one action."));
     lines.push(Line::from(""));
     lines.push(Line::from(
+        "Available standard libraries: table, string, math. Player Lua is",
+    ));
+    lines.push(Line::from(
+        "untrusted input, so io, os, package, coroutine, debug, dofile, and",
+    ));
+    lines.push(Line::from(
+        "loadfile are not available; scripts using them will fail to load.",
+    ));
+    lines.push(Line::from(""));
+    lines.push(Line::from(
         "observation.drone.x / .y      the drone's current position",
     ));
     lines.push(Line::from(
@@ -1125,6 +1163,19 @@ mod tests {
     }
 
     #[test]
+    fn help_documents_the_restricted_lua_standard_library() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::OpenHelp);
+        let terminal = render(120, 60, &state);
+
+        assert!(buffer_contains(&terminal, "table, string, math"));
+        assert!(buffer_contains(&terminal, "io, os, package"));
+        assert!(buffer_contains(&terminal, "dofile"));
+    }
+
+    #[test]
     fn help_advertises_its_own_scrolling_at_the_supported_minimum_geometry() {
         use super::super::state::Msg;
 
@@ -1310,7 +1361,7 @@ mod tests {
         // without needing to scroll.
         let mut state = AppState::new();
         state.apply(Msg::OpenHelp);
-        let terminal = render(120, 70, &state);
+        let terminal = render(120, 76, &state);
 
         assert!(buffer_contains(&terminal, "Terminology"));
         assert!(buffer_contains(&terminal, "MACHINE INTERCEPT"));
@@ -1400,6 +1451,47 @@ mod tests {
         assert!(buffer_contains(
             &terminal,
             "Modified controller source will be lost."
+        ));
+    }
+
+    #[test]
+    fn quit_confirmation_is_visible_even_below_the_supported_minimum_geometry() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.apply(Msg::EditController(super::super::editor::EditOp::Insert(
+            'x',
+        )));
+        state.apply(Msg::RequestQuit);
+        let terminal = render(60, 20, &state);
+
+        assert!(buffer_contains(
+            &terminal,
+            "Modified controller source will be lost."
+        ));
+    }
+
+    #[test]
+    fn reset_confirmation_is_visible_even_when_the_narrow_reference_pane_was_toggled_on() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.apply(Msg::EditController(super::super::editor::EditOp::Insert(
+            'x',
+        )));
+        state.apply(Msg::ToggleSecondaryPane); // swap to the Lua reference pane
+        state.apply(Msg::RequestResetController);
+        let terminal = render(90, 30, &state);
+
+        assert!(state.narrow_secondary_visible());
+        assert!(state.reset_confirmation_pending());
+        assert!(buffer_contains(
+            &terminal,
+            "Reset controller? Edits will be lost."
         ));
     }
 

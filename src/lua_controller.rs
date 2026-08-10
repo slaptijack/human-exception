@@ -15,8 +15,11 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
-use mlua::{Function, HookTriggers, Lua, LuaOptions, StdLib, Table, VmState};
+use mlua::{Function, HookTriggers, Lua, LuaOptions, StdLib, Table, Value, VmState};
 
 use crate::simulation::{
     Action, ActionError, DiscoveredTile, Observation, Position, SimEvent, Simulation, TickOutcome,
@@ -26,19 +29,30 @@ use crate::simulation::{
 /// The name of the one callback a player script must define.
 pub const ON_TICK: &str = "on_tick";
 
+/// A generous but bounded ceiling on a controller's Lua memory use. Nothing
+/// in the on_tick contract needs more than a trivial amount of state; this
+/// exists so a native-library allocation (e.g. `string.rep("x", 1 << 30)`)
+/// fails fast instead of exhausting host memory, regardless of how many
+/// times a script retries it.
+const SANDBOX_MEMORY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
+
 /// Builds a `Lua` instance exposing only the standard libraries a
 /// controller's `on_tick` contract needs (tables, strings, numbers), never
-/// `io`, `os`, `package`, `coroutine`, or `debug`. Player Lua is untrusted
-/// input (AGENTS.md, "Treat Lua programs as untrusted input"); nothing in
-/// the on_tick contract needs filesystem, process, or module-loading
-/// access, and granting it would let a player script block or escape the
-/// sandbox in ways the instruction-count hook in [`validate`] can't catch
-/// (a hook only fires between Lua VM instructions, not while blocked inside
-/// a host call like `os.execute`).
+/// `io`, `os`, `package`, `coroutine`, or `debug`, with `dofile`/`loadfile`
+/// additionally stripped (the base library installs them regardless of
+/// which `StdLib` flags are requested) and a bounded memory ceiling. Player
+/// Lua is untrusted input (AGENTS.md, "Treat Lua programs as untrusted
+/// input"); nothing in the on_tick contract needs filesystem, process, or
+/// module-loading access.
 fn sandboxed_lua() -> Lua {
     let libs = StdLib::TABLE | StdLib::STRING | StdLib::MATH;
-    Lua::new_with(libs, LuaOptions::default())
-        .expect("sandboxed stdlib set excludes debug/ffi, so this cannot fail")
+    let lua = Lua::new_with(libs, LuaOptions::default())
+        .expect("sandboxed stdlib set excludes debug/ffi, so this cannot fail");
+    let globals = lua.globals();
+    let _ = globals.set("dofile", Value::Nil);
+    let _ = globals.set("loadfile", Value::Nil);
+    let _ = lua.set_memory_limit(SANDBOX_MEMORY_LIMIT_BYTES);
+    lua
 }
 
 /// A failure at the Lua controller boundary. Every variant is returned
@@ -195,6 +209,33 @@ fn load_controller(lua: &Lua, source: &str) -> Result<(), ControllerError> {
 /// responsiveness".
 const VALIDATE_INSTRUCTION_BUDGET: u32 = 2_000_000;
 
+/// The message used for both the instruction-count hook (a fast, common-case
+/// exit) and the thread-timeout backstop (the actual guarantee — see
+/// [`validate`]) when a controller's top-level source is treated as
+/// runaway.
+const EXECUTION_ALLOWANCE_MESSAGE: &str =
+    "controller exceeded its execution allowance while loading";
+
+/// An upper bound on how long [`validate`] will wait for the player's
+/// top-level source to finish loading before giving up on it. This, not the
+/// instruction-count hook, is what actually guarantees the console stays
+/// responsive: a hook's error is an ordinary Lua error, so player source
+/// that wraps its own infinite loop in `pcall` can catch and keep
+/// re-triggering it forever, and native-library work (e.g.
+/// `string.rep("x", 1 << 30)`) can block for a long time between
+/// instruction-hook checkpoints entirely. Neither of those can defeat a
+/// wall-clock timeout enforced from outside the Lua VM.
+const VALIDATE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// What a background [`validate`] thread reports back, kept `Send` (unlike
+/// `ControllerError`/`mlua::Error`, which aren't by default) so it can cross
+/// an `mpsc` channel.
+enum ValidationOutcome {
+    Ok,
+    MissingCallback,
+    Invalid(String),
+}
+
 /// Checks whether `source` is loadable Lua that defines the required
 /// `on_tick` callback, without running anything. Used by the console's
 /// Controller view to validate/prepare a controller for deployment ahead of
@@ -205,20 +246,55 @@ const VALIDATE_INSTRUCTION_BUDGET: u32 = 2_000_000;
 /// concern, and applying the same hook to [`run`]'s shared `Lua` would risk
 /// tripping on an ordinary multi-tick operation's cumulative instruction
 /// count.
+///
+/// Runs the load on a background thread and never waits longer than
+/// [`VALIDATE_TIMEOUT`] for it, so the caller (the console's synchronous
+/// event loop) always gets an answer promptly regardless of what the
+/// player's source actually does. A thread that doesn't finish in time is
+/// abandoned rather than force-killed — Rust has no safe way to do that —
+/// but the sandbox's stripped standard-library set and memory ceiling
+/// (`sandboxed_lua`) keep an abandoned thread's worst case bounded rather
+/// than unbounded host resource use.
 pub fn validate(source: &str) -> Result<(), ControllerError> {
-    let lua = sandboxed_lua();
-    let _ = lua.set_hook(
-        HookTriggers {
-            every_nth_instruction: Some(VALIDATE_INSTRUCTION_BUDGET),
-            ..HookTriggers::default()
-        },
-        |_, _| -> mlua::Result<VmState> {
-            Err(mlua::Error::RuntimeError(
-                "controller exceeded its execution allowance while loading".to_string(),
-            ))
-        },
-    );
-    load_controller(&lua, source)
+    let source = source.to_string();
+    let (tx, rx) = mpsc::channel();
+
+    thread::spawn(move || {
+        let lua = sandboxed_lua();
+        let _ = lua.set_hook(
+            HookTriggers {
+                every_nth_instruction: Some(VALIDATE_INSTRUCTION_BUDGET),
+                ..HookTriggers::default()
+            },
+            |_, _| -> mlua::Result<VmState> {
+                Err(mlua::Error::RuntimeError(
+                    EXECUTION_ALLOWANCE_MESSAGE.to_string(),
+                ))
+            },
+        );
+        let outcome = match load_controller(&lua, &source) {
+            Ok(()) => ValidationOutcome::Ok,
+            Err(ControllerError::MissingCallback) => ValidationOutcome::MissingCallback,
+            Err(ControllerError::ScriptInvalid(err)) => ValidationOutcome::Invalid(err.to_string()),
+            Err(_) => ValidationOutcome::Invalid(
+                "controller failed to load for an unexpected reason".to_string(),
+            ),
+        };
+        // If the receiver already timed out and dropped, there's nowhere
+        // left to report this; the thread just exits.
+        let _ = tx.send(outcome);
+    });
+
+    match rx.recv_timeout(VALIDATE_TIMEOUT) {
+        Ok(ValidationOutcome::Ok) => Ok(()),
+        Ok(ValidationOutcome::MissingCallback) => Err(ControllerError::MissingCallback),
+        Ok(ValidationOutcome::Invalid(message)) => Err(ControllerError::ScriptInvalid(
+            mlua::Error::RuntimeError(message),
+        )),
+        Err(_) => Err(ControllerError::ScriptInvalid(mlua::Error::RuntimeError(
+            EXECUTION_ALLOWANCE_MESSAGE.to_string(),
+        ))),
+    }
 }
 
 fn observation_to_table(lua: &Lua, observation: Observation) -> mlua::Result<Table> {
@@ -332,6 +408,36 @@ mod tests {
         let err = validate("while true do end").unwrap_err();
         assert!(matches!(err, ControllerError::ScriptInvalid(_)));
         assert!(err.to_string().contains("execution allowance"));
+    }
+
+    #[test]
+    fn validate_bounds_a_loop_that_catches_the_instruction_hook_with_pcall() {
+        // The instruction-count hook's error is an ordinary Lua error, so a
+        // script that wraps its own infinite loop in `pcall` can catch it
+        // and immediately re-trigger another one, forever, from Lua's own
+        // point of view. Only the thread-timeout backstop in `validate`
+        // actually bounds this.
+        let err =
+            validate("while true do pcall(function() while true do end end) end").unwrap_err();
+        assert!(matches!(err, ControllerError::ScriptInvalid(_)));
+        assert!(err.to_string().contains("execution allowance"));
+    }
+
+    #[test]
+    fn validate_rejects_dofile_and_loadfile() {
+        for source in ["dofile('/etc/passwd')", "loadfile('/etc/passwd')"] {
+            let err = validate(source).unwrap_err();
+            assert!(
+                matches!(err, ControllerError::ScriptInvalid(_)),
+                "{source} should fail without filesystem access"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_bounds_excessive_native_allocation() {
+        let err = validate("local n = 1 << 30\nlocal s = string.rep('x', n)").unwrap_err();
+        assert!(matches!(err, ControllerError::ScriptInvalid(_)));
     }
 
     #[test]
