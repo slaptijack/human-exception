@@ -11,7 +11,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use super::intel::{Signal, TargetDossier, authored_signals, first_contact_dossier};
-use super::state::{AppState, View, WorkingSet};
+use super::state::{AppState, Validation, View, WorkingSet};
 
 pub const MIN_COLUMNS: u16 = 80;
 pub const MIN_ROWS: u16 = 24;
@@ -92,26 +92,30 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
                 format!("{target}   {working}"),
             ]
         }
-        _ => {
-            // No Lua editing exists yet (#44), so "starter" is the only
-            // controller state reachable once a working set seeds source;
-            // "modified"/"invalid" become possible once editing does.
-            match state.controller_source() {
-                Some(_) => vec![
+        _ => match state.controller_source() {
+            Some(_) => {
+                let status = if matches!(state.validation(), Validation::Invalid(_)) {
+                    "invalid"
+                } else if state.controller_modified() {
+                    "modified"
+                } else {
+                    "starter"
+                };
+                vec![
                     format!(
-                        "MESH: DEGRADED   SATLINK: COMPROMISED   CONTROLLER: starter   {working}"
+                        "MESH: DEGRADED   SATLINK: COMPROMISED   CONTROLLER: {status}   {working}"
                     ),
-                    format!("SATLINK: COMPROMISED   CONTROLLER: starter   {working}"),
-                    format!("CONTROLLER: starter   {working}"),
+                    format!("SATLINK: COMPROMISED   CONTROLLER: {status}   {working}"),
+                    format!("CONTROLLER: {status}   {working}"),
                     working.clone(),
-                ],
-                None => vec![
-                    format!("MESH: DEGRADED   SATLINK: COMPROMISED   {working}"),
-                    format!("SATLINK: COMPROMISED   {working}"),
-                    working.clone(),
-                ],
+                ]
             }
-        }
+            None => vec![
+                format!("MESH: DEGRADED   SATLINK: COMPROMISED   {working}"),
+                format!("SATLINK: COMPROMISED   {working}"),
+                working.clone(),
+            ],
+        },
     };
 
     let inner_width = area.width.saturating_sub(2) as usize;
@@ -131,14 +135,7 @@ fn draw_body(frame: &mut Frame, area: Rect, state: &AppState) {
         View::Signals => draw_signals(frame, area, state),
         View::Target => draw_target(frame, area, state),
         View::Help => draw_help(frame, area, state),
-        View::Controller => {
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .title(view_title(View::Controller));
-            let inner = block.inner(area);
-            frame.render_widget(block, area);
-            frame.render_widget(Paragraph::new(controller_body(state)), inner);
-        }
+        View::Controller => draw_controller(frame, area, state),
         view => {
             let block = Block::default()
                 .borders(Borders::ALL)
@@ -150,17 +147,180 @@ fn draw_body(frame: &mut Frame, area: Rect, state: &AppState) {
     }
 }
 
-fn controller_body(state: &AppState) -> Vec<Line<'static>> {
-    match state.controller_source() {
-        Some(_) => vec![
-            Line::from("Starter controller loaded for FIRST CONTACT."),
-            Line::from("The in-console Lua editor will appear here (see #44)."),
-        ],
-        None => vec![
-            Line::from("No controller is loaded yet."),
-            Line::from("The captured-controller Lua editor will appear here (see #44)."),
-        ],
+fn draw_controller(frame: &mut Frame, area: Rect, state: &AppState) {
+    if area.width >= TWO_PANE_MIN_COLUMNS {
+        let [left, right] =
+            Layout::horizontal([Constraint::Percentage(70), Constraint::Percentage(30)])
+                .areas(area);
+        draw_controller_source(frame, left, state);
+        draw_pane(
+            frame,
+            right,
+            "LUA FIELD REFERENCE",
+            lua_field_reference_lines(),
+        );
+    } else if state.narrow_secondary_visible() {
+        draw_pane(
+            frame,
+            area,
+            "LUA FIELD REFERENCE",
+            lua_field_reference_lines(),
+        );
+    } else {
+        draw_controller_source(frame, area, state);
     }
+}
+
+fn draw_controller_source(frame: &mut Frame, area: Rect, state: &AppState) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("CAPTURED CONTROLLER // controller.lua");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let banner = controller_banner(state);
+    let (content_area, banner_area) = if banner.is_some() {
+        let [content, banner_row] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
+        (content, Some(banner_row))
+    } else {
+        (inner, None)
+    };
+
+    let source = state.controller_source().unwrap_or_default();
+    let (cursor_line, cursor_col) = state.controller_cursor().unwrap_or((0, 0));
+    let lines = controller_editor_lines(source, cursor_line, cursor_col);
+    let viewport_height = content_area.height as usize;
+    let first_visible = first_visible_line(cursor_line, lines.len(), viewport_height);
+    let visible_lines: Vec<Line<'static>> = lines
+        .into_iter()
+        .skip(first_visible)
+        .take(viewport_height)
+        .collect();
+    frame.render_widget(Paragraph::new(visible_lines), content_area);
+
+    if let (Some(banner_area), Some(banner)) = (banner_area, banner) {
+        frame.render_widget(Paragraph::new(banner), banner_area);
+    }
+}
+
+/// The confirmation prompt or validation result shown as a fixed last row
+/// under the source, or `None` when there's nothing to say (an unmodified,
+/// unchecked controller keeps the full pane for source).
+fn controller_banner(state: &AppState) -> Option<Line<'static>> {
+    if state.quit_confirmation_pending() {
+        return Some(Line::from(Span::styled(
+            "Quit? Modified controller source will be lost. Enter/y confirm  Esc/n cancel",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+    }
+    if state.reset_confirmation_pending() {
+        return Some(Line::from(Span::styled(
+            "Reset controller? Edits will be lost. Enter/y confirm  Esc/n cancel",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+    }
+    match state.validation() {
+        Validation::Unchecked => None,
+        Validation::Valid => Some(Line::from(Span::styled(
+            "READY: controller loads and defines on_tick",
+            Style::default().add_modifier(Modifier::BOLD),
+        ))),
+        Validation::Invalid(message) => Some(Line::from(Span::styled(
+            format!("INVALID: {message}"),
+            Style::default().add_modifier(Modifier::BOLD),
+        ))),
+    }
+}
+
+/// Renders `source` as line-numbered rows with the cursor shown as a
+/// reversed-style character (or a reversed space at end-of-line/on an empty
+/// line), one [`Line`] per source line.
+fn controller_editor_lines(
+    source: &str,
+    cursor_line: usize,
+    cursor_col: usize,
+) -> Vec<Line<'static>> {
+    let raw_lines: Vec<&str> = source.split('\n').collect();
+    let gutter_width = raw_lines.len().to_string().len().max(2);
+    raw_lines
+        .iter()
+        .enumerate()
+        .map(|(idx, text)| {
+            let number = Span::styled(
+                format!("{:>gutter_width$} ", idx + 1),
+                Style::default().add_modifier(Modifier::DIM),
+            );
+            let mut spans = vec![number];
+            if idx == cursor_line {
+                spans.extend(cursor_line_spans(text, cursor_col));
+            } else {
+                spans.push(Span::raw(text.to_string()));
+            }
+            Line::from(spans)
+        })
+        .collect()
+}
+
+fn cursor_line_spans(text: &str, cursor_col: usize) -> Vec<Span<'static>> {
+    let chars: Vec<char> = text.chars().collect();
+    let cursor_style = Style::default().add_modifier(Modifier::REVERSED);
+    if cursor_col >= chars.len() {
+        let mut spans = Vec::new();
+        if !chars.is_empty() {
+            spans.push(Span::raw(chars.iter().collect::<String>()));
+        }
+        spans.push(Span::styled(" ", cursor_style));
+        spans
+    } else {
+        let before: String = chars[..cursor_col].iter().collect();
+        let at: String = chars[cursor_col].to_string();
+        let after: String = chars[cursor_col + 1..].iter().collect();
+        vec![
+            Span::raw(before),
+            Span::styled(at, cursor_style),
+            Span::raw(after),
+        ]
+    }
+}
+
+/// The first source line to render so that `cursor_line` stays within a
+/// `viewport_height`-row window, without scrolling past the end of a
+/// document shorter than the viewport.
+fn first_visible_line(cursor_line: usize, total_lines: usize, viewport_height: usize) -> usize {
+    if viewport_height == 0 {
+        return 0;
+    }
+    let max_first = total_lines.saturating_sub(viewport_height);
+    let wanted_first = cursor_line.saturating_sub(viewport_height.saturating_sub(1));
+    wanted_first.min(max_first)
+}
+
+/// A short, representative subset of the Lua contract shown as a cheat
+/// sheet next to (or, at narrow widths, instead of) the editor. See
+/// `help_lines`'s "Lua contract" section for the complete reference; the
+/// two are checked for consistency in tests so they can't silently drift.
+fn lua_field_reference_lines() -> Vec<Line<'static>> {
+    vec![
+        Line::from(Span::styled(
+            "on_tick(observation)",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from("observation.drone.x / .y"),
+        Line::from("observation.tick"),
+        Line::from("observation.budget_remaining"),
+        Line::from("observation.discovered[]"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "return:",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from("north south east west"),
+        Line::from("wait scan"),
+        Line::from(""),
+        Line::from("F1 opens the complete reference"),
+    ]
 }
 
 fn view_title(view: View) -> &'static str {
@@ -506,7 +666,15 @@ fn help_lines(state: &AppState) -> Vec<Line<'static>> {
         "F5 Operation     (unavailable: work an opportunity from Target first)"
     }));
     lines.push(Line::from(
-        "F6 Deploy        run the current controller (unavailable, see #44/#45)",
+        "F6 Deploy        run the current controller (unavailable, see #45)",
+    ));
+    lines.push(Line::from(if state.view_available(View::Controller) {
+        "F7 Reset         (Controller) restore the starter controller"
+    } else {
+        "F7 Reset         (Controller, unavailable: work an opportunity first)"
+    }));
+    lines.push(Line::from(
+        "Ctrl+Enter       (Controller) check the source loads, without running it",
     ));
     lines.push(Line::from("Ctrl+Q Quit      exit and restore the terminal"));
     lines.push(Line::from(""));
@@ -632,7 +800,12 @@ fn view_specific_help(view: View) -> Vec<Line<'static>> {
             Line::from("Esc    back to Signals"),
             Line::from("F8     (80-99 columns) switch between intel and provenance"),
         ],
-        View::Controller => vec![Line::from("The Lua editor arrives in a later build (#44).")],
+        View::Controller => vec![
+            Line::from("Type to edit; arrows/Home/End/PageUp/PageDown move the cursor"),
+            Line::from("F7          reset to the starter controller (confirms if modified)"),
+            Line::from("Ctrl+Enter  check whether the source loads, without running it"),
+            Line::from("F8          (80-99 columns) switch between source and reference"),
+        ],
         View::Operation => vec![Line::from("Live telemetry arrives in a later build (#45).")],
         View::AfterAction => vec![Line::from(
             "After-action reporting arrives in a later build (#46).",
@@ -659,9 +832,14 @@ fn footer_hint_items(state: &AppState, show_f8: bool) -> Vec<(&'static str, &'st
             "F5 Op",
             state.view_available(View::Operation),
         ),
-        // F6 has no prerequisite controller to deploy yet (see #44/#45).
+        // F6 has no operation to deploy yet (see #45).
         ("F6 Deploy", "F6 Dep", false),
     ];
+    if state.current_view() == View::Controller {
+        let has_controller = state.controller_source().is_some();
+        items.push(("F7 Reset", "F7 Rst", has_controller));
+        items.push(("Ctrl+Enter Validate", "^Enter Val", has_controller));
+    }
     if show_f8 {
         items.push(("F8 Toggle Pane", "F8 Pane", true));
     }
@@ -707,7 +885,10 @@ fn footer_line_width(labels: &[(&'static str, bool)]) -> usize {
 
 fn draw_footer(frame: &mut Frame, area: Rect, state: &AppState, full_width: u16) {
     let show_f8 = full_width < TWO_PANE_MIN_COLUMNS
-        && matches!(state.current_view(), View::Signals | View::Target);
+        && matches!(
+            state.current_view(),
+            View::Signals | View::Target | View::Controller
+        );
     let items = footer_hint_items(state, show_f8);
     let inner_width = area.width.saturating_sub(2) as usize;
 
@@ -1008,7 +1189,7 @@ mod tests {
     }
 
     #[test]
-    fn controller_view_acknowledges_the_seeded_starter() {
+    fn controller_view_shows_the_seeded_starter_source() {
         use super::super::state::Msg;
 
         let mut state = AppState::new();
@@ -1016,8 +1197,8 @@ mod tests {
         state.apply(Msg::Activate);
         let terminal = render(120, 40, &state);
 
-        assert!(buffer_contains(&terminal, "Starter controller loaded"));
-        assert!(!buffer_contains(&terminal, "No controller is loaded yet."));
+        assert!(buffer_contains(&terminal, "function on_tick(observation)"));
+        assert!(buffer_contains(&terminal, "CAPTURED CONTROLLER"));
     }
 
     #[test]

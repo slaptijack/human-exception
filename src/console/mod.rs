@@ -2,10 +2,11 @@
 //!
 //! This module hosts the interactive shell described by
 //! `docs/TUI_DESIGN.md`: a session/state model ([`state`]), key-to-intent
-//! mapping ([`event`]), and rendering ([`ui`]). It intentionally contains no
-//! gameplay yet — every major view shows placeholder content for later
-//! issues (#43-#46) to populate.
+//! mapping ([`event`]), and rendering ([`ui`]). Signals, Target, and
+//! Controller are populated; Operation and After Action still show
+//! placeholder content for later issues (#45-#46) to populate.
 
+pub mod editor;
 pub mod event;
 pub mod intel;
 pub mod state;
@@ -16,10 +17,14 @@ use std::panic::{self, PanicHookInfo};
 use std::sync::Arc;
 
 use crossterm::cursor::Show;
-use crossterm::event::{self as term_event, Event, KeyEventKind};
+use crossterm::event::{
+    self as term_event, Event, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    supports_keyboard_enhancement,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -36,6 +41,19 @@ pub fn run() -> io::Result<()> {
     if let Err(err) = execute!(io::stdout(), EnterAlternateScreen) {
         let _ = disable_raw_mode();
         return Err(err);
+    }
+    // Best-effort: without this, most terminals report Ctrl+Enter with the
+    // same escape sequence as plain Enter, so Controller's Ctrl+Enter
+    // "validate" shortcut would silently behave like Enter (insert a
+    // newline) instead. Where the terminal doesn't support the Kitty
+    // keyboard protocol, that's exactly what happens, which is an
+    // acceptable degradation since Ctrl+Enter is a convenience shortcut,
+    // not the only way to reach validation.
+    if supports_keyboard_enhancement().unwrap_or(false) {
+        let _ = execute!(
+            io::stdout(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        );
     }
 
     let previous_hook = install_panic_hook();
@@ -77,6 +95,7 @@ fn restore_panic_hook(previous: Arc<PanicHook>) {
 
 fn restore_terminal() -> io::Result<()> {
     disable_raw_mode()?;
+    let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
     execute!(io::stdout(), LeaveAlternateScreen, Show)?;
     Ok(())
 }
@@ -137,9 +156,16 @@ fn should_redraw(state: &mut AppState, event: Event, frame_size: (u16, u16)) -> 
     // mutating state (e.g. committing an opportunity) the player can't see.
     let undersized = frame_size.0 < ui::MIN_COLUMNS || frame_size.1 < ui::MIN_ROWS;
 
-    match event::map(key, state.current_view()) {
+    match event::map(
+        key,
+        state.current_view(),
+        state.reset_confirmation_pending(),
+        state.quit_confirmation_pending(),
+    ) {
         Some(msg) => {
-            if undersized && msg != Msg::Quit {
+            let is_quit_related =
+                matches!(msg, Msg::RequestQuit | Msg::ConfirmQuit | Msg::CancelQuit);
+            if undersized && !is_quit_related {
                 return false;
             }
             state.apply(msg);

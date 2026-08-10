@@ -111,9 +111,7 @@ pub fn run(
         })?;
 
     let lua = Lua::new();
-    lua.load(&source)
-        .exec()
-        .map_err(ControllerError::ScriptInvalid)?;
+    load_controller(&lua, &source)?;
 
     let callback: Function = lua
         .globals()
@@ -154,6 +152,32 @@ pub fn run(
             return Ok(report.outcome);
         }
     }
+}
+
+/// Loads `source` into `lua` and confirms it exposes the required
+/// `on_tick` callback, without invoking it. Shared by [`run`] and
+/// [`validate`] so the console's Controller view can check whether a
+/// player's edited source is loadable Lua before anything ever tries to
+/// deploy or execute it.
+fn load_controller(lua: &Lua, source: &str) -> Result<(), ControllerError> {
+    lua.load(source)
+        .set_name("controller.lua")
+        .exec()
+        .map_err(ControllerError::ScriptInvalid)?;
+
+    lua.globals()
+        .get::<Function>(ON_TICK)
+        .map(|_| ())
+        .map_err(|_| ControllerError::MissingCallback)
+}
+
+/// Checks whether `source` is loadable Lua that defines the required
+/// `on_tick` callback, without running anything. Used by the console's
+/// Controller view to validate/prepare a controller for deployment ahead of
+/// time; running the operation itself is a separate step (see [`run`]).
+pub fn validate(source: &str) -> Result<(), ControllerError> {
+    let lua = Lua::new();
+    load_controller(&lua, source)
 }
 
 fn observation_to_table(lua: &Lua, observation: Observation) -> mlua::Result<Table> {
@@ -235,5 +259,30 @@ mod tests {
             ControllerError::MissingCallback.to_string(),
             "script must define a global 'on_tick(observation)' callback"
         );
+    }
+
+    #[test]
+    fn validate_accepts_a_script_defining_on_tick() {
+        assert!(validate("function on_tick(observation) return \"wait\" end").is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_a_syntax_error() {
+        let err = validate("function on_tick( ").unwrap_err();
+        assert!(matches!(err, ControllerError::ScriptInvalid(_)));
+    }
+
+    #[test]
+    fn validate_rejects_a_script_missing_on_tick() {
+        let err = validate("local x = 1").unwrap_err();
+        assert!(matches!(err, ControllerError::MissingCallback));
+    }
+
+    #[test]
+    fn validate_does_not_execute_on_tick() {
+        // If this ran on_tick, `error(...)` would surface as CallbackFailed
+        // instead of validate succeeding; validate must only load the
+        // script and check the callback exists.
+        assert!(validate("function on_tick(observation) error('should not run') end").is_ok());
     }
 }
