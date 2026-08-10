@@ -37,6 +37,16 @@ pub const ON_TICK: &str = "on_tick";
 /// times a script retries it.
 const SANDBOX_MEMORY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 
+/// The fixed seed every sandboxed `Lua`'s `math.random` is reseeded with.
+/// Lua 5.4 otherwise auto-seeds `math.random` from wall-clock time and the
+/// Lua state's memory address at library-open time, which would make
+/// identical controller source produce different `math.random` sequences
+/// — and therefore potentially different validation results or deployed
+/// behavior — across separate runs. AGENTS.md's "Keep the simulation core
+/// deterministic" requirement applies here exactly as it does to the rest
+/// of the simulation: the same source must behave the same way every time.
+const SANDBOX_RANDOM_SEED: i64 = 1;
+
 /// Builds a `Lua` instance exposing only the standard libraries a
 /// controller's `on_tick` contract needs (tables, strings, numbers), never
 /// `io`, `os`, `package`, `coroutine`, or `debug`, with `dofile`/`loadfile`/
@@ -47,17 +57,6 @@ const SANDBOX_MEMORY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 /// process, or module-loading access, and `print` writes straight to
 /// process stdout — including raw escape sequences — which would corrupt
 /// the alternate screen ratatui owns while the console is running.
-/// The fixed seed every sandboxed `Lua`'s `math.random` is reseeded with.
-/// Lua 5.4 otherwise auto-seeds `math.random` from wall-clock time and the
-/// Lua state's memory address at library-open time, which would make
-/// identical controller source produce different `math.random` sequences
-/// — and therefore potentially different validation results or deployed
-/// behavior — across separate runs. `docs/AGENTS.md`'s "Keep the
-/// simulation core deterministic" requirement applies here exactly as it
-/// does to the rest of the simulation: the same source must behave the
-/// same way every time.
-const SANDBOX_RANDOM_SEED: i64 = 1;
-
 fn sandboxed_lua() -> Lua {
     let libs = StdLib::TABLE | StdLib::STRING | StdLib::MATH;
     let lua = Lua::new_with(libs, LuaOptions::default())
@@ -71,8 +70,93 @@ fn sandboxed_lua() -> Lua {
         && let Ok(randomseed) = math.get::<Function>("randomseed")
     {
         let _ = randomseed.call::<()>(SANDBOX_RANDOM_SEED);
+        // `math.randomseed()` (no arguments) re-seeds from wall-clock time
+        // in Lua 5.4, which would undo the fixed seed above the moment a
+        // player script called it. There's no argument-checking variant to
+        // keep, so remove the function entirely rather than leave a
+        // nondeterministic escape hatch next to a "deterministic" seed.
+        let _ = math.set("randomseed", Value::Nil);
+    }
+    if let Err(err) = install_deterministic_table_iteration(&lua) {
+        debug_assert!(
+            false,
+            "deterministic pairs/next install should not fail: {err}"
+        );
     }
     lua
+}
+
+/// Overrides the global `pairs`/`next` with versions that iterate a
+/// table's entries in a fixed order (numbers, then strings, then anything
+/// else in whatever order the real `next` produced them), instead of
+/// Lua 5.4's real order.
+///
+/// Lua's own table/string hashing is randomized per `Lua` instance from
+/// wall-clock time and the state's memory address specifically to resist
+/// hash-flooding attacks, with no public API to fix that seed — so two
+/// fresh sandboxes running byte-identical source can otherwise iterate the
+/// same string-keyed table in a different order and make a different
+/// choice from it (e.g. `for k in pairs(actions) do return k end`),
+/// breaking the same "same input, same output" guarantee `sandboxed_lua`'s
+/// fixed `math.random` seed exists to uphold.
+fn install_deterministic_table_iteration(lua: &Lua) -> mlua::Result<()> {
+    let det_next = lua.create_function(|_, (table, key): (Table, Value)| {
+        let entries = sorted_table_entries(&table)?;
+        let mut yield_next = matches!(key, Value::Nil);
+        for (k, v) in entries {
+            if yield_next {
+                return Ok((k, v));
+            }
+            if k == key {
+                yield_next = true;
+            }
+        }
+        Ok((Value::Nil, Value::Nil))
+    })?;
+
+    let pairs_next = det_next.clone();
+    let det_pairs =
+        lua.create_function(move |_, table: Table| Ok((pairs_next.clone(), table, Value::Nil)))?;
+
+    let globals = lua.globals();
+    globals.set("next", det_next)?;
+    globals.set("pairs", det_pairs)?;
+    Ok(())
+}
+
+/// `table`'s entries in a fixed order: numeric keys by value, then string
+/// keys by byte content, then any other key type in whatever (already
+/// nondeterministic, but rare enough not to be worth solving) order the
+/// real iteration produced them — using such a key at all is far outside
+/// the documented Lua contract.
+fn sorted_table_entries(table: &Table) -> mlua::Result<Vec<(Value, Value)>> {
+    let mut entries: Vec<(Value, Value)> =
+        table.pairs::<Value, Value>().collect::<mlua::Result<_>>()?;
+    entries.sort_by(|(a, _), (b, _)| compare_lua_keys(a, b));
+    Ok(entries)
+}
+
+fn compare_lua_keys(a: &Value, b: &Value) -> std::cmp::Ordering {
+    fn rank(value: &Value) -> u8 {
+        match value {
+            Value::Integer(_) | Value::Number(_) => 0,
+            Value::String(_) => 1,
+            _ => 2,
+        }
+    }
+
+    let (rank_a, rank_b) = (rank(a), rank(b));
+    if rank_a != rank_b {
+        return rank_a.cmp(&rank_b);
+    }
+    match (a, b) {
+        (Value::Integer(x), Value::Integer(y)) => x.cmp(y),
+        (Value::Number(x), Value::Number(y)) => x.total_cmp(y),
+        (Value::Integer(x), Value::Number(y)) => (*x as f64).total_cmp(y),
+        (Value::Number(x), Value::Integer(y)) => x.total_cmp(&(*y as f64)),
+        (Value::String(x), Value::String(y)) => x.as_bytes().cmp(&y.as_bytes()),
+        _ => std::cmp::Ordering::Equal,
+    }
 }
 
 /// A failure at the Lua controller boundary. Every variant is returned
@@ -274,9 +358,12 @@ const MAX_CONCURRENT_VALIDATIONS: usize = 16;
 static VALIDATIONS_IN_PROGRESS: AtomicUsize = AtomicUsize::new(0);
 
 /// Checks whether `source` is loadable Lua that defines the required
-/// `on_tick` callback, without running anything. Used by the console's
-/// Controller view to validate/prepare a controller for deployment ahead of
-/// time; running the operation itself is a separate step (see [`run`]).
+/// `on_tick` callback, without calling `on_tick` itself. The top-level
+/// chunk *does* execute (e.g. local state setup, or an `error()` call
+/// outside any function), the same as it would in [`run`] — only
+/// `on_tick` is never invoked. Used by the console's Controller view to
+/// validate/prepare a controller for deployment ahead of time; running the
+/// operation itself is a separate step (see [`run`]).
 ///
 /// Only the top-level load is bounded here (not `on_tick` itself, which
 /// isn't called): bounding a live deployment's per-tick execution is #45's
@@ -491,6 +578,35 @@ mod tests {
                 "{source} should fail without filesystem access"
             );
         }
+    }
+
+    #[test]
+    fn validate_rejects_a_script_that_reseeds_math_random_itself() {
+        // math.randomseed() with no arguments would otherwise re-seed from
+        // wall-clock time in real Lua 5.4, undoing the fixed seed
+        // sandboxed_lua() installs; removing the function entirely means
+        // any use of it (with or without arguments) fails to load instead
+        // of silently reintroducing nondeterminism.
+        let err = validate("math.randomseed()").unwrap_err();
+        assert!(matches!(err, ControllerError::ScriptInvalid(_)));
+    }
+
+    #[test]
+    fn pairs_iterates_a_string_keyed_table_in_a_fixed_order_across_fresh_states() {
+        // Each `validate` call gets its own fresh sandboxed Lua, so this
+        // exercises exactly the scenario a hash-seed-randomized `pairs`
+        // would make nondeterministic: iterating the same string-keyed
+        // table built fresh each time.
+        let source = r#"
+            local order = {}
+            for k in pairs({north = 1, south = 2, east = 3, west = 4, wait = 5}) do
+                order[#order + 1] = k
+            end
+            assert(table.concat(order, ",") == "east,north,south,wait,west",
+                   table.concat(order, ","))
+            function on_tick(observation) return "wait" end
+        "#;
+        assert!(validate(source).is_ok());
     }
 
     #[test]

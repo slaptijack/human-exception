@@ -906,7 +906,13 @@ fn help_lines(state: &AppState) -> Vec<Line<'static>> {
         "F7 Reset         (Controller, unavailable: work an opportunity first)"
     }));
     lines.push(Line::from(
-        "Ctrl+Enter       (Controller) check the source loads, without running it",
+        "Ctrl+Enter       (Controller) load the source and check for on_tick,",
+    ));
+    lines.push(Line::from(
+        "                 without calling on_tick itself (top-level code",
+    ));
+    lines.push(Line::from(
+        "                 outside on_tick does run, e.g. local state setup)",
     ));
     lines.push(Line::from(
         "Ctrl+V           (Controller) same as Ctrl+Enter, for terminals that",
@@ -1051,7 +1057,7 @@ fn view_specific_help(view: View) -> Vec<Line<'static>> {
         View::Controller => vec![
             Line::from("Type to edit; arrows/Home/End/PageUp/PageDown move the cursor"),
             Line::from("F7          reset to the starter controller (confirms if modified)"),
-            Line::from("Ctrl+Enter  check whether the source loads, without running it"),
+            Line::from("Ctrl+Enter  load the source and check for on_tick, without calling it"),
             Line::from("Ctrl+V      same as Ctrl+Enter (works on every terminal)"),
             Line::from("F8          (80-99 columns) switch between source and reference"),
         ],
@@ -1405,7 +1411,7 @@ mod tests {
 
         let mut state = AppState::new();
         state.apply(Msg::OpenHelp);
-        let terminal = render(120, 60, &state);
+        let terminal = render(120, 64, &state);
 
         assert!(buffer_contains(&terminal, "scan does not move the drone"));
         assert!(buffer_contains(&terminal, "regardless of walls in the way"));

@@ -169,7 +169,12 @@ fn should_redraw(state: &mut AppState, event: Event, frame_size: (u16, u16)) -> 
     let Event::Key(key) = event else {
         return false;
     };
-    if key.kind != KeyEventKind::Press {
+    // `Repeat` (a terminal reporting a key still held down) is treated the
+    // same as `Press`: without it, holding an arrow key, Backspace, or a
+    // printable character in Controller only ever applies once, making
+    // ordinary navigation or deletion through more than a token of source
+    // impractical. Only `Release` is ignored.
+    if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
         return false;
     }
 
@@ -215,6 +220,18 @@ mod tests {
 
     fn press_ctrl(code: KeyCode) -> Event {
         Event::Key(KeyEvent::new(code, KeyModifiers::CONTROL))
+    }
+
+    fn repeat(code: KeyCode) -> Event {
+        let mut key = KeyEvent::new(code, KeyModifiers::NONE);
+        key.kind = KeyEventKind::Repeat;
+        Event::Key(key)
+    }
+
+    fn release(code: KeyCode) -> Event {
+        let mut key = KeyEvent::new(code, KeyModifiers::NONE);
+        key.kind = KeyEventKind::Release;
+        Event::Key(key)
     }
 
     fn render(width: u16, height: u16, events: &[Event]) -> (AppState, Terminal<TestBackend>) {
@@ -395,6 +412,41 @@ mod tests {
         }
 
         assert!(buffer_contains(&terminal, "SIGNALS"));
+    }
+
+    #[test]
+    fn a_held_key_repeat_event_edits_the_controller_same_as_a_press() {
+        let (state, _) = render(
+            120,
+            40,
+            &[
+                press(KeyCode::Enter), // inspect the actionable signal, opening Target
+                press(KeyCode::Enter), // commit, opening Controller
+                repeat(KeyCode::Char('x')),
+                repeat(KeyCode::Char('x')),
+            ],
+        );
+
+        assert_eq!(
+            state.controller_source(),
+            Some(format!("{}xx", intel::STARTER_CONTROLLER).as_str()),
+            "held-key Repeat events should insert just like Press, not be ignored"
+        );
+    }
+
+    #[test]
+    fn a_key_release_event_does_not_edit_the_controller() {
+        let (state, _) = render(
+            120,
+            40,
+            &[
+                press(KeyCode::Enter),
+                press(KeyCode::Enter),
+                release(KeyCode::Char('x')),
+            ],
+        );
+
+        assert_eq!(state.controller_source(), Some(intel::STARTER_CONTROLLER));
     }
 
     #[test]
