@@ -54,19 +54,28 @@ const SANDBOX_RANDOM_SEED: i64 = 1;
 /// controller's `on_tick` contract needs (tables, strings, numbers), never
 /// `io`, `os`, `package`, `coroutine`, or `debug`, with `dofile`/`loadfile`/
 /// `load`/`print` additionally stripped (the base library installs them
-/// regardless of which `StdLib` flags are requested) and a bounded memory
-/// ceiling. Player Lua is untrusted input (AGENTS.md, "Treat Lua programs
-/// as untrusted input"); nothing in the on_tick contract needs filesystem,
-/// process, module-loading, or dynamic-code-loading access. `print` writes
-/// straight to process stdout — including raw escape sequences — which
-/// would corrupt the alternate screen ratatui owns while the console is
-/// running. `load` accepts Lua 5.4 *binary* chunks as well as text by
-/// default; unlike text source (which the parser fully validates),
-/// malformed bytecode is trusted structurally and can crash the process
-/// outright rather than fail as a recoverable Lua error — and the string
-/// library alone is enough to assemble arbitrary bytes for one. Nothing in
-/// the on_tick contract needs to load code dynamically at all, so removing
+/// regardless of which `StdLib` flags are requested), `string.pack`/
+/// `unpack`/`packsize` also removed, and a bounded memory ceiling. Player
+/// Lua is untrusted input (AGENTS.md, "Treat Lua programs as untrusted
+/// input"); nothing in the on_tick contract needs filesystem, process,
+/// module-loading, or dynamic-code-loading access. `print` writes straight
+/// to process stdout — including raw escape sequences — which would
+/// corrupt the alternate screen ratatui owns while the console is running.
+/// `load` accepts Lua 5.4 *binary* chunks as well as text by default;
+/// unlike text source (which the parser fully validates), malformed
+/// bytecode is trusted structurally and can crash the process outright
+/// rather than fail as a recoverable Lua error — and the string library
+/// alone is enough to assemble arbitrary bytes for one. Nothing in the
+/// on_tick contract needs to load code dynamically at all, so removing
 /// `load` avoids needing to reason about restricting it to text-only mode.
+/// `string.pack`/`unpack`/`packsize` expose native platform layout
+/// (endianness, and implementation-defined widths like `size_t` via the
+/// `T`/`s`/`j`/`J` format options) unless every format string an
+/// invocation ever uses pins both explicitly — the same source could
+/// behave differently across architectures with no per-process
+/// randomness involved at all, just a different build target. Nothing in
+/// the on_tick contract needs binary packing, so removing them avoids
+/// needing to validate every format string that reaches them instead.
 fn sandboxed_lua() -> Lua {
     let libs = StdLib::TABLE | StdLib::STRING | StdLib::MATH;
     let lua = Lua::new_with(libs, LuaOptions::default())
@@ -76,6 +85,11 @@ fn sandboxed_lua() -> Lua {
     let _ = globals.set("loadfile", Value::Nil);
     let _ = globals.set("load", Value::Nil);
     let _ = globals.set("print", Value::Nil);
+    if let Ok(string_lib) = globals.get::<Table>("string") {
+        let _ = string_lib.set("pack", Value::Nil);
+        let _ = string_lib.set("unpack", Value::Nil);
+        let _ = string_lib.set("packsize", Value::Nil);
+    }
     let _ = lua.set_memory_limit(SANDBOX_MEMORY_LIMIT_BYTES);
     if let Ok(math) = globals.get::<Table>("math")
         && let Ok(randomseed) = math.get::<Function>("randomseed")
@@ -262,25 +276,36 @@ fn install_deterministic_tostring(lua: &Lua) -> mlua::Result<()> {
             // through a Rust `String` (which would reject anything that
             // isn't valid UTF-8, breaking `tostring` for ordinary binary
             // Lua strings this override was never meant to touch).
+            //
+            // Not a fixed list of type-name prefixes ("table: ", "function:
+            // ", ...): a table/userdata's metatable can set `__name`, which
+            // Lua's own default representation uses in place of the real
+            // type name (`tostring(setmetatable({}, {__name = "sentinel"}))`
+            // → `"sentinel: 0x...."`), so any literal prefix list can always
+            // be sidestepped by a metatable the sandbox doesn't otherwise
+            // restrict. Look for the `": 0x"` marker common to every one of
+            // these default representations instead, and normalize
+            // whatever precedes it.
             let bytes = text.as_bytes();
-            for prefix in [
-                &b"table: "[..],
-                &b"function: "[..],
-                &b"thread: "[..],
-                &b"userdata: "[..],
-            ] {
-                if let Some(rest) = bytes.strip_prefix(prefix)
-                    && rest.starts_with(b"0x")
-                {
-                    let mut placeholder = prefix.to_vec();
-                    placeholder.extend_from_slice(b"0x0");
-                    return lua.create_string(placeholder);
-                }
+            if let Some(marker) = find_bytes(&bytes, b": 0x") {
+                let prefix_end = marker + 2; // keep "<name>: ", drop "0x..."
+                let mut placeholder = bytes[..prefix_end].to_vec();
+                placeholder.extend_from_slice(b"0x0");
+                return lua.create_string(placeholder);
             }
             Ok(text)
         })?;
     globals.set("tostring", det_tostring)?;
     Ok(())
+}
+
+/// The byte offset of the first occurrence of `needle` in `haystack`, or
+/// `None` if it doesn't appear.
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 /// Overrides the global `pairs`/`next` with versions that iterate a
@@ -1158,6 +1183,32 @@ mod tests {
             function on_tick(observation) return "wait" end
         "#;
         assert!(validate(source).is_ok());
+    }
+
+    #[test]
+    fn tostring_hides_the_address_of_a_table_with_a_custom_name() {
+        let source = r#"
+            local named = setmetatable({}, {__name = "sentinel"})
+            local text = tostring(named)
+            assert(text == "sentinel: 0x0", text)
+            function on_tick(observation) return "wait" end
+        "#;
+        assert!(validate(source).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_a_script_using_string_pack() {
+        for source in [
+            "string.pack('I2', 1)",
+            "string.unpack('I2', 'xx')",
+            "string.packsize('I2')",
+        ] {
+            let err = validate(source).unwrap_err();
+            assert!(
+                matches!(err, ControllerError::ScriptInvalid(_)),
+                "{source} should fail without string.pack/unpack/packsize"
+            );
+        }
     }
 
     #[test]

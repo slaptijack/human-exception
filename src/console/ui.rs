@@ -104,7 +104,15 @@ fn controller_status_field(state: &AppState) -> Option<String> {
     } else {
         "starter"
     };
-    Some(format!("CONTROLLER: {status}"))
+    // `docs/TUI_DESIGN.md`'s persistent-header mockup shows `STATUS: READY`
+    // as its own field alongside `CONTROLLER: ...`, not folded into it — a
+    // successfully validated controller stays "READY" independent of
+    // whether it's still the unmodified starter, so it needs a field of
+    // its own rather than a fourth `CONTROLLER:` state. `Invalid` doesn't
+    // get a matching `STATUS:` value here since `CONTROLLER: invalid`
+    // already says as much on its own.
+    let ready = matches!(state.validation(), Validation::Valid).then_some("   STATUS: READY");
+    Some(format!("CONTROLLER: {status}{}", ready.unwrap_or_default()))
 }
 
 fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
@@ -1523,6 +1531,25 @@ mod tests {
         assert!(
             buffer_contains(&terminal, "CONTROLLER: modified"),
             "a session-only edit at risk of being lost must stay visible from Signals too"
+        );
+    }
+
+    #[test]
+    fn header_shows_status_ready_after_a_successful_validation_from_any_view() {
+        use super::super::state::Msg;
+        use super::super::state::View;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.apply(Msg::ValidateController);
+        state.apply(Msg::Navigate(View::Signals));
+        let terminal = render(120, 40, &state);
+
+        assert!(
+            buffer_contains(&terminal, "STATUS: READY"),
+            "docs/TUI_DESIGN.md's persistent header shows STATUS: READY \
+             alongside CONTROLLER: ..., not only inside Controller's own banner"
         );
     }
 
