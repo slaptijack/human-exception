@@ -422,16 +422,45 @@ fn install_deterministic_table_iteration(lua: &Lua) -> mlua::Result<()> {
     // `key`'s value still tells us where it *would* sort even once it's no
     // longer a member of `table` at all, so a deleted key resumes
     // iteration correctly instead of silently ending it.
+    // Host-side-only bookkeeping (never enumerated with `pairs`/`next`
+    // itself, so raw Lua table-identity hashing here can't leak any
+    // nondeterminism to a script) recording every key `det_next` has ever
+    // confirmed was a genuine member of a given table: `key_history[table]`
+    // is itself a table used purely as a set, `key_history[table][key] =
+    // true` once `key` has been seen. Real Lua's `next` raises "invalid
+    // key to 'next'" for a control value that was never actually a member
+    // of the table (e.g. a typo, or a value fabricated to probe for one),
+    // while still tolerating a key that *was* a member but has since been
+    // deleted mid-traversal (the Lua manual explicitly allows clearing the
+    // current field). `sorted_table_entries` alone can't tell these apart
+    // — a "find the first entry greater than key" search succeeds for any
+    // key value, member or not — so this records genuine membership as
+    // it's observed, closing that gap without needing to intercept every
+    // raw table assignment (which nothing in the sandboxed API can do).
+    let key_history = lua.create_table()?;
     let det_next = lua.create_function(
-        |lua, (table, key): (Table, Value)| -> mlua::Result<MultiValue> {
+        move |lua, (table, key): (Table, Value)| -> mlua::Result<MultiValue> {
             let entries = sorted_table_entries(&table)?;
-            let found = if matches!(key, Value::Nil) {
-                entries.into_iter().next()
-            } else {
-                entries
-                    .into_iter()
-                    .find(|(k, _)| compare_lua_keys(k, &key) == std::cmp::Ordering::Greater)
-            };
+            if matches!(key, Value::Nil) {
+                return match entries.into_iter().next() {
+                    None => (Value::Nil,).into_lua_multi(lua),
+                    Some((k, v)) => {
+                        remember_next_key(lua, &key_history, &table, &k)?;
+                        (k, v).into_lua_multi(lua)
+                    }
+                };
+            }
+            let currently_present = !matches!(table.raw_get::<Value>(key.clone())?, Value::Nil);
+            if currently_present {
+                remember_next_key(lua, &key_history, &table, &key)?;
+            } else if !next_key_was_seen(&key_history, &table, &key)? {
+                return Err(mlua::Error::RuntimeError(
+                    "invalid key to 'next'".to_string(),
+                ));
+            }
+            let found = entries
+                .into_iter()
+                .find(|(k, _)| compare_lua_keys(k, &key) == std::cmp::Ordering::Greater);
             match found {
                 // Lua 5.4's real `next` returns exactly one `nil` once
                 // exhausted, not a `nil, nil` pair — `select("#", next({}))`
@@ -439,7 +468,10 @@ fn install_deterministic_table_iteration(lua: &Lua) -> mlua::Result<()> {
                 // arity to detect the end of a traversal would otherwise
                 // see a different arity here than in real Lua.
                 None => (Value::Nil,).into_lua_multi(lua),
-                Some((k, v)) => (k, v).into_lua_multi(lua),
+                Some((k, v)) => {
+                    remember_next_key(lua, &key_history, &table, &k)?;
+                    (k, v).into_lua_multi(lua)
+                }
             }
         },
     )?;
@@ -524,6 +556,34 @@ fn install_deterministic_table_iteration(lua: &Lua) -> mlua::Result<()> {
     globals.set("next", det_next)?;
     globals.set("pairs", det_pairs)?;
     Ok(())
+}
+
+/// Records that `key` has been confirmed a genuine member of `table`, in
+/// `key_history` (see [`install_deterministic_table_iteration`]).
+fn remember_next_key(
+    lua: &Lua,
+    key_history: &Table,
+    table: &Table,
+    key: &Value,
+) -> mlua::Result<()> {
+    let history: Table = match key_history.get::<Value>(table.clone())? {
+        Value::Table(history) => history,
+        _ => {
+            let history = lua.create_table()?;
+            key_history.set(table.clone(), history.clone())?;
+            history
+        }
+    };
+    history.set(key.clone(), true)
+}
+
+/// Whether `key` has previously been recorded (via [`remember_next_key`])
+/// as a genuine member of `table`.
+fn next_key_was_seen(key_history: &Table, table: &Table, key: &Value) -> mlua::Result<bool> {
+    match key_history.get::<Value>(table.clone())? {
+        Value::Table(history) => Ok(!matches!(history.get::<Value>(key.clone())?, Value::Nil)),
+        _ => Ok(false),
+    }
 }
 
 /// `table`'s entries in a fixed order: `false` before `true`, then numeric
@@ -685,12 +745,7 @@ pub fn run(
         })?;
 
     let lua = sandboxed_lua();
-    load_controller(&lua, &source)?;
-
-    let callback: Function = lua
-        .globals()
-        .get(ON_TICK)
-        .map_err(|_| ControllerError::MissingCallback)?;
+    let callback = load_controller(&lua, &source)?;
 
     let mut simulation = Simulation::new();
 
@@ -728,12 +783,24 @@ pub fn run(
     }
 }
 
-/// Loads `source` into `lua` and confirms it exposes the required
-/// `on_tick` callback, without invoking it. Shared by [`run`] and
-/// [`validate`] so the console's Controller view can check whether a
-/// player's edited source is loadable Lua before anything ever tries to
-/// deploy or execute it.
-fn load_controller(lua: &Lua, source: &str) -> Result<(), ControllerError> {
+/// Loads `source` into `lua`, confirms it exposes the required `on_tick`
+/// callback, and returns that exact callback value — without invoking it.
+/// Shared by [`run`] and [`validate`] so the console's Controller view can
+/// check whether a player's edited source is loadable Lua before anything
+/// ever tries to deploy or execute it.
+///
+/// Returning the looked-up `Function` (rather than just confirming it
+/// exists) matters: `on_tick` is fetched via an ordinary global lookup,
+/// which a script is free to route through its own `__index` metamethod on
+/// `_G` (`setmetatable` isn't restricted, and neither is setting a
+/// metatable on the globals table). A *stateful* `__index` — one that
+/// returns a function only the first time `on_tick` is requested, `nil`
+/// after — would otherwise pass this check and then immediately fail a
+/// second, separate lookup done later to actually call it, even within a
+/// single [`run`], despite this function having already proven a callback
+/// was available. Callers must reuse the value returned here as the
+/// callback to invoke, not look it up again.
+fn load_controller(lua: &Lua, source: &str) -> Result<Function, ControllerError> {
     lua.load(source)
         .set_name("controller.lua")
         .exec()
@@ -741,7 +808,6 @@ fn load_controller(lua: &Lua, source: &str) -> Result<(), ControllerError> {
 
     lua.globals()
         .get::<Function>(ON_TICK)
-        .map(|_| ())
         .map_err(|_| ControllerError::MissingCallback)
 }
 
@@ -892,7 +958,7 @@ pub fn validate(source: &str) -> Result<(), ControllerError> {
             },
         );
         let mut outcome = match load_controller(&lua, &source) {
-            Ok(()) => ValidationOutcome::Ok,
+            Ok(_) => ValidationOutcome::Ok,
             Err(ControllerError::MissingCallback) => ValidationOutcome::MissingCallback,
             Err(ControllerError::ScriptInvalid(err)) => {
                 ValidationOutcome::Invalid(truncate_diagnostic_message(err.to_string()))
@@ -988,6 +1054,28 @@ fn invalid_action_error(response: &str, err: ActionError) -> ControllerError {
 mod tests {
     use super::*;
 
+    /// `MAX_CONCURRENT_VALIDATIONS` is a *production* safety cap sized for
+    /// the single sequential caller the console's event loop actually is
+    /// (see its doc comment); `cargo test`'s default thread pool can run
+    /// far more than that many of this module's `validate`-calling tests
+    /// truly concurrently, and how many depends on the machine/runner's
+    /// available parallelism, not anything this module controls. Left
+    /// alone, that makes the test outcome depend on hardware/thread count
+    /// instead of the code under test — exactly the kind of environmental
+    /// nondeterminism AGENTS.md's testing section asks tests to avoid.
+    /// Every test-module call to `validate` goes through this instead,
+    /// serialized behind one lock, so they never compete for that
+    /// production cap regardless of how many the test runner schedules at
+    /// once.
+    static VALIDATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn validate_locked(source: &str) -> Result<(), ControllerError> {
+        let _guard = VALIDATE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        validate(source)
+    }
+
     #[test]
     fn parse_action_accepts_documented_names() {
         assert_eq!(parse_action("north").unwrap(), Action::MoveNorth);
@@ -1015,18 +1103,49 @@ mod tests {
 
     #[test]
     fn validate_accepts_a_script_defining_on_tick() {
-        assert!(validate("function on_tick(observation) return \"wait\" end").is_ok());
+        assert!(validate_locked("function on_tick(observation) return \"wait\" end").is_ok());
+    }
+
+    #[test]
+    fn load_controller_returns_a_reusable_callback_even_with_a_stateful_index_metamethod() {
+        // `on_tick` is fetched via an ordinary global lookup, which a
+        // script can route through its own `__index` on `_G`. A stateful
+        // one that grants a function only the *first* time `on_tick` is
+        // requested, `nil` after, must not be asked a second time — the
+        // callback `load_controller` already looked up and confirmed
+        // exists is the one that must actually get called, not a fresh
+        // lookup that this kind of metamethod could fail.
+        let source = r#"
+            local granted = false
+            setmetatable(_G, {
+                __index = function(_, key)
+                    if key == "on_tick" and not granted then
+                        granted = true
+                        return function(observation) return "wait" end
+                    end
+                    return nil
+                end,
+            })
+        "#;
+        let lua = sandboxed_lua();
+        let callback =
+            load_controller(&lua, source).expect("on_tick should be found on the first lookup");
+        let observation = lua.create_table().expect("table");
+        let result: String = callback
+            .call(observation)
+            .expect("the callback load_controller already returned must still be callable");
+        assert_eq!(result, "wait");
     }
 
     #[test]
     fn validate_rejects_a_syntax_error() {
-        let err = validate("function on_tick( ").unwrap_err();
+        let err = validate_locked("function on_tick( ").unwrap_err();
         assert!(matches!(err, ControllerError::ScriptInvalid(_)));
     }
 
     #[test]
     fn validate_rejects_a_script_missing_on_tick() {
-        let err = validate("local x = 1").unwrap_err();
+        let err = validate_locked("local x = 1").unwrap_err();
         assert!(matches!(err, ControllerError::MissingCallback));
     }
 
@@ -1035,12 +1154,14 @@ mod tests {
         // If this ran on_tick, `error(...)` would surface as CallbackFailed
         // instead of validate succeeding; validate must only load the
         // script and check the callback exists.
-        assert!(validate("function on_tick(observation) error('should not run') end").is_ok());
+        assert!(
+            validate_locked("function on_tick(observation) error('should not run') end").is_ok()
+        );
     }
 
     #[test]
     fn validate_bounds_a_runaway_top_level_loop_instead_of_hanging() {
-        let err = validate("while true do end").unwrap_err();
+        let err = validate_locked("while true do end").unwrap_err();
         assert!(matches!(err, ControllerError::ScriptInvalid(_)));
         assert!(err.to_string().contains("execution allowance"));
     }
@@ -1064,7 +1185,7 @@ mod tests {
                 function on_tick(observation) return "wait" end
             end
         "#;
-        let err = validate(source).unwrap_err();
+        let err = validate_locked(source).unwrap_err();
         assert!(matches!(err, ControllerError::ScriptInvalid(_)));
         assert!(err.to_string().contains("execution allowance"), "{err}");
     }
@@ -1083,7 +1204,7 @@ mod tests {
     #[test]
     fn validate_rejects_dofile_and_loadfile() {
         for source in ["dofile('/etc/passwd')", "loadfile('/etc/passwd')"] {
-            let err = validate(source).unwrap_err();
+            let err = validate_locked(source).unwrap_err();
             assert!(
                 matches!(err, ControllerError::ScriptInvalid(_)),
                 "{source} should fail without filesystem access"
@@ -1098,7 +1219,7 @@ mod tests {
         // sandboxed_lua() installs; removing the function entirely means
         // any use of it (with or without arguments) fails to load instead
         // of silently reintroducing nondeterminism.
-        let err = validate("math.randomseed()").unwrap_err();
+        let err = validate_locked("math.randomseed()").unwrap_err();
         assert!(matches!(err, ControllerError::ScriptInvalid(_)));
     }
 
@@ -1117,7 +1238,7 @@ mod tests {
                    table.concat(order, ","))
             function on_tick(observation) return "wait" end
         "#;
-        assert!(validate(source).is_ok());
+        assert!(validate_locked(source).is_ok());
     }
 
     #[test]
@@ -1130,7 +1251,7 @@ mod tests {
             assert(table.concat(order, ",") == "false,true", table.concat(order, ","))
             function on_tick(observation) return "wait" end
         "#;
-        assert!(validate(source).is_ok());
+        assert!(validate_locked(source).is_ok());
     }
 
     #[test]
@@ -1148,7 +1269,7 @@ mod tests {
             assert(order[1] == "9223372036854775807", order[1])
             function on_tick(observation) return "wait" end
         "#;
-        assert!(validate(source).is_ok());
+        assert!(validate_locked(source).is_ok());
     }
 
     #[test]
@@ -1171,7 +1292,7 @@ mod tests {
             end
             function on_tick(observation) return "wait" end
         "#;
-        assert!(validate(source).is_ok());
+        assert!(validate_locked(source).is_ok());
     }
 
     #[test]
@@ -1181,14 +1302,14 @@ mod tests {
         // no literal form. The pointer-hiding %s treatment must not mask
         // that by unconditionally normalizing every reference-typed
         // argument regardless of which specifier consumes it.
-        let err = validate("string.format('%q', {})").unwrap_err();
+        let err = validate_locked("string.format('%q', {})").unwrap_err();
         assert!(matches!(err, ControllerError::ScriptInvalid(_)));
     }
 
     #[test]
     fn pairs_propagates_an_error_for_a_non_callable_pairs_metamethod() {
         let source = "for k in pairs(setmetatable({a = 1}, {__pairs = true})) do end";
-        let err = validate(source).unwrap_err();
+        let err = validate_locked(source).unwrap_err();
         assert!(matches!(err, ControllerError::ScriptInvalid(_)));
     }
 
@@ -1216,13 +1337,47 @@ mod tests {
             assert(#seen == 1 and seen[1] == "only=value", table.concat(seen, ","))
             function on_tick(observation) return "wait" end
         "#;
-        assert!(validate(source).is_ok());
+        assert!(validate_locked(source).is_ok());
     }
 
     #[test]
     fn pairs_rejects_a_table_valued_key_instead_of_leaving_it_nondeterministic() {
-        let err = validate("for k in pairs({[{}] = 1}) do end").unwrap_err();
+        let err = validate_locked("for k in pairs({[{}] = 1}) do end").unwrap_err();
         assert!(matches!(err, ControllerError::ScriptInvalid(_)));
+    }
+
+    #[test]
+    fn next_rejects_a_control_key_that_was_never_a_member_of_the_table() {
+        // Real Lua's `next` raises "invalid key to 'next'" for a control
+        // value that was never actually a member of the table (a typo, or
+        // one fabricated to probe for a result) — a naive "find the first
+        // entry greater than key" search instead succeeds for any key,
+        // silently returning whatever sorts after it (here, "b", 1), which
+        // could make `pcall`-guarded controller logic take a success
+        // branch it never should against real Lua.
+        let source = r#"
+            local ok = pcall(next, {b = 1}, "a")
+            assert(not ok, "next({b = 1}, 'a') should raise 'invalid key'")
+            function on_tick(observation) return "wait" end
+        "#;
+        assert!(validate_locked(source).is_ok());
+    }
+
+    #[test]
+    fn next_still_tolerates_a_key_deleted_since_the_last_call() {
+        // The fabricated-key rejection above must not regress the
+        // documented "clearing the current field" tolerance: a key that
+        // *was* a genuine member (and was reached via `next` itself) stays
+        // valid as a control value even after being deleted.
+        let source = r#"
+            local t = {a = 1, b = 2}
+            local k = next(t)
+            t[k] = nil
+            local ok = pcall(next, t, k)
+            assert(ok, "a key deleted since the last next() call must still be accepted")
+            function on_tick(observation) return "wait" end
+        "#;
+        assert!(validate_locked(source).is_ok());
     }
 
     #[test]
@@ -1242,7 +1397,7 @@ mod tests {
             assert(next(t) == nil)
             function on_tick(observation) return "wait" end
         "#;
-        assert!(validate(source).is_ok());
+        assert!(validate_locked(source).is_ok());
     }
 
     #[test]
@@ -1264,7 +1419,7 @@ mod tests {
             assert(#seen == 1 and seen[1] == "a", table.concat(seen, ","))
             function on_tick(observation) return "wait" end
         "#;
-        assert!(validate(source).is_ok());
+        assert!(validate_locked(source).is_ok());
     }
 
     #[test]
@@ -1285,7 +1440,7 @@ mod tests {
             assert(seen == 3, seen)
             function on_tick(observation) return "wait" end
         "#;
-        assert!(validate(source).is_ok());
+        assert!(validate_locked(source).is_ok());
     }
 
     #[test]
@@ -1301,7 +1456,7 @@ mod tests {
             assert(select("#", next(t, k)) == 1, select("#", next(t, k)))
             function on_tick(observation) return "wait" end
         "##;
-        assert!(validate(source).is_ok());
+        assert!(validate_locked(source).is_ok());
     }
 
     #[test]
@@ -1319,7 +1474,7 @@ mod tests {
             assert(seen_b == 99, seen_b)
             function on_tick(observation) return "wait" end
         "#;
-        assert!(validate(source).is_ok());
+        assert!(validate_locked(source).is_ok());
     }
 
     #[test]
@@ -1346,7 +1501,7 @@ mod tests {
             assert(#seen == 1 and seen[1] == "only=value", table.concat(seen, ","))
             function on_tick(observation) return "wait" end
         "#;
-        assert!(validate(source).is_ok());
+        assert!(validate_locked(source).is_ok());
     }
 
     #[test]
@@ -1372,7 +1527,7 @@ mod tests {
             end
             function on_tick(observation) return "wait" end
         "#;
-        assert!(validate(source).is_ok());
+        assert!(validate_locked(source).is_ok());
     }
 
     #[test]
@@ -1389,7 +1544,7 @@ mod tests {
             assert(count == 3, count)
             function on_tick(observation) return "wait" end
         "##;
-        assert!(validate(source).is_ok());
+        assert!(validate_locked(source).is_ok());
     }
 
     #[test]
@@ -1403,7 +1558,7 @@ mod tests {
             assert(select("#", f(s, k)) == 1, select("#", f(s, k)))
             function on_tick(observation) return "wait" end
         "##;
-        assert!(validate(source).is_ok());
+        assert!(validate_locked(source).is_ok());
     }
 
     #[test]
@@ -1417,7 +1572,7 @@ mod tests {
             assert(k == nil, k)
             function on_tick(observation) return "wait" end
         "##;
-        assert!(validate(source).is_ok());
+        assert!(validate_locked(source).is_ok());
     }
 
     #[test]
@@ -1436,7 +1591,7 @@ mod tests {
             assert(k1 == k2 and v1 == v2, (k1 or "nil") .. " ~= " .. (k2 or "nil"))
             function on_tick(observation) return "wait" end
         "##;
-        assert!(validate(source).is_ok());
+        assert!(validate_locked(source).is_ok());
     }
 
     #[test]
@@ -1444,7 +1599,7 @@ mod tests {
         let lua_source = "local text = tostring({})\n\
                            assert(text == 'table: 0x0', text)\n\
                            function on_tick(observation) return 'wait' end";
-        assert!(validate(lua_source).is_ok());
+        assert!(validate_locked(lua_source).is_ok());
     }
 
     #[test]
@@ -1454,7 +1609,7 @@ mod tests {
             assert(text == "table: 0xabc", text)
             function on_tick(observation) return "wait" end
         "#;
-        assert!(validate(source).is_ok());
+        assert!(validate_locked(source).is_ok());
     }
 
     #[test]
@@ -1465,7 +1620,7 @@ mod tests {
             assert(text == "sentinel: 0x0", text)
             function on_tick(observation) return "wait" end
         "#;
-        assert!(validate(source).is_ok());
+        assert!(validate_locked(source).is_ok());
     }
 
     #[test]
@@ -1480,7 +1635,7 @@ mod tests {
             assert(text == "literal: 0xabc: 0x0", text)
             function on_tick(observation) return "wait" end
         "#;
-        assert!(validate(source).is_ok());
+        assert!(validate_locked(source).is_ok());
     }
 
     #[test]
@@ -1490,7 +1645,7 @@ mod tests {
             "string.unpack('I2', 'xx')",
             "string.packsize('I2')",
         ] {
-            let err = validate(source).unwrap_err();
+            let err = validate_locked(source).unwrap_err();
             assert!(
                 matches!(err, ControllerError::ScriptInvalid(_)),
                 "{source} should fail without string.pack/unpack/packsize"
@@ -1507,7 +1662,7 @@ mod tests {
             assert(tostring(true) == "true")
             function on_tick(observation) return "wait" end
         "#;
-        assert!(validate(source).is_ok());
+        assert!(validate_locked(source).is_ok());
     }
 
     #[test]
@@ -1524,7 +1679,7 @@ mod tests {
             assert(text == "widget(id=7): 0x1 of stock", text)
             function on_tick(observation) return "wait" end
         "#;
-        assert!(validate(source).is_ok());
+        assert!(validate_locked(source).is_ok());
     }
 
     #[test]
@@ -1545,25 +1700,25 @@ mod tests {
             assert(#seen == 1 and seen[1] == "a=1", table.concat(seen, ","))
             function on_tick(observation) return "wait" end
         "#;
-        assert!(validate(source).is_ok());
+        assert!(validate_locked(source).is_ok());
     }
 
     #[test]
     fn validate_rejects_a_script_using_string_dump() {
-        let err = validate("string.dump(function() end)").unwrap_err();
+        let err = validate_locked("string.dump(function() end)").unwrap_err();
         assert!(matches!(err, ControllerError::ScriptInvalid(_)));
     }
 
     #[test]
     fn validate_rejects_a_script_using_collectgarbage() {
-        let err = validate("collectgarbage('count')").unwrap_err();
+        let err = validate_locked("collectgarbage('count')").unwrap_err();
         assert!(matches!(err, ControllerError::ScriptInvalid(_)));
     }
 
     #[test]
     fn validate_truncates_an_excessively_large_diagnostic_message() {
         let source = "error(string.rep('x', 5000000))";
-        let err = validate(source).unwrap_err();
+        let err = validate_locked(source).unwrap_err();
         let ControllerError::ScriptInvalid(inner) = err else {
             panic!("expected ScriptInvalid, got {err}");
         };
@@ -1583,12 +1738,12 @@ mod tests {
             assert(tostring(raw) == raw)
             function on_tick(observation) return "wait" end
         "#;
-        assert!(validate(source).is_ok());
+        assert!(validate_locked(source).is_ok());
     }
 
     #[test]
     fn validate_rejects_a_script_that_calls_load() {
-        let err = validate("load('return 1')").unwrap_err();
+        let err = validate_locked("load('return 1')").unwrap_err();
         assert!(matches!(err, ControllerError::ScriptInvalid(_)));
     }
 
@@ -1600,7 +1755,7 @@ mod tests {
             "('%p'):format({})",
             "string.format('%-10p', print)",
         ] {
-            let err = validate(source).unwrap_err();
+            let err = validate_locked(source).unwrap_err();
             assert!(
                 matches!(err, ControllerError::ScriptInvalid(_)),
                 "{source} should be rejected"
@@ -1615,7 +1770,7 @@ mod tests {
             assert(string.format("%d", 42) == "42")
             function on_tick(observation) return "wait" end
         "#;
-        assert!(validate(source).is_ok());
+        assert!(validate_locked(source).is_ok());
     }
 
     #[test]
@@ -1625,7 +1780,7 @@ mod tests {
             assert(text == "table: 0x0", text)
             function on_tick(observation) return "wait" end
         "#;
-        assert!(validate(source).is_ok());
+        assert!(validate_locked(source).is_ok());
     }
 
     #[test]
@@ -1636,7 +1791,7 @@ mod tests {
             assert(string.format("%s and %d", "x", 3) == "x and 3")
             function on_tick(observation) return "wait" end
         "#;
-        assert!(validate(source).is_ok());
+        assert!(validate_locked(source).is_ok());
     }
 
     #[test]
@@ -1656,7 +1811,7 @@ mod tests {
             assert(calls == 0, "the later %s argument's __tostring must not have run, calls=" .. calls)
             function on_tick(observation) return "wait" end
         "#;
-        assert!(validate(source).is_ok());
+        assert!(validate_locked(source).is_ok());
     }
 
     #[test]
@@ -1667,12 +1822,12 @@ mod tests {
             assert(text == string.char(255) .. "7", text)
             function on_tick(observation) return "wait" end
         "#;
-        assert!(validate(source).is_ok());
+        assert!(validate_locked(source).is_ok());
     }
 
     #[test]
     fn validate_bounds_excessive_native_allocation() {
-        let err = validate("local n = 1 << 30\nlocal s = string.rep('x', n)").unwrap_err();
+        let err = validate_locked("local n = 1 << 30\nlocal s = string.rep('x', n)").unwrap_err();
         assert!(matches!(err, ControllerError::ScriptInvalid(_)));
     }
 
@@ -1698,7 +1853,7 @@ mod tests {
                 local _ = string.rep("x", 64)
             end
         "#;
-        let validate_result = validate(source);
+        let validate_result = validate_locked(source);
         let load_result = load_controller(&sandboxed_lua(), source);
         assert!(
             matches!(validate_result, Err(ControllerError::MissingCallback)),
@@ -1717,7 +1872,7 @@ mod tests {
             "io.open('/etc/passwd')",
             "require('os')",
         ] {
-            let err = validate(source).unwrap_err();
+            let err = validate_locked(source).unwrap_err();
             assert!(
                 matches!(err, ControllerError::ScriptInvalid(_)),
                 "{source} should fail to load without host library access"

@@ -380,18 +380,28 @@ fn draw_controller_source(frame: &mut Frame, area: Rect, state: &AppState) {
     // by `char` count alone can leave the cursor's true screen column
     // outside a narrow pane while this thinks it's still visible.
     let cursor_line_text = source.split('\n').nth(cursor_line).unwrap_or("");
-    let cursor_display_col = display_width_of_prefix(cursor_line_text, cursor_col);
+    let cursor_line_chars: Vec<char> = cursor_line_text.chars().collect();
+    // The cursor's highlighted unit is a whole grapheme cluster (see
+    // `cursor_grapheme_char_range`), not necessarily the single `char` at
+    // `cursor_col` — `cursor_col` can land on a zero-width character (a
+    // combining mark, or a variation selector like U+FE0F) whose own
+    // `unicode-width` value says nothing about the *combined* cell width
+    // ratatui's `CellWidth` actually renders for the pair. Measuring only
+    // that one `char` could under-reserve scroll room for a wider unit,
+    // clipping it off the pane's edge entirely.
+    let (cursor_start_col, cursor_glyph_width) = if cursor_col < cursor_line_chars.len() {
+        let (at_start, at_end) = cursor_grapheme_char_range(&cursor_line_chars, cursor_col);
+        let glyph: String = cursor_line_chars[at_start..at_end].iter().collect();
+        (at_start, (glyph.as_str().cell_width() as usize).max(1))
+    } else {
+        (cursor_col, 1usize) // past the last character: the synthetic trailing cursor cell
+    };
+    let cursor_display_col = display_width_of_prefix(cursor_line_text, cursor_start_col);
     // Scroll far enough to fit the cursor glyph's *far* edge, not just its
     // start column: reserving only one cell for a double-width character
     // (e.g. CJK) leaves it straddling the pane's right edge, and ratatui
     // won't render a two-cell glyph that doesn't fully fit, making the
     // cursor disappear.
-    let cursor_glyph_width = cursor_line_text
-        .chars()
-        .nth(cursor_col)
-        .and_then(|c| c.width())
-        .unwrap_or(1)
-        .max(1);
     let cursor_display_end = cursor_display_col + cursor_glyph_width - 1;
     let first_visible_cell = first_visible_offset(cursor_display_end, text_width);
     let lines = controller_editor_lines(source, cursor_line, cursor_col, first_visible_cell);
@@ -526,6 +536,32 @@ fn chars_to_skip_for_cell_offset(text: &str, cells: usize) -> usize {
     skip
 }
 
+/// The char-index range `[at_start, at_end)` of the grapheme cluster at
+/// `cursor_col` within `chars` — `cursor_col` itself, widened outward to
+/// include any neighboring zero-width characters (a combining mark, or a
+/// variation selector like U+FE0F that changes how the character before it
+/// renders). Real terminals — and ratatui's own `CellWidth` — render such a
+/// sequence as one visual unit; a standalone zero-width glyph on its own
+/// renders nothing at all, so treating each `char` as its own independent
+/// cell would either lose the cursor highlight entirely (if `cursor_col`
+/// lands on the zero-width character alone) or under-measure the unit's
+/// true rendered width (if it lands on the base character but a following
+/// modifier's contribution is ignored). Shared by [`cursor_line_spans`]
+/// (which highlighting group to render as one reversed unit) and
+/// `draw_controller_source` (how many display cells that unit actually
+/// costs when deciding whether it fits the visible viewport).
+fn cursor_grapheme_char_range(chars: &[char], cursor_col: usize) -> (usize, usize) {
+    let mut at_start = cursor_col;
+    while at_start > 0 && chars[at_start].width().unwrap_or(1) == 0 {
+        at_start -= 1;
+    }
+    let mut at_end = cursor_col + 1;
+    while at_end < chars.len() && chars[at_end].width().unwrap_or(1) == 0 {
+        at_end += 1;
+    }
+    (at_start, at_end)
+}
+
 fn cursor_line_spans(text: &str, cursor_col: usize) -> Vec<Span<'static>> {
     let chars: Vec<char> = text.chars().collect();
     let cursor_style = Style::default().add_modifier(Modifier::REVERSED);
@@ -538,23 +574,7 @@ fn cursor_line_spans(text: &str, cursor_col: usize) -> Vec<Span<'static>> {
         return spans;
     }
 
-    // A zero-width character at the cursor (a combining mark, e.g. the
-    // U+0301 in a decomposed "e\u{301}") can't carry its own highlighted
-    // cell — ratatui drops a standalone zero-width glyph, so highlighting
-    // just that one `char` renders no visible cursor at all. Fold it
-    // together with the base character it combines with into one
-    // highlighted unit instead, matching how a terminal renders the pair
-    // as a single visual cell; this covers the cursor landing on either
-    // the base character (marks trail it) or the mark itself (a base
-    // character precedes it).
-    let mut at_start = cursor_col;
-    while at_start > 0 && chars[at_start].width().unwrap_or(1) == 0 {
-        at_start -= 1;
-    }
-    let mut at_end = cursor_col + 1;
-    while at_end < chars.len() && chars[at_end].width().unwrap_or(1) == 0 {
-        at_end += 1;
-    }
+    let (at_start, at_end) = cursor_grapheme_char_range(&chars, cursor_col);
 
     let before: String = chars[..at_start].iter().collect();
     let at: String = chars[at_start..at_end].iter().collect();
@@ -1922,6 +1942,24 @@ mod tests {
         // Cursor on the base character (col 0): the highlighted unit must
         // include the mark trailing it.
         assert_eq!(cursor_span(0).content, "e\u{0301}");
+    }
+
+    #[test]
+    fn cursor_grapheme_range_spans_a_heart_and_its_variation_selector() {
+        // U+2764 (heavy black heart) + U+FE0F (variation selector-16,
+        // requesting emoji presentation) is a two-codepoint grapheme
+        // cluster ratatui renders as one unit — measuring only the `char`
+        // at the cursor (whichever of the two it lands on) misses the
+        // other codepoint's contribution to the unit's true display width.
+        let chars: Vec<char> = "a\u{2764}\u{fe0f}b".chars().collect();
+        assert_eq!(cursor_grapheme_char_range(&chars, 1), (1, 3));
+        assert_eq!(cursor_grapheme_char_range(&chars, 2), (1, 3));
+        let glyph: String = chars[1..3].iter().collect();
+        assert_eq!(
+            glyph.as_str().cell_width(),
+            2,
+            "ratatui renders heart+VS16 as 2 cells, not 1"
+        );
     }
 
     #[test]
