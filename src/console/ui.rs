@@ -5,6 +5,7 @@
 //! without a real terminal.
 
 use ratatui::Frame;
+use ratatui::buffer::CellWidth;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -132,25 +133,25 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
         View::Signals => {
             let signals = format!("SIGNALS: {:02}", authored_signals().len());
             let mut candidates = Vec::new();
-            // A modified controller is session-only and can be lost, so its
-            // status stays visible even while the player is elsewhere in the
-            // console — but every MESH-preserving candidate is tried before
-            // any candidate that drops MESH, so adding it can never cost
-            // Signals its link condition at a width that already showed one.
+            // A controller's status — `starter`/`modified`/`invalid`, plus
+            // `STATUS: READY` once validated — is session-only state the
+            // player can lose (an unsaved edit, a validation result), so
+            // every candidate that keeps it is tried before any that drops
+            // it, MESH included: MESH is a static "link condition" label
+            // the player can always re-derive by looking at any other
+            // view, but a lost controller status is gone for good. Within
+            // each of those two groups, MESH is still dropped before the
+            // signals count, and the signals count before controller
+            // status itself, matching every other view's priority order.
             if let Some(controller) = &controller_field {
                 candidates.push(format!(
                     "MESH: DEGRADED   {signals}   {controller}   {working}"
                 ));
-                // Drop the signals count before dropping controller status —
-                // a modified controller can be lost, so it outranks a count
-                // the player can always re-derive by returning to Signals.
                 candidates.push(format!("MESH: DEGRADED   {controller}   {working}"));
-            }
-            candidates.push(format!("MESH: DEGRADED   {signals}   {working}"));
-            if let Some(controller) = &controller_field {
                 candidates.push(format!("{signals}   {controller}   {working}"));
                 candidates.push(format!("{controller}   {working}"));
             }
+            candidates.push(format!("MESH: DEGRADED   {signals}   {working}"));
             candidates.push(format!("{signals}   {working}"));
             candidates
         }
@@ -452,37 +453,39 @@ fn controller_editor_lines(
         .collect()
 }
 
-/// The display-cell width of the first `char_count` characters of `text`.
-/// Characters `unicode-width` doesn't assign a width to (control
-/// characters) count as zero, matching how they'd render.
+/// The display-cell width of the first `char_count` characters of `text`,
+/// computed via ratatui's own [`CellWidth`] — the exact same calculation
+/// `Buffer`/`Paragraph` use to lay out and clip rendered text — rather than
+/// summing each character's individual `unicode-width` value in isolation.
+/// Those can disagree: `CellWidth` applies a terminal-compatibility
+/// adjustment for a few grapheme-forming character combinations (e.g.
+/// halfwidth katakana dakuten/handakuten marks, which `unicode-width`
+/// reports as zero-width on their own but which terminals render as an
+/// extra occupied cell) that a naive per-character sum misses entirely,
+/// under- or over-counting exactly the columns this function's callers use
+/// to decide what's on screen and where the cursor cell actually falls.
 fn display_width_of_prefix(text: &str, char_count: usize) -> usize {
-    text.chars()
-        .take(char_count)
-        .map(|c| c.width().unwrap_or(0))
-        .sum()
+    let prefix: String = text.chars().take(char_count).collect();
+    prefix.cell_width() as usize
 }
 
 /// How many leading characters of `text` to skip so that they, combined,
 /// consume at least `cells` display-cell columns — the character-count
 /// equivalent of a cell-based horizontal scroll offset, since `chars()`
-/// iterates by character, not display width.
+/// iterates by character, not display width. Uses the same [`CellWidth`]
+/// calculation as [`display_width_of_prefix`], for the same reason: it
+/// must agree with ratatui's own rendering, not an independent per-character
+/// unicode-width sum that can diverge from it.
 fn chars_to_skip_for_cell_offset(text: &str, cells: usize) -> usize {
     let mut consumed = 0usize;
     let mut skip = 0usize;
+    let mut prefix = String::new();
     for c in text.chars() {
         if consumed >= cells {
             break;
         }
-        // No `.max(1)`: a zero-width character (e.g. a combining mark)
-        // must count as zero cells here too, matching `display_width_of_
-        // prefix`'s accounting exactly. Forcing a minimum of one cell per
-        // `char` skipped more characters than the requested cell offset
-        // while consuming fewer real terminal cells than intended, so the
-        // two functions could disagree about where column `cells` actually
-        // falls on a line with combining marks before the cursor. `skip`
-        // still advances once per iteration regardless, so a run of
-        // zero-width characters can't stall this loop.
-        consumed += c.width().unwrap_or(0);
+        prefix.push(c);
+        consumed = prefix.as_str().cell_width() as usize;
         skip += 1;
     }
     skip
@@ -1865,6 +1868,28 @@ mod tests {
             4,
             "reaching cell 1 (where X starts) must skip past all three \
              zero-width marks and X itself, not stop after the first mark"
+        );
+    }
+
+    #[test]
+    fn display_width_matches_ratatui_for_a_halfwidth_katakana_dakuten() {
+        // `unicode-width` alone reports U+FF9E (a halfwidth katakana
+        // voiced-sound mark) as zero-width, but ratatui's own `CellWidth`
+        // adds a terminal-compatibility +1 for it (real terminals render it
+        // as its own occupied cell) — a naive per-character sum disagrees
+        // with what actually gets rendered, exactly the class of mismatch
+        // that could clip the cursor off the edge of a scrolled line.
+        let text = "\u{FF76}\u{FF9E}"; // halfwidth カ + dakuten
+        assert_eq!(
+            display_width_of_prefix(text, 2),
+            2,
+            "ratatui renders the halfwidth katakana + dakuten pair as 2 cells"
+        );
+        assert_eq!(
+            chars_to_skip_for_cell_offset(text, 2),
+            2,
+            "reaching cell 2 must skip past both characters, not treat the \
+             dakuten as contributing zero cells"
         );
     }
 

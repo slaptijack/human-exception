@@ -15,7 +15,8 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -192,6 +193,26 @@ fn install_deterministic_string_format(lua: &Lua) -> mlua::Result<()> {
             // outright, since it has no literal form), so leaving those
             // arguments untouched preserves that rejection instead of
             // silently succeeding with a normalized placeholder.
+            //
+            // A table with its own `__tostring` is deliberately *not*
+            // converted here, even though it's a reference type a `%s`
+            // conversion will consume: real Lua's own conversion loop
+            // processes each specifier strictly left to right and stops at
+            // the first one that fails (e.g. `%d` given a non-number), so
+            // a custom `__tostring` on a *later* `%s` argument is never
+            // even called if an earlier conversion errors first. Converting
+            // it here, in a separate pass before `real_format` runs at
+            // all, would call that (potentially side-effecting, e.g. a
+            // counter, or one that itself raises) metamethod regardless of
+            // whether real Lua would ever have reached it — an observable
+            // divergence beyond just the formatted text. Leaving it
+            // untouched instead lets `real_format` call it itself, exactly
+            // where and only if real Lua's own sequential processing would.
+            // A reference-typed value *without* a custom `__tostring` has
+            // no such script-visible call to protect: our replacement text
+            // is a fixed placeholder with no side effects and always
+            // succeeds, so converting it eagerly here cannot change
+            // whether, or where, `real_format` fails.
             let mut rebuilt = MultiValue::new();
             rebuilt.push_back(fmt_value.clone());
             for (index, value) in iter.enumerate() {
@@ -202,7 +223,9 @@ fn install_deterministic_string_format(lua: &Lua) -> mlua::Result<()> {
                             | Value::Function(_)
                             | Value::Thread(_)
                             | Value::UserData(_)
-                    ) {
+                    )
+                    && !table_has_custom_tostring(&value)
+                {
                     Value::String(det_tostring.call::<mlua::LuaString>(value)?)
                 } else {
                     value
@@ -250,6 +273,27 @@ fn format_argument_conversions(fmt: &[u8]) -> Vec<u8> {
     conversions
 }
 
+/// Whether `value` is a table carrying its own `__tostring` metamethod.
+/// Lua's standard `setmetatable` only ever attaches to tables, so a table
+/// is the only reference type that can have one; a table that does
+/// produces its own script-controlled `tostring`/`%s` output, which must be
+/// left completely untouched (both what it says and *when* it's called)
+/// rather than treated as address-bearing default text to normalize.
+fn table_has_custom_tostring(value: &Value) -> bool {
+    let Value::Table(table) = value else {
+        return false;
+    };
+    table
+        .metatable()
+        .map(|metatable| {
+            !matches!(
+                metatable.raw_get::<Value>("__tostring"),
+                Ok(Value::Nil) | Err(_)
+            )
+        })
+        .unwrap_or(false)
+}
+
 /// Overrides the global `tostring` so the default (no `__tostring`
 /// metamethod) representation of a table, function, thread, or userdata —
 /// normally `"<type>: 0x<address>"`, baking in that value's actual process
@@ -272,76 +316,61 @@ fn install_deterministic_tostring(lua: &Lua) -> mlua::Result<()> {
             // string that merely *looks* like one (`tostring("table:
             // 0xabc")`, a string literal, must come back unchanged) is
             // never mistaken for it.
-            let is_reference_type = matches!(
-                value,
-                Value::Table(_) | Value::Function(_) | Value::Thread(_) | Value::UserData(_)
-            );
+            let default_type_name = match &value {
+                Value::Table(_) => Some("table"),
+                Value::Function(_) => Some("function"),
+                Value::Thread(_) => Some("thread"),
+                Value::UserData(_) => Some("userdata"),
+                _ => None,
+            };
+            let Some(default_type_name) = default_type_name else {
+                return real_tostring.call(value);
+            };
             // Lua's standard `setmetatable` only ever attaches to tables, so
-            // a table is the only reference type that can carry a custom
-            // `__tostring` here; a table that has one produces its own,
-            // script-controlled output that must pass through untouched,
-            // never searched for the address marker below (a custom
-            // `__tostring` is free to legitimately contain literal text like
-            // "): 0x" that isn't an address at all).
-            let has_custom_tostring = if let Value::Table(table) = &value {
+            // a table is the only reference type here that can carry a
+            // custom `__tostring` — one that has it produces its own,
+            // script-controlled output that must pass through completely
+            // untouched, calling real Lua's `tostring` exactly where/when
+            // it otherwise would.
+            if table_has_custom_tostring(&value) {
+                return real_tostring.call(value);
+            }
+            // Every other reference-typed value's default representation
+            // bakes in this value's real process memory address — do not
+            // call real Lua's `tostring` for it at all, not even to
+            // normalize its output afterward. An earlier version of this
+            // override called through to real `tostring` and searched its
+            // text for a `": 0x"` marker to replace, which assumed Lua's
+            // C-level default representation always uses glibc/POSIX
+            // `printf("%p")` spelling; on MSVC targets `%p` instead
+            // produces fixed-width hexadecimal text with no `0x` prefix at
+            // all, so that search silently found nothing and returned the
+            // real, unredacted address untouched — defeating this
+            // protection entirely on that platform. Building the
+            // placeholder text ourselves, directly from the value's type
+            // name (or `__name`, the same override Lua's own default
+            // representation would use there), never looks at platform-
+            // specific address formatting in the first place.
+            let name = if let Value::Table(table) = &value {
                 table
                     .metatable()
-                    .map(|metatable| {
-                        !matches!(
-                            metatable.raw_get::<Value>("__tostring"),
-                            Ok(Value::Nil) | Err(_)
-                        )
+                    .and_then(|metatable| metatable.raw_get::<Value>("__name").ok())
+                    .and_then(|name| match name {
+                        Value::String(name) => Some(name),
+                        _ => None,
                     })
-                    .unwrap_or(false)
             } else {
-                false
+                None
             };
-            let text: mlua::LuaString = real_tostring.call(value)?;
-            if !is_reference_type || has_custom_tostring {
-                return Ok(text);
-            }
-            // Lua strings are arbitrary byte sequences, not necessarily
-            // UTF-8 (e.g. `tostring(string.char(255))`); work on the raw
-            // bytes and hand back the original `LuaString` unchanged
-            // whenever no address pattern matches, rather than routing
-            // through a Rust `String` (which would reject anything that
-            // isn't valid UTF-8, breaking `tostring` for ordinary binary
-            // Lua strings this override was never meant to touch).
-            //
-            // Not a fixed list of type-name prefixes ("table: ", "function:
-            // ", ...): a table/userdata's metatable can set `__name`, which
-            // Lua's own default representation uses in place of the real
-            // type name (`tostring(setmetatable({}, {__name = "sentinel"}))`
-            // → `"sentinel: 0x...."`), so any literal prefix list can always
-            // be sidestepped by a metatable the sandbox doesn't otherwise
-            // restrict. Look for the `": 0x"` marker common to every one of
-            // these default representations instead, and normalize
-            // whatever precedes it — the *last* occurrence, not the first:
-            // Lua always appends the real marker after the (possibly
-            // script-controlled, via `__name`) name, so a `__name` that
-            // itself happens to contain "): 0x" (e.g. `__name = "literal:
-            // 0xabc"`) must have that literal text left alone, with only
-            // the genuine trailing address marker replaced.
-            let bytes = text.as_bytes();
-            if let Some(marker) = rfind_bytes(&bytes, b": 0x") {
-                let prefix_end = marker + 2; // keep "<name>: ", drop "0x..."
-                let mut placeholder = bytes[..prefix_end].to_vec();
-                placeholder.extend_from_slice(b"0x0");
-                return lua.create_string(placeholder);
-            }
-            Ok(text)
+            let mut placeholder = match &name {
+                Some(name) => name.as_bytes().to_vec(),
+                None => default_type_name.as_bytes().to_vec(),
+            };
+            placeholder.extend_from_slice(b": 0x0");
+            lua.create_string(placeholder)
         })?;
     globals.set("tostring", det_tostring)?;
     Ok(())
-}
-
-/// The byte offset of the last occurrence of `needle` in `haystack`, or
-/// `None` if it doesn't appear.
-fn rfind_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() || haystack.len() < needle.len() {
-        return None;
-    }
-    haystack.windows(needle.len()).rposition(|w| w == needle)
 }
 
 /// Overrides the global `pairs`/`next` with versions that iterate a
@@ -407,6 +436,11 @@ fn install_deterministic_table_iteration(lua: &Lua) -> mlua::Result<()> {
         .set_name("pairs_metamethod_dispatch")
         .eval()?;
 
+    // Cloned in before `det_pairs`'s closure captures it below (a `Function`
+    // handle is cheap to clone — it doesn't copy the underlying Lua
+    // function) so `det_next` is still available to register as `next`
+    // itself afterward.
+    let det_next_for_pairs = det_next.clone();
     let det_pairs = lua.create_function(move |lua, table: Table| -> mlua::Result<MultiValue> {
         // Real Lua 5.4 defers entirely to a table's `__pairs` metamethod
         // when present (checked before ever calling the real `next`);
@@ -441,82 +475,28 @@ fn install_deterministic_table_iteration(lua: &Lua) -> mlua::Result<()> {
                 return Ok(MultiValue::from_iter(results));
             }
         }
-        // Snapshot only the sorted *key order* once, here, and walk it by
-        // position — not `next`'s comparator-based search on every step,
-        // and not a snapshot of (key, value) pairs either. A pure-position
-        // walk survives a table cleared mid-traversal (`for k in pairs(t)
-        // do t[k] = nil end`), which a per-step search through the table's
-        // live contents can't (the deleted key is gone from what's being
-        // searched). Re-reading each value from the live table when its
-        // key is yielded — instead of a value cloned back when `pairs`
-        // was first called — keeps Lua's other supported mid-traversal
-        // edit, changing an existing field's value before it's visited,
-        // showing that current value rather than a stale one; a key
-        // deleted before it's reached is skipped entirely, matching real
-        // Lua, instead of yielding it back with a `nil` value.
+        // Real Lua's `pairs` (absent a custom `__pairs`) returns `next`
+        // itself as the iterator, along with the table as state and `nil`
+        // as the initial control value — not a fresh, purpose-built
+        // iterator. `next` is already a stateless "give me the entry after
+        // `key`" function (see `det_next` above), safe to call with any
+        // control value, including a script driving a manual
+        // generic-for-style traversal directly (`local f, s, k = pairs(t)`,
+        // then calling `f(s, k)` more than once with the same `k`, or out
+        // of the order a `for` loop would use) — and its
+        // [`sorted_table_entries`]-based lookup already reflects every
+        // documented mid-traversal edit (a value changed before it's
+        // reached, a key deleted at or before it) for free.
         //
-        // The sorted keys are stashed in an ordinary Lua table (allocated
-        // through `lua.create_table`, so it's covered by
-        // `sandboxed_lua`'s memory limit like everything else a script
-        // causes to be allocated) rather than a Rust `Vec` owned by this
-        // closure. A `Vec` here would be invisible to that limit — nothing
-        // stops a script from calling `pairs(t)` in a loop and saving each
-        // returned iterator without ever driving it (`saved[i] =
-        // pairs(t)`), and each call would otherwise retain its own
-        // full-size host-heap copy of every entry, accumulating unbounded
-        // *process* memory no matter how small `t` or the loop count
-        // individually look to the Lua-side limit.
-        let sorted_keys = lua.create_table()?;
-        for (index, (key, _)) in sorted_table_entries(&table)?.into_iter().enumerate() {
-            sorted_keys.set(index + 1, key)?;
-        }
-        let key_count = sorted_keys.raw_len();
-        let position = std::cell::Cell::new(0usize);
-        let live_table = table.clone();
-        let iterator =
-            lua.create_function(move |lua, _: MultiValue| -> mlua::Result<MultiValue> {
-                loop {
-                    let i = position.get();
-                    if i >= key_count {
-                        // Real Lua's `pairs` (absent a custom `__pairs`)
-                        // returns `next` itself as the iterator function,
-                        // and `next` returns a single `nil` once
-                        // exhausted — not zero values. Match that arity
-                        // here too, not just on the standalone `next`
-                        // override above, since controller code can call
-                        // this returned iterator function directly
-                        // (`local f, s, k = pairs(t)`) instead of only
-                        // through a `for` loop.
-                        return (Value::Nil,).into_lua_multi(lua);
-                    }
-                    position.set(i + 1);
-                    let key: Value = sorted_keys.get(i + 1)?;
-                    // A raw lookup, not `Table::get`: the latter would
-                    // invoke the table's own `__index` metamethod (if any)
-                    // for a key that no longer has a *raw* entry, and a
-                    // synthesized fallback value from that metamethod
-                    // would make an already-deleted key look "live" again
-                    // — real `next`/`pairs` only ever traverses a table's
-                    // actual raw entries, never `__index`.
-                    let value: Value = live_table.raw_get(key.clone())?;
-                    if !matches!(value, Value::Nil) {
-                        return (key, value).into_lua_multi(lua);
-                    }
-                    // The key was present when `pairs` snapshotted the sort
-                    // order but has since been deleted (its live value is
-                    // now nil) — skip it and keep looking, rather than
-                    // yielding a key the table no longer actually has.
-                }
-            })?;
-        // Real Lua's `pairs` (absent a custom `__pairs`) returns `next,
-        // t, nil` — the source table itself as the iterator *state*, not
-        // `nil`. This iterator closure ignores the state/control
-        // arguments it's called with (it tracks position internally), so
-        // an ordinary `for` loop works either way, but controller code
-        // that inspects or forwards these three results directly (generic
-        // iteration helpers, `local f, s, k = pairs(t)`) would see a
-        // different value here than real Lua's.
-        (iterator, Value::Table(table), Value::Nil).into_lua_multi(lua)
+        // This used to be a separate closure that tracked its own position
+        // internally instead of honoring the control value it was called
+        // with, which broke exactly that contract: two calls with the same
+        // control value returned *different* keys, since the second call
+        // silently continued from the first's advanced position rather
+        // than recomputing "the entry after this specific key" the way
+        // real Lua's `next` (and a real generic `for` loop, which always
+        // passes back the previous key as the control value) does.
+        (det_next_for_pairs.clone(), Value::Table(table), Value::Nil).into_lua_multi(lua)
     })?;
 
     let globals = lua.globals();
@@ -862,18 +842,35 @@ pub fn validate(source: &str) -> Result<(), ControllerError> {
 
     thread::spawn(move || {
         let lua = sandboxed_lua();
+        // The instruction-hook error is an ordinary catchable Lua error —
+        // top-level source wrapping its own budget-exceeding work in
+        // `pcall` can silently absorb it and carry on (e.g. defining
+        // `on_tick` only in the `pcall`'s failure branch), reaching a
+        // clean `Ok(())`/`MissingCallback` outcome below despite having
+        // actually hit the ceiling. `run()` installs no such hook at all,
+        // so the *same* source there would behave completely differently:
+        // it wouldn't error at that point, wouldn't skip whatever the
+        // `pcall` was guarding, and could hang forever if that guarded
+        // work was actually a runaway loop. Recording whether the hook
+        // ever fired — independent of whatever `load_controller` itself
+        // ultimately returns — lets the outcome below reject the whole
+        // validation once it did, instead of trusting a result the
+        // top-level script may have manufactured specifically to hide it.
+        let hook_fired = Arc::new(AtomicBool::new(false));
+        let hook_fired_in_hook = Arc::clone(&hook_fired);
         let _ = lua.set_hook(
             HookTriggers {
                 every_nth_instruction: Some(VALIDATE_INSTRUCTION_BUDGET),
                 ..HookTriggers::default()
             },
-            |_, _| -> mlua::Result<VmState> {
+            move |_, _| -> mlua::Result<VmState> {
+                hook_fired_in_hook.store(true, Ordering::SeqCst);
                 Err(mlua::Error::RuntimeError(
                     EXECUTION_ALLOWANCE_MESSAGE.to_string(),
                 ))
             },
         );
-        let outcome = match load_controller(&lua, &source) {
+        let mut outcome = match load_controller(&lua, &source) {
             Ok(()) => ValidationOutcome::Ok,
             Err(ControllerError::MissingCallback) => ValidationOutcome::MissingCallback,
             Err(ControllerError::ScriptInvalid(err)) => {
@@ -883,6 +880,9 @@ pub fn validate(source: &str) -> Result<(), ControllerError> {
                 "controller failed to load for an unexpected reason".to_string(),
             ),
         };
+        if hook_fired.load(Ordering::SeqCst) {
+            outcome = ValidationOutcome::Invalid(EXECUTION_ALLOWANCE_MESSAGE.to_string());
+        }
         // Dropping `lua` runs any pending Lua finalizers — a table with a
         // `__gc` metamethod is collectible source-controlled Lua just like
         // anything else `load_controller` ran, and one wrapping its own
@@ -1024,6 +1024,30 @@ mod tests {
         assert!(err.to_string().contains("execution allowance"));
     }
 
+    #[test]
+    fn validate_rejects_a_script_that_catches_the_instruction_hook_with_pcall() {
+        // The instruction-hook's error is an ordinary catchable Lua error;
+        // a script could otherwise `pcall` around a budget-exceeding loop
+        // and only define `on_tick` in the failure branch, reaching a
+        // clean `Ok`/`MissingCallback` outcome that hides having hit the
+        // ceiling — `run()` has no such hook at all, so the same source
+        // there behaves completely differently (this exact loop would just
+        // hang forever). Whether the hook ever fired must make the whole
+        // validation fail regardless of what the top-level script did
+        // afterward.
+        let source = r#"
+            local ok = pcall(function()
+                while true do end
+            end)
+            if not ok then
+                function on_tick(observation) return "wait" end
+            end
+        "#;
+        let err = validate(source).unwrap_err();
+        assert!(matches!(err, ControllerError::ScriptInvalid(_)));
+        assert!(err.to_string().contains("execution allowance"), "{err}");
+    }
+
     // The pcall-wrapped-instruction-hook-bypass regression test lives in its
     // own integration test binary
     // (`tests/lua_controller_execution_limit.rs`), not here: that script
@@ -1107,22 +1131,16 @@ mod tests {
     }
 
     #[test]
-    fn pairs_retained_snapshots_are_bounded_by_the_sandbox_memory_limit() {
-        // Before this fix, each `pairs(t)` call retained a Rust-heap `Vec`
-        // outside Lua's own tracked memory, so saving many iterators
-        // without ever driving them could accumulate unbounded *host*
-        // memory no matter how small `t` or the sandbox's 32MB Lua memory
-        // limit looked. The sorted key snapshot is now itself a Lua table,
-        // so retaining enough of them runs into that same limit and fails
-        // cleanly instead.
-        //
-        // Exercises `sandboxed_lua`/`load_controller` directly rather than
-        // going through `validate`'s wall-clock timeout: with the timeout
-        // in the mix, this workload hits that first regardless of which
-        // failure `pairs` itself would eventually produce, which wouldn't
-        // actually prove the memory limit is what's catching it (the test
-        // would "pass" the same way even without this fix).
-        let lua = sandboxed_lua();
+    fn pairs_does_not_retain_a_growing_snapshot_per_call() {
+        // `pairs(t)` (absent a custom `__pairs`) now returns the same
+        // pre-existing `next` function, the table itself, and `nil` —
+        // nothing newly allocated per call — instead of a fresh closure
+        // wrapping its own sorted-key snapshot. Saving many iterators
+        // without ever driving them (a pattern an earlier version of this
+        // sandbox could accumulate unbounded *host* memory for, since a
+        // Rust-heap `Vec` per call sat outside Lua's own tracked memory)
+        // must therefore stay cheap and succeed, not run into any memory
+        // limit at all.
         let source = r#"
             local t = {}
             for i = 1, 200 do t["key" .. i] = i end
@@ -1132,17 +1150,7 @@ mod tests {
             end
             function on_tick(observation) return "wait" end
         "#;
-        let err = load_controller(&lua, source).unwrap_err();
-        match err {
-            ControllerError::ScriptInvalid(mlua_err) => {
-                assert!(
-                    mlua_err.to_string().contains("not enough memory"),
-                    "expected the sandbox's own memory limit to be what fails this, got: \
-                     {mlua_err}"
-                );
-            }
-            other => panic!("expected ScriptInvalid, got {other:?}"),
-        }
+        assert!(validate(source).is_ok());
     }
 
     #[test]
@@ -1392,6 +1400,25 @@ mod tests {
     }
 
     #[test]
+    fn pairs_iterator_honors_the_control_argument_it_is_called_with() {
+        // The iterator `pairs` returns must behave like a stateless `next`:
+        // calling it twice with the *same* control value must return the
+        // *same* key both times, not silently advance an internal
+        // position. A generic-iteration helper that restarts or replays a
+        // traversal by control value (rather than only driving it forward
+        // through an ordinary `for` loop) depends on this.
+        let source = r##"
+            local t = {a = 1, b = 2}
+            local f, s = pairs(t)
+            local k1, v1 = f(s, nil)
+            local k2, v2 = f(s, nil)
+            assert(k1 == k2 and v1 == v2, (k1 or "nil") .. " ~= " .. (k2 or "nil"))
+            function on_tick(observation) return "wait" end
+        "##;
+        assert!(validate(source).is_ok());
+    }
+
+    #[test]
     fn tostring_hides_the_process_address_of_a_table() {
         let lua_source = "local text = tostring({})\n\
                            assert(text == 'table: 0x0', text)\n\
@@ -1586,6 +1613,26 @@ mod tests {
             local labeled = setmetatable({}, {__tostring = function(_) return "named" end})
             assert(string.format("%s", labeled) == "named")
             assert(string.format("%s and %d", "x", 3) == "x and 3")
+            function on_tick(observation) return "wait" end
+        "#;
+        assert!(validate(source).is_ok());
+    }
+
+    #[test]
+    fn string_format_does_not_call_a_later_custom_tostring_when_an_earlier_conversion_fails() {
+        // Real Lua's `string.format` processes conversions strictly left
+        // to right and stops at the first one that fails — a later `%s`
+        // argument's own `__tostring` (here, one with an observable side
+        // effect) must never run if an earlier `%d` conversion given a
+        // non-number already failed, since real Lua never reaches it.
+        let source = r#"
+            local calls = 0
+            local labeled = setmetatable({}, {
+                __tostring = function(_) calls = calls + 1 return "named" end,
+            })
+            local ok = pcall(string.format, "%d %s", {}, labeled)
+            assert(not ok, "expected the %d conversion to fail")
+            assert(calls == 0, "the later %s argument's __tostring must not have run, calls=" .. calls)
             function on_tick(observation) return "wait" end
         "#;
         assert!(validate(source).is_ok());
