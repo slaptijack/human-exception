@@ -390,7 +390,14 @@ fn install_deterministic_table_iteration(lua: &Lua) -> mlua::Result<()> {
                     }
                     position.set(i + 1);
                     let key: Value = sorted_keys.get(i + 1)?;
-                    let value: Value = live_table.get(key.clone())?;
+                    // A raw lookup, not `Table::get`: the latter would
+                    // invoke the table's own `__index` metamethod (if any)
+                    // for a key that no longer has a *raw* entry, and a
+                    // synthesized fallback value from that metamethod
+                    // would make an already-deleted key look "live" again
+                    // — real `next`/`pairs` only ever traverses a table's
+                    // actual raw entries, never `__index`.
+                    let value: Value = live_table.raw_get(key.clone())?;
                     if !matches!(value, Value::Nil) {
                         return (key, value).into_lua_multi(lua);
                     }
@@ -1042,6 +1049,28 @@ mod tests {
             end
             assert(seen == 3, seen)
             assert(next(t) == nil)
+            function on_tick(observation) return "wait" end
+        "#;
+        assert!(validate(source).is_ok());
+    }
+
+    #[test]
+    fn pairs_does_not_resurrect_a_deleted_key_via_an_index_metamethod() {
+        // A table's `__index` fallback must not make a key deleted mid-
+        // traversal look "live" again: real `next`/`pairs` only ever
+        // traverses raw entries, ignoring `__index` entirely.
+        let source = r#"
+            local t = setmetatable({a = 1, b = 2}, {
+                __index = function(_, _) return "fallback" end,
+            })
+            local seen = {}
+            for k in pairs(t) do
+                if k == "a" then
+                    t.b = nil
+                end
+                seen[#seen + 1] = k
+            end
+            assert(#seen == 1 and seen[1] == "a", table.concat(seen, ","))
             function on_tick(observation) return "wait" end
         "#;
         assert!(validate(source).is_ok());
