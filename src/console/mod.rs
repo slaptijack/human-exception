@@ -2,9 +2,9 @@
 //!
 //! This module hosts the interactive shell described by
 //! `docs/TUI_DESIGN.md`: a session/state model ([`state`]), key-to-intent
-//! mapping ([`event`]), and rendering ([`ui`]). Signals, Target, and
-//! Controller are populated; Operation and After Action still show
-//! placeholder content for later issues (#45-#46) to populate.
+//! mapping ([`event`]), and rendering ([`ui`]). Signals, Target, Controller,
+//! and Operation are populated; After Action still shows placeholder
+//! content for #46 to populate.
 
 pub mod editor;
 pub mod event;
@@ -161,8 +161,26 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resu
     }
 
     while !state.should_quit() {
-        let event = term_event::read()?;
-        if should_redraw(&mut state, event, frame_size, &mut last_transition_press) {
+        // Presentation paces a running, unpaused deployment (`Space`/`Enter`
+        // control it, not wall-clock timing — see `docs/TUI_DESIGN.md`,
+        // "Pacing controls"): while `operation_auto_advancing` holds, poll
+        // with a short timeout instead of blocking on `read` forever, so a
+        // tick can advance on its own between key presses. Otherwise this
+        // is the exact same blocking wait as before — an idle session never
+        // wakes up on a timer it doesn't need.
+        let redraw = if state.operation_auto_advancing() {
+            if term_event::poll(OPERATION_TICK_INTERVAL)? {
+                let event = term_event::read()?;
+                should_redraw(&mut state, event, frame_size, &mut last_transition_press)
+            } else {
+                state.advance_running_operation()
+            }
+        } else {
+            let event = term_event::read()?;
+            should_redraw(&mut state, event, frame_size, &mut last_transition_press)
+        };
+
+        if redraw {
             terminal.draw(|frame| {
                 let area = frame.area();
                 frame_size = (area.width, area.height);
@@ -173,6 +191,14 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resu
 
     Ok(())
 }
+
+/// How often a running, unpaused deployment advances a tick on its own
+/// while the player isn't pressing anything (`docs/TUI_DESIGN.md`'s
+/// "Pacing controls": `Space` pause/resume, `Enter` single-step). Purely a
+/// presentation cadence — [`crate::lua_controller::LiveOperation::step`]'s
+/// result never depends on when it's called, so this has no effect on
+/// simulation outcomes, only on how quickly the player watches them unfold.
+const OPERATION_TICK_INTERVAL: Duration = Duration::from_millis(350);
 
 /// The last (code, modifiers, timestamp) of an accepted-or-debounced press
 /// of one of [`is_repeat_untrustworthy`]'s keys — see
@@ -309,8 +335,9 @@ fn should_redraw(
     // best-effort, inert on a terminal that doesn't report it — is the
     // only protection.
     if is_repeat_untrustworthy(key.code) {
-        let dialog_pending =
-            state.reset_confirmation_pending() || state.quit_confirmation_pending();
+        let dialog_pending = state.reset_confirmation_pending()
+            || state.quit_confirmation_pending()
+            || state.redeploy_confirmation_pending();
         let now = Instant::now();
         let debounced = matches!(
             *last_transition_press,
@@ -341,6 +368,7 @@ fn should_redraw(
         state.current_view(),
         state.reset_confirmation_pending(),
         state.quit_confirmation_pending(),
+        state.redeploy_confirmation_pending(),
         ui::controller_source_visible(state, frame_size.0),
     ) {
         Some(msg) => {
@@ -825,5 +853,78 @@ mod tests {
             "200 Down presses should be enough to reach Help's final legend \
              line at 80x24, not get stuck short of it"
         );
+    }
+
+    #[test]
+    fn f6_deploys_the_starter_controller_and_shows_the_live_operation() {
+        let (state, terminal) = render(
+            120,
+            40,
+            &[
+                press(KeyCode::Enter),
+                press(KeyCode::Enter),
+                press(KeyCode::F(6)),
+            ],
+        );
+
+        assert_eq!(state.current_view(), View::Operation);
+        assert!(
+            state
+                .operation()
+                .is_some_and(|op| !op.finished && !op.paused)
+        );
+        assert!(buffer_contains(&terminal, "COMPROMISED SATELLITE FEED"));
+        assert!(buffer_contains(&terminal, "STATUS: RUNNING"));
+    }
+
+    #[test]
+    fn space_pauses_and_enter_steps_exactly_one_tick_while_paused() {
+        let (state, terminal) = render(
+            120,
+            40,
+            &[
+                press(KeyCode::Enter),
+                press(KeyCode::Enter),
+                press(KeyCode::F(6)),
+                press(KeyCode::Char(' ')), // pause
+            ],
+        );
+        assert!(state.operation().unwrap().paused);
+        assert!(buffer_contains(&terminal, "STATUS: PAUSED"));
+        let before = state.operation().unwrap().records.len();
+
+        let (state, _) = render(
+            120,
+            40,
+            &[
+                press(KeyCode::Enter),
+                press(KeyCode::Enter),
+                press(KeyCode::F(6)),
+                press(KeyCode::Char(' ')),
+                press(KeyCode::Enter), // step once
+            ],
+        );
+
+        assert!(state.operation().unwrap().paused, "Enter must not resume");
+        assert_eq!(state.operation().unwrap().records.len(), before + 1);
+    }
+
+    #[test]
+    fn navigating_away_and_back_preserves_the_paused_run() {
+        let (state, terminal) = render(
+            120,
+            40,
+            &[
+                press(KeyCode::Enter),
+                press(KeyCode::Enter),
+                press(KeyCode::F(6)),
+                press(KeyCode::F(4)), // leave Operation: pauses the run
+                press(KeyCode::F(5)), // return to Operation
+            ],
+        );
+
+        assert_eq!(state.current_view(), View::Operation);
+        assert!(state.operation().unwrap().paused);
+        assert!(buffer_contains(&terminal, "STATUS: PAUSED"));
     }
 }

@@ -1,22 +1,60 @@
-//! Regression tests for `lua_controller::validate`'s wall-clock execution
-//! limit against Lua source that defeats a purely hook-based bound.
+//! Regression tests for `lua_controller::validate` and `LiveOperation`'s
+//! wall-clock execution limits against Lua source that defeats a purely
+//! hook-based bound.
 //!
 //! Kept in their own integration test binary, separate from every other
-//! test: both reproductions below genuinely never let their background
+//! test: every reproduction below genuinely never lets its background
 //! thread finish, which permanently holds one of `validate`'s
-//! concurrent-validation slots for the rest of whatever process runs
-//! them. That's fine here, since nothing else in this binary calls
-//! `validate` after they run, but it would spuriously fail unrelated
-//! tests sharing a process with them.
+//! concurrent-validation slots (or, for the `LiveOperation` cases, just
+//! leaks a thread) for the rest of whatever process runs them. That's fine
+//! here, since nothing else in this binary depends on that slot/thread
+//! afterward, but it would spuriously fail unrelated tests sharing a
+//! process with them.
 
 use human_exception::ControllerError;
-use human_exception::lua_controller::validate;
+use human_exception::lua_controller::{LiveOperation, validate};
 
 #[test]
 fn validate_bounds_a_loop_that_catches_the_instruction_hook_with_pcall() {
     let err = validate("while true do pcall(function() while true do end end) end").unwrap_err();
     assert!(matches!(err, ControllerError::ScriptInvalid(_)));
     assert!(err.to_string().contains("execution allowance"));
+}
+
+#[test]
+fn live_operation_deploy_bounds_a_top_level_loop_that_catches_the_instruction_hook_with_pcall() {
+    // A controller isn't required to pass `validate` before `deploy` (and
+    // an edit invalidates any earlier validation anyway), so `deploy`'s own
+    // top-level load needs the identical wall-clock backstop `validate`
+    // has, not just the same instruction hook.
+    let source = "while true do pcall(function() while true do end end) end\n\
+                  function on_tick(observation) return 'wait' end";
+    let err = LiveOperation::deploy(source).unwrap_err();
+    assert!(matches!(err, ControllerError::ScriptInvalid(_)));
+    assert!(err.to_string().contains("execution allowance"));
+}
+
+#[test]
+fn live_operation_step_bounds_an_on_tick_that_never_returns_even_when_it_keeps_catching_the_hook() {
+    // Unlike a single caught hook error followed by a normal return (which
+    // the instruction hook plus a post-call check already handles), an
+    // outer loop that keeps re-triggering `pcall` around its own infinite
+    // loop never lets `on_tick` return control to Rust at all. Only a
+    // wall-clock timeout on the worker thread that actually owns this
+    // `Lua` can end the deployment instead of freezing the caller forever.
+    let source = "function on_tick(observation)\n\
+                    while true do\n\
+                      pcall(function() while true do end end)\n\
+                    end\n\
+                  end";
+    let mut op = LiveOperation::deploy(source).expect("script loads; the loop is only in on_tick");
+
+    let err = op.step().unwrap_err();
+    assert!(
+        matches!(err, ControllerError::ExecutionLimitExceeded),
+        "{err}"
+    );
+    assert!(op.is_finished());
 }
 
 #[test]

@@ -5,7 +5,10 @@
 //! without a real terminal.
 
 use super::intel::{Signal, TargetDossier, authored_signals, first_contact_dossier};
-use super::state::{AppState, Validation, View, WorkingSet};
+use super::state::{AppState, OperationSnapshot, OperationView, Validation, View, WorkingSet};
+use crate::lua_controller::{ControllerError, TickRecord};
+use crate::render::render_satellite_view;
+use crate::simulation::{Action, FailureReason, SimEvent, TickOutcome};
 use ratatui::Frame;
 use ratatui::buffer::CellWidth;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -36,7 +39,7 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
     // only after the geometry check would make it swallow input invisibly
     // whenever a modified session got resized below the minimum.
     if state.quit_confirmation_pending() {
-        draw_quit_confirmation(frame, area);
+        draw_quit_confirmation(frame, area, state);
         return;
     }
 
@@ -60,9 +63,25 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
 /// Rendered in place of the entire frame (like [`draw_geometry_warning`]),
 /// not just the body, so it stays visible even below the supported minimum
 /// geometry.
-fn draw_quit_confirmation(frame: &mut Frame, area: Rect) {
-    let lines = quit_confirmation_lines(area.height);
+fn draw_quit_confirmation(frame: &mut Frame, area: Rect, state: &AppState) {
+    let active_run = state.operation().is_some_and(|op| !op.finished);
+    let lines = quit_confirmation_lines(area.height, state.controller_modified(), active_run);
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// The bold headline explaining what quitting would lose, given whether the
+/// controller is modified and/or a run is currently active — either, both,
+/// or (defensively) neither, though `draw_quit_confirmation` only ever
+/// shows this dialog when at least one is true.
+fn quit_confirmation_headline(controller_modified: bool, active_run: bool) -> &'static str {
+    match (controller_modified, active_run) {
+        (true, true) => {
+            "Modified controller source will be lost and the active run will be abandoned."
+        }
+        (true, false) => "Modified controller source will be lost.",
+        (false, true) => "The active run will be abandoned.",
+        (false, false) => "Quit the resistance console?",
+    }
 }
 
 /// The quit-confirmation dialog's content for a frame `height` rows tall.
@@ -77,11 +96,16 @@ fn draw_quit_confirmation(frame: &mut Frame, area: Rect) {
 /// first — the same "drop lowest-priority content first" pattern the
 /// header candidate lists use, rather than a signal a mid-dialog resize
 /// could keep bouncing between.
-fn quit_confirmation_lines(height: u16) -> Vec<Line<'static>> {
+fn quit_confirmation_lines(
+    height: u16,
+    controller_modified: bool,
+    active_run: bool,
+) -> Vec<Line<'static>> {
+    let headline = quit_confirmation_headline(controller_modified, active_run);
     let full = vec![
         Line::from("HUMAN EXCEPTION // resistance console"),
         Line::from(Span::styled(
-            "Modified controller source will be lost.",
+            headline,
             Style::default().add_modifier(Modifier::BOLD),
         )),
         Line::from("Cross-launch persistence isn't implemented, so this edit can't be saved."),
@@ -94,7 +118,7 @@ fn quit_confirmation_lines(height: u16) -> Vec<Line<'static>> {
     }
     let compact = vec![
         Line::from(Span::styled(
-            "Modified controller source will be lost.",
+            headline,
             Style::default().add_modifier(Modifier::BOLD),
         )),
         Line::from("Enter / y  confirm and quit"),
@@ -126,20 +150,29 @@ fn draw_geometry_warning(frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(text), area);
 }
 
+/// `starter`/`modified`/`invalid`, or `None` before a working set has
+/// seeded any source. Shared by [`controller_status_field`] (which adds the
+/// `CONTROLLER: ` prefix and, for other views, a `STATUS: READY` suffix)
+/// and Operation's own header branch (which needs the bare word alongside
+/// its own, different `STATUS:` field).
+fn controller_status_only(state: &AppState) -> Option<&'static str> {
+    state.controller_source()?;
+    Some(if matches!(state.validation(), Validation::Invalid(_)) {
+        "invalid"
+    } else if state.controller_modified() {
+        "modified"
+    } else {
+        "starter"
+    })
+}
+
 /// `CONTROLLER: starter/modified/invalid`, or `None` before a working set
 /// has seeded any source. Shared by every header branch so a modified
 /// controller's at-risk status stays visible no matter which view the
 /// player is currently looking at (`docs/TUI_DESIGN.md`, "Persistent
 /// header").
 fn controller_status_field(state: &AppState) -> Option<String> {
-    state.controller_source()?;
-    let status = if matches!(state.validation(), Validation::Invalid(_)) {
-        "invalid"
-    } else if state.controller_modified() {
-        "modified"
-    } else {
-        "starter"
-    };
+    let status = controller_status_only(state)?;
     // `docs/TUI_DESIGN.md`'s persistent-header mockup shows `STATUS: READY`
     // as its own field alongside `CONTROLLER: ...`, not folded into it — a
     // successfully validated controller stays "READY" independent of
@@ -222,6 +255,34 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
             candidates.push(format!("{target}   {working}"));
             candidates
         }
+        View::Operation => {
+            // A bare controller status ("starter"/"modified"/"invalid"),
+            // deliberately not `controller_field`'s own "STATUS: READY"
+            // suffix — that would collide visually with the operation's own
+            // `STATUS: RUNNING/PAUSED/...` field this view adds instead
+            // (`docs/TUI_DESIGN.md`'s "Persistent header" shows exactly one
+            // STATUS field per view).
+            let controller =
+                controller_status_only(state).map(|status| format!("CONTROLLER: {status}"));
+            let op_status = state
+                .operation()
+                .map(|op| format!("STATUS: {}", operation_status_label(&op).to_uppercase()));
+            let mut candidates = Vec::new();
+            if let (Some(controller), Some(op_status)) = (&controller, &op_status) {
+                candidates.push(format!(
+                    "MESH: DEGRADED   SATLINK: COMPROMISED   {controller}   {op_status}   {working}"
+                ));
+                candidates.push(format!(
+                    "SATLINK: COMPROMISED   {controller}   {op_status}   {working}"
+                ));
+                candidates.push(format!("{controller}   {op_status}   {working}"));
+            }
+            if let Some(op_status) = &op_status {
+                candidates.push(format!("{op_status}   {working}"));
+            }
+            candidates.push(working.clone());
+            candidates
+        }
         _ => match &controller_field {
             Some(controller) => vec![
                 format!("MESH: DEGRADED   SATLINK: COMPROMISED   {controller}   {working}"),
@@ -255,6 +316,7 @@ fn draw_body(frame: &mut Frame, area: Rect, state: &AppState) {
         View::Target => draw_target(frame, area, state),
         View::Help => draw_help(frame, area, state),
         View::Controller => draw_controller(frame, area, state),
+        View::Operation => draw_operation(frame, area, state),
         view => {
             let block = Block::default()
                 .borders(Borders::ALL)
@@ -645,6 +707,214 @@ fn lua_field_reference_lines() -> Vec<Line<'static>> {
     ]
 }
 
+/// The live operation view: the satellite feed dominates, telemetry is
+/// secondary (`docs/TUI_DESIGN.md` §4, "Operation"). Two panes at 100+
+/// columns; below that, one primary pane with `F8` swapping to the other,
+/// reusing the same `narrow_secondary_visible` toggle Controller and
+/// Signals already use.
+fn draw_operation(frame: &mut Frame, area: Rect, state: &AppState) {
+    // Wins over the normal layout regardless of width, the same way a
+    // pending reset confirmation always wins Controller's narrow-layout
+    // toggle: the prompt (and the `Enter`/`Esc` it's waiting on) must never
+    // end up on the pane the player currently isn't looking at.
+    if state.redeploy_confirmation_pending() {
+        draw_pane(
+            frame,
+            area,
+            "REDEPLOY?",
+            vec![
+                Line::from(Span::styled(
+                    "A run is already active. Redeploying replaces it from a clean start.",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from("Enter / y  confirm and redeploy"),
+                Line::from("Esc / n    cancel and return to the active run"),
+            ],
+        );
+        return;
+    }
+
+    let Some(op) = state.operation() else {
+        draw_pane(
+            frame,
+            area,
+            "OPERATION",
+            vec![
+                Line::from("No operation is deployed yet."),
+                Line::from("F6 deploys the current controller."),
+            ],
+        );
+        return;
+    };
+
+    if area.width >= TWO_PANE_MIN_COLUMNS {
+        let [left, right] =
+            Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
+                .areas(area);
+        draw_pane(
+            frame,
+            left,
+            "COMPROMISED SATELLITE FEED",
+            satellite_lines(&op.current),
+        );
+        draw_pane(frame, right, "OPERATION TELEMETRY", telemetry_lines(&op));
+    } else if state.narrow_secondary_visible() {
+        draw_pane(frame, area, "OPERATION TELEMETRY", telemetry_lines(&op));
+    } else {
+        draw_pane(
+            frame,
+            area,
+            "COMPROMISED SATELLITE FEED",
+            satellite_lines(&op.current),
+        );
+    }
+}
+
+/// The satellite feed's content lines: [`render_satellite_view`]'s grid and
+/// legend (already built strictly from `snapshot.discovered` — never raw
+/// scenario/map internals — so undiscovered terrain can't leak through
+/// here), with its own leading title line dropped since the pane's border
+/// already carries one.
+fn satellite_lines(snapshot: &OperationSnapshot) -> Vec<Line<'static>> {
+    let rendered = render_satellite_view(
+        snapshot.drone_position,
+        snapshot.map_width,
+        snapshot.map_height,
+        &snapshot.discovered,
+    );
+    rendered
+        .lines()
+        .skip(1)
+        .map(|line| Line::from(line.to_string()))
+        .collect()
+}
+
+fn telemetry_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(format!("tick          {:02}", op.current.tick)),
+        Line::from(format!(
+            "budget        {} / {}",
+            op.current.budget_remaining, op.starting_budget
+        )),
+        Line::from(format!(
+            "last action   {}",
+            op.records
+                .last()
+                .map(|record| action_label(record.action))
+                .unwrap_or("-")
+        )),
+        Line::from(format!("controller    {}", operation_status_label(op))),
+        Line::from(""),
+    ];
+
+    if let Some(error) = op.error {
+        lines.push(Line::from(Span::styled(
+            controller_error_headline(error),
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(controller_error_detail(error)));
+        lines.push(Line::from(""));
+        lines.push(Line::from("F4  revise the controller"));
+        lines.push(Line::from("F6  redeploy"));
+        return lines;
+    }
+
+    if let Some(outcome) = op.records.last().map(|record| record.outcome)
+        && outcome != TickOutcome::Running
+    {
+        lines.push(Line::from(Span::styled(
+            outcome_headline(outcome),
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from("F4  revise the controller"));
+        lines.push(Line::from("F6  redeploy"));
+        return lines;
+    }
+
+    lines.push(Line::from(Span::styled(
+        "RECENT EVENTS",
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    let recent = op.records.iter().rev().take(4);
+    let mut recent_lines: Vec<Line<'static>> = recent.map(operation_event_line).collect();
+    if recent_lines.is_empty() {
+        recent_lines.push(Line::from("(none yet)"));
+    }
+    lines.extend(recent_lines);
+    lines.push(Line::from(""));
+    lines.push(Line::from(if op.paused {
+        "Space resume"
+    } else {
+        "Space pause"
+    }));
+    if op.paused {
+        lines.push(Line::from("Enter step (paused)"));
+    }
+
+    lines
+}
+
+fn operation_event_line(record: &TickRecord) -> Line<'static> {
+    let hazard = record
+        .events
+        .iter()
+        .any(|event| matches!(event, SimEvent::HazardEntered { .. }));
+    let text = if hazard {
+        format!(
+            "{:>2}  {} (hazard)",
+            record.tick,
+            action_label(record.action)
+        )
+    } else {
+        format!("{:>2}  {}", record.tick, action_label(record.action))
+    };
+    Line::from(text)
+}
+
+fn action_label(action: Action) -> &'static str {
+    match action {
+        Action::MoveNorth => "moved north",
+        Action::MoveSouth => "moved south",
+        Action::MoveEast => "moved east",
+        Action::MoveWest => "moved west",
+        Action::Wait => "waited",
+        Action::Scan => "scanned",
+    }
+}
+
+fn operation_status_label(op: &OperationView<'_>) -> &'static str {
+    if op.error.is_some() {
+        return "error";
+    }
+    match op.records.last().map(|record| record.outcome) {
+        Some(TickOutcome::Succeeded) => "succeeded",
+        Some(TickOutcome::Failed(_)) => "failed",
+        Some(TickOutcome::Running) | None if op.paused => "paused",
+        Some(TickOutcome::Running) | None => "running",
+    }
+}
+
+fn outcome_headline(outcome: TickOutcome) -> &'static str {
+    match outcome {
+        TickOutcome::Succeeded => "OPERATION SUCCESSFUL",
+        TickOutcome::Failed(FailureReason::BudgetExhausted) => "OPERATION FAILED: budget exhausted",
+        TickOutcome::Running => "",
+    }
+}
+
+fn controller_error_headline(error: &ControllerError) -> &'static str {
+    match error {
+        ControllerError::ExecutionLimitExceeded => "OPERATION FAILED: controller execution limit",
+        _ => "OPERATION FAILED: controller error",
+    }
+}
+
+fn controller_error_detail(error: &ControllerError) -> String {
+    error.to_string()
+}
+
 fn view_title(view: View) -> &'static str {
     match view {
         View::Signals => "SIGNALS",
@@ -659,15 +929,13 @@ fn view_title(view: View) -> &'static str {
 /// Placeholder body content for views this issue doesn't populate.
 fn view_body(view: View) -> Vec<Line<'static>> {
     match view {
-        View::Operation => vec![
-            Line::from("No operation is deployed yet."),
-            Line::from("The compromised satellite feed and telemetry will appear here (see #45)."),
-        ],
         View::AfterAction => vec![
             Line::from("No operation has concluded yet."),
             Line::from("The after-action report will appear here (see #46)."),
         ],
-        View::Signals | View::Target | View::Controller | View::Help => Vec::new(),
+        View::Signals | View::Target | View::Controller | View::Operation | View::Help => {
+            Vec::new()
+        }
     }
 }
 
@@ -1061,9 +1329,11 @@ fn help_lines(state: &AppState) -> Vec<Line<'static>> {
     } else {
         "F5 Operation     (unavailable: work an opportunity from Target first)"
     }));
-    lines.push(Line::from(
-        "F6 Deploy        run the current controller (unavailable, see #45)",
-    ));
+    lines.push(Line::from(if state.controller_source().is_some() {
+        "F6 Deploy        run the current controller (confirms if a run is active)"
+    } else {
+        "F6 Deploy        (unavailable: work an opportunity from Target first)"
+    }));
     lines.push(Line::from(if state.view_available(View::Controller) {
         "F7 Reset         (Controller) restore the starter controller"
     } else {
@@ -1250,7 +1520,13 @@ fn view_specific_help(view: View) -> Vec<Line<'static>> {
             Line::from("Ctrl+V      same as Ctrl+Enter (works on every terminal)"),
             Line::from("F8          (80-99 columns) switch between source and reference"),
         ],
-        View::Operation => vec![Line::from("Live telemetry arrives in a later build (#45).")],
+        View::Operation => vec![
+            Line::from("F6     deploy the current controller (confirms if a run is active)"),
+            Line::from("Space  pause/resume the run"),
+            Line::from("Enter  advance exactly one tick while paused"),
+            Line::from("F8     (80-99 columns) switch between satellite feed and telemetry"),
+            Line::from("Leaving via F2/F3/F4 pauses the run; F5 returns to it as you left it."),
+        ],
         View::AfterAction => vec![Line::from(
             "After-action reporting arrives in a later build (#46).",
         )],
@@ -1276,18 +1552,39 @@ fn footer_hint_items(state: &AppState, show_f8: bool) -> Vec<(&'static str, &'st
             "F5 Op",
             state.view_available(View::Operation),
         ),
-        // F6 has no operation to deploy yet (see #45).
-        ("F6 Deploy", "F6 Dep", false),
+        deploy_footer_item(state),
     ];
     if state.current_view() == View::Controller {
         let has_controller = state.controller_source().is_some();
         items.push(("F7 Reset", "F7 Rst", has_controller));
         items.push(("Ctrl+Enter Validate", "^Ent Val", has_controller));
     }
+    if state.current_view() == View::Operation
+        && let Some(op) = state.operation()
+        && !op.finished
+    {
+        items.push(("Space Pause/Resume", "Spc P/R", true));
+        if op.paused {
+            items.push(("Enter Step", "Ent Step", true));
+        }
+    }
     if show_f8 {
         items.push(("F8 Toggle Pane", "F8 Pane", true));
     }
     items
+}
+
+/// `F6`'s footer label: "Deploy" before anything has been deployed yet (or
+/// once a working set exists but nothing's running), "Redeploy" once an
+/// operation exists — either wording is enabled exactly when there's a
+/// controller source to deploy.
+fn deploy_footer_item(state: &AppState) -> (&'static str, &'static str, bool) {
+    let enabled = state.controller_source().is_some();
+    if state.operation().is_some() {
+        ("F6 Redeploy", "F6 Rdp", enabled)
+    } else {
+        ("F6 Deploy", "F6 Dep", enabled)
+    }
 }
 
 const FOOTER_RIGHT_HINT: &str = "Ctrl+Q Quit";
@@ -1331,7 +1628,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &AppState, full_width: u16)
     let show_f8 = full_width < TWO_PANE_MIN_COLUMNS
         && matches!(
             state.current_view(),
-            View::Signals | View::Target | View::Controller
+            View::Signals | View::Target | View::Controller | View::Operation
         );
     let items = footer_hint_items(state, show_f8);
     let inner_width = area.width.saturating_sub(2) as usize;
@@ -2111,6 +2408,143 @@ mod tests {
         assert!(buffer_contains(
             &terminal,
             "F3 Target        dossier for the current opportunity"
+        ));
+    }
+
+    fn working_state() -> AppState {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.apply(Msg::Navigate(View::Operation));
+        state
+    }
+
+    #[test]
+    fn operation_view_before_any_deploy_shows_the_placeholder() {
+        let state = working_state();
+        let terminal = render(120, 40, &state);
+
+        assert!(buffer_contains(&terminal, "No operation is deployed yet."));
+    }
+
+    #[test]
+    fn deploying_shows_the_satellite_feed_and_running_status() {
+        use super::super::state::Msg;
+
+        let mut state = working_state();
+        state.apply(Msg::RequestDeploy);
+        let terminal = render(120, 40, &state);
+
+        assert!(buffer_contains(&terminal, "COMPROMISED SATELLITE FEED"));
+        assert!(buffer_contains(&terminal, "OPERATION TELEMETRY"));
+        assert!(buffer_contains(&terminal, "controller    running"));
+        assert!(buffer_contains(&terminal, "STATUS: RUNNING"));
+        // The starter controller's drone hasn't moved yet at tick 0.
+        assert!(buffer_contains(&terminal, "tick          00"));
+    }
+
+    #[test]
+    fn running_the_starter_controller_to_completion_reaches_an_unambiguous_result() {
+        let mut state = working_state();
+        state.apply(super::super::state::Msg::RequestDeploy);
+
+        // The starter controller scans once, then waits forever, so it
+        // always ends in budget exhaustion on the fixed 15-budget scenario.
+        for _ in 0..20 {
+            if state.operation().is_some_and(|op| op.finished) {
+                break;
+            }
+            state.advance_running_operation();
+        }
+        assert!(
+            state.operation().unwrap().finished,
+            "should have finished well within 20 ticks"
+        );
+
+        let terminal = render(120, 40, &state);
+
+        assert!(buffer_contains(
+            &terminal,
+            "OPERATION FAILED: budget exhausted"
+        ));
+        assert!(buffer_contains(&terminal, "STATUS: FAILED"));
+        assert!(buffer_contains(&terminal, "F6  redeploy"));
+    }
+
+    #[test]
+    fn a_deploy_time_script_error_is_shown_in_operation_without_a_live_run() {
+        use super::super::editor::EditOp;
+        use super::super::state::Msg;
+
+        let mut state = working_state();
+        // Clears the seeded starter controller down to an empty document,
+        // then types a single unbalanced paren — invalid Lua — the same
+        // way `console::state`'s own `validating_an_invalid_controller_...`
+        // test builds a broken source without needing direct field access.
+        for _ in 0..500 {
+            state.apply(Msg::EditController(EditOp::Backspace));
+        }
+        state.apply(Msg::EditController(EditOp::Insert('(')));
+        state.apply(Msg::RequestDeploy);
+
+        let terminal = render(120, 40, &state);
+
+        assert!(buffer_contains(
+            &terminal,
+            "OPERATION FAILED: controller error"
+        ));
+        assert!(state.operation().unwrap().finished);
+    }
+
+    #[test]
+    fn redeploying_an_active_run_shows_a_confirmation_prompt() {
+        use super::super::state::Msg;
+
+        let mut state = working_state();
+        state.apply(Msg::RequestDeploy);
+        state.apply(Msg::RequestDeploy); // pending confirmation
+
+        let terminal = render(120, 40, &state);
+
+        assert!(buffer_contains(&terminal, "REDEPLOY?"));
+        assert!(buffer_contains(
+            &terminal,
+            "Enter / y  confirm and redeploy"
+        ));
+    }
+
+    #[test]
+    fn narrow_operation_view_shows_one_pane_until_f8_toggles_it() {
+        use super::super::state::Msg;
+
+        let mut state = working_state();
+        state.apply(Msg::RequestDeploy);
+        let terminal = render(90, 30, &state);
+        assert!(buffer_contains(&terminal, "COMPROMISED SATELLITE FEED"));
+        assert!(!buffer_contains(&terminal, "OPERATION TELEMETRY"));
+
+        state.apply(Msg::ToggleSecondaryPane);
+        let terminal = render(90, 30, &state);
+        assert!(buffer_contains(&terminal, "OPERATION TELEMETRY"));
+        assert!(!buffer_contains(&terminal, "COMPROMISED SATELLITE FEED"));
+    }
+
+    #[test]
+    fn quitting_with_only_an_active_run_explains_the_run_will_be_abandoned() {
+        use super::super::state::Msg;
+
+        let mut state = working_state();
+        state.apply(Msg::RequestDeploy);
+        assert!(!state.controller_modified());
+        state.apply(Msg::RequestQuit);
+
+        let terminal = render(120, 40, &state);
+
+        assert!(buffer_contains(
+            &terminal,
+            "The active run will be abandoned."
         ));
     }
 }

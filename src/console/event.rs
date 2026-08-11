@@ -12,7 +12,7 @@ use super::state::{Msg, View};
 /// Maps a key event to a player intent, given the view currently showing
 /// (several keys are context-sensitive: `F1`/`Esc` need to know whether
 /// Help is open, `Esc`/arrows/`Enter` behave differently in Signals, Target,
-/// and Help), whether either confirmation dialog is currently open, and
+/// and Help), whether any confirmation dialog is currently open, and
 /// whether Controller's source pane (rather than the Lua reference pane,
 /// which `F8` can swap in at 80-99 columns) is what's actually on screen.
 pub fn map(
@@ -20,6 +20,7 @@ pub fn map(
     current_view: View,
     reset_confirmation_pending: bool,
     quit_confirmation_pending: bool,
+    redeploy_confirmation_pending: bool,
     controller_source_visible: bool,
 ) -> Option<Msg> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -49,9 +50,17 @@ pub fn map(
             _ => None,
         };
     }
+    if redeploy_confirmation_pending {
+        return match key.code {
+            KeyCode::Enter | KeyCode::Char('y') if unmodified => Some(Msg::ConfirmDeploy),
+            KeyCode::Esc | KeyCode::Char('n') if unmodified => Some(Msg::CancelDeploy),
+            _ => None,
+        };
+    }
 
     let help_is_open = current_view == View::Help;
     let controller_is_open = current_view == View::Controller;
+    let operation_is_open = current_view == View::Operation;
 
     match key.code {
         KeyCode::F(1) => Some(if help_is_open {
@@ -65,19 +74,23 @@ pub fn map(
         KeyCode::F(3) => Some(Msg::Navigate(View::Target)),
         KeyCode::F(4) => Some(Msg::Navigate(View::Controller)),
         KeyCode::F(5) => Some(Msg::Navigate(View::Operation)),
-        // F6 Deploy has no operation to deploy yet (see #45), so it stays
-        // inert rather than claiming to run anything; ui::draw_footer
-        // renders it visibly dimmed to match.
-        KeyCode::F(6) => None,
+        // Global, like the rest of the F-keys (`docs/TUI_DESIGN.md`'s
+        // "Overall navigation" list) — reachable from Controller (the
+        // common case) as well as from Operation itself (redeploy) or
+        // anywhere else once a working set exists. `Msg::RequestDeploy`
+        // itself is a no-op without a loaded controller source.
+        KeyCode::F(6) => Some(Msg::RequestDeploy),
         KeyCode::F(7) if controller_is_open => Some(Msg::RequestResetController),
-        // F8's narrow-layout pane toggle applies to Signals/Target/Controller
-        // (`docs/TUI_DESIGN.md`, "Responsive behavior"); mapping it
-        // elsewhere — e.g. while Help is open — would flip the hidden
-        // toggle without a resize or navigation to ever reset it.
+        // F8's narrow-layout pane toggle applies to Signals/Target/
+        // Controller/Operation (`docs/TUI_DESIGN.md`, "Responsive
+        // behavior"); mapping it elsewhere — e.g. while Help is open —
+        // would flip the hidden toggle without a resize or navigation to
+        // ever reset it.
         KeyCode::F(8)
             if current_view == View::Signals
                 || current_view == View::Target
-                || controller_is_open =>
+                || controller_is_open
+                || operation_is_open =>
         {
             Some(Msg::ToggleSecondaryPane)
         }
@@ -96,6 +109,12 @@ pub fn map(
         {
             Some(Msg::Activate)
         }
+        // `Enter`/`Space` while Operation is showing: pacing controls, not
+        // navigation (`docs/TUI_DESIGN.md`, "Pacing controls").
+        // `Msg::StepOperationTick` is itself a no-op unless the run is
+        // paused, so `Enter` here doesn't fast-forward a running operation.
+        KeyCode::Enter if !ctrl && operation_is_open => Some(Msg::StepOperationTick),
+        KeyCode::Char(' ') if !ctrl && operation_is_open => Some(Msg::TogglePauseOperation),
         KeyCode::Up if current_view == View::Signals => Some(Msg::SelectPreviousSignal),
         KeyCode::Down if current_view == View::Signals => Some(Msg::SelectNextSignal),
         KeyCode::Up if help_is_open => Some(Msg::ScrollHelpUp),
@@ -160,10 +179,10 @@ mod tests {
         KeyEvent::new(code, modifiers)
     }
 
-    /// Shorthand for the common case: neither confirmation dialog is open
-    /// and Controller's source pane (if relevant) is visible.
+    /// Shorthand for the common case: no confirmation dialog is open and
+    /// Controller's source pane (if relevant) is visible.
     fn map_in(key: KeyEvent, view: View) -> Option<Msg> {
-        map(key, view, false, false, true)
+        map(key, view, false, false, false, true)
     }
 
     #[test]
@@ -234,9 +253,19 @@ mod tests {
     }
 
     #[test]
-    fn f6_deploy_is_inert_until_an_operation_can_be_run() {
-        assert_eq!(map_in(key(KeyCode::F(6)), View::Signals), None);
-        assert_eq!(map_in(key(KeyCode::F(6)), View::Controller), None);
+    fn f6_maps_to_request_deploy_regardless_of_view() {
+        // `Msg::RequestDeploy` itself is a no-op in `AppState::apply` until
+        // a controller source exists to deploy — `map` doesn't need to know
+        // that, matching every other global F-key. See also
+        // `f6_requests_deploy_from_any_view` for the full view sweep.
+        assert_eq!(
+            map_in(key(KeyCode::F(6)), View::Signals),
+            Some(Msg::RequestDeploy)
+        );
+        assert_eq!(
+            map_in(key(KeyCode::F(6)), View::Controller),
+            Some(Msg::RequestDeploy)
+        );
     }
 
     #[test]
@@ -304,6 +333,7 @@ mod tests {
                 View::Controller,
                 false,
                 false,
+                false,
                 source_hidden
             ),
             None
@@ -314,6 +344,7 @@ mod tests {
                 View::Controller,
                 false,
                 false,
+                false,
                 source_hidden
             ),
             None
@@ -322,6 +353,7 @@ mod tests {
             map(
                 key(KeyCode::Left),
                 View::Controller,
+                false,
                 false,
                 false,
                 source_hidden
@@ -339,13 +371,21 @@ mod tests {
                 View::Controller,
                 false,
                 false,
+                false,
                 source_hidden
             ),
             Some(Msg::RequestResetController)
         );
         let ctrl_enter = key_with_modifiers(KeyCode::Enter, KeyModifiers::CONTROL);
         assert_eq!(
-            map(ctrl_enter, View::Controller, false, false, source_hidden),
+            map(
+                ctrl_enter,
+                View::Controller,
+                false,
+                false,
+                false,
+                source_hidden
+            ),
             Some(Msg::ValidateController)
         );
     }
@@ -367,8 +407,8 @@ mod tests {
     }
 
     #[test]
-    fn f8_is_inert_outside_signals_target_and_controller() {
-        for view in [View::Operation, View::AfterAction, View::Help] {
+    fn f8_is_inert_outside_signals_target_controller_and_operation() {
+        for view in [View::AfterAction, View::Help] {
             assert_eq!(map_in(key(KeyCode::F(8)), view), None);
         }
     }
@@ -470,23 +510,58 @@ mod tests {
     #[test]
     fn quit_confirmation_pending_only_accepts_confirm_or_cancel() {
         assert_eq!(
-            map(key(KeyCode::Enter), View::Controller, false, true, true),
+            map(
+                key(KeyCode::Enter),
+                View::Controller,
+                false,
+                true,
+                false,
+                true
+            ),
             Some(Msg::ConfirmQuit)
         );
         assert_eq!(
-            map(key(KeyCode::Char('y')), View::Controller, false, true, true),
+            map(
+                key(KeyCode::Char('y')),
+                View::Controller,
+                false,
+                true,
+                false,
+                true
+            ),
             Some(Msg::ConfirmQuit)
         );
         assert_eq!(
-            map(key(KeyCode::Esc), View::Controller, false, true, true),
+            map(
+                key(KeyCode::Esc),
+                View::Controller,
+                false,
+                true,
+                false,
+                true
+            ),
             Some(Msg::CancelQuit)
         );
         assert_eq!(
-            map(key(KeyCode::Char('n')), View::Controller, false, true, true),
+            map(
+                key(KeyCode::Char('n')),
+                View::Controller,
+                false,
+                true,
+                false,
+                true
+            ),
             Some(Msg::CancelQuit)
         );
         assert_eq!(
-            map(key(KeyCode::Char('x')), View::Controller, false, true, true),
+            map(
+                key(KeyCode::Char('x')),
+                View::Controller,
+                false,
+                true,
+                false,
+                true
+            ),
             None,
             "ordinary keys must not leak through while the quit dialog is open"
         );
@@ -495,17 +570,91 @@ mod tests {
     #[test]
     fn reset_confirmation_pending_only_accepts_confirm_or_cancel() {
         assert_eq!(
-            map(key(KeyCode::Enter), View::Controller, true, false, true),
+            map(
+                key(KeyCode::Enter),
+                View::Controller,
+                true,
+                false,
+                false,
+                true
+            ),
             Some(Msg::ConfirmResetController)
         );
         assert_eq!(
-            map(key(KeyCode::Esc), View::Controller, true, false, true),
+            map(
+                key(KeyCode::Esc),
+                View::Controller,
+                true,
+                false,
+                false,
+                true
+            ),
             Some(Msg::CancelResetController)
         );
         assert_eq!(
-            map(key(KeyCode::Char('x')), View::Controller, true, false, true),
+            map(
+                key(KeyCode::Char('x')),
+                View::Controller,
+                true,
+                false,
+                false,
+                true
+            ),
             None,
             "ordinary keys must not leak through while the reset dialog is open"
+        );
+    }
+
+    #[test]
+    fn redeploy_confirmation_pending_only_accepts_confirm_or_cancel() {
+        assert_eq!(
+            map(
+                key(KeyCode::Enter),
+                View::Operation,
+                false,
+                false,
+                true,
+                true
+            ),
+            Some(Msg::ConfirmDeploy)
+        );
+        assert_eq!(
+            map(
+                key(KeyCode::Char('y')),
+                View::Operation,
+                false,
+                false,
+                true,
+                true
+            ),
+            Some(Msg::ConfirmDeploy)
+        );
+        assert_eq!(
+            map(key(KeyCode::Esc), View::Operation, false, false, true, true),
+            Some(Msg::CancelDeploy)
+        );
+        assert_eq!(
+            map(
+                key(KeyCode::Char('n')),
+                View::Operation,
+                false,
+                false,
+                true,
+                true
+            ),
+            Some(Msg::CancelDeploy)
+        );
+        assert_eq!(
+            map(
+                key(KeyCode::Char(' ')),
+                View::Operation,
+                false,
+                false,
+                true,
+                true
+            ),
+            None,
+            "Space must not leak through to pause/resume while the redeploy dialog is open"
         );
     }
 
@@ -518,16 +667,40 @@ mod tests {
 
         // Quit dialog: Ctrl+Enter must not silently discard the modified
         // controller just because it would otherwise mean "validate".
-        assert_eq!(map(ctrl_enter, View::Controller, false, true, true), None);
-        assert_eq!(map(ctrl_y, View::Controller, false, true, true), None);
-        assert_eq!(map(ctrl_esc, View::Controller, false, true, true), None);
-        assert_eq!(map(ctrl_n, View::Controller, false, true, true), None);
+        assert_eq!(
+            map(ctrl_enter, View::Controller, false, true, false, true),
+            None
+        );
+        assert_eq!(
+            map(ctrl_y, View::Controller, false, true, false, true),
+            None
+        );
+        assert_eq!(
+            map(ctrl_esc, View::Controller, false, true, false, true),
+            None
+        );
+        assert_eq!(
+            map(ctrl_n, View::Controller, false, true, false, true),
+            None
+        );
 
         // Reset dialog: same requirement.
-        assert_eq!(map(ctrl_enter, View::Controller, true, false, true), None);
-        assert_eq!(map(ctrl_y, View::Controller, true, false, true), None);
-        assert_eq!(map(ctrl_esc, View::Controller, true, false, true), None);
-        assert_eq!(map(ctrl_n, View::Controller, true, false, true), None);
+        assert_eq!(
+            map(ctrl_enter, View::Controller, true, false, false, true),
+            None
+        );
+        assert_eq!(
+            map(ctrl_y, View::Controller, true, false, false, true),
+            None
+        );
+        assert_eq!(
+            map(ctrl_esc, View::Controller, true, false, false, true),
+            None
+        );
+        assert_eq!(
+            map(ctrl_n, View::Controller, true, false, false, true),
+            None
+        );
     }
 
     #[test]
@@ -540,12 +713,12 @@ mod tests {
             let enter = key_with_modifiers(KeyCode::Enter, modifiers);
             let y = key_with_modifiers(KeyCode::Char('y'), modifiers);
             assert_eq!(
-                map(enter, View::Controller, false, true, true),
+                map(enter, View::Controller, false, true, false, true),
                 None,
                 "{modifiers:?}+Enter must not confirm quit"
             );
             assert_eq!(
-                map(y, View::Controller, true, false, true),
+                map(y, View::Controller, true, false, false, true),
                 None,
                 "{modifiers:?}+y must not confirm reset"
             );
@@ -555,7 +728,14 @@ mod tests {
     #[test]
     fn quit_confirmation_takes_priority_over_reset_confirmation() {
         assert_eq!(
-            map(key(KeyCode::Enter), View::Controller, true, true, true),
+            map(
+                key(KeyCode::Enter),
+                View::Controller,
+                true,
+                true,
+                false,
+                true
+            ),
             Some(Msg::ConfirmQuit)
         );
     }
@@ -564,8 +744,75 @@ mod tests {
     fn ctrl_q_quits_even_while_the_reset_dialog_is_open() {
         let quit = key_with_modifiers(KeyCode::Char('q'), KeyModifiers::CONTROL);
         assert_eq!(
-            map(quit, View::Controller, true, false, true),
+            map(quit, View::Controller, true, false, false, true),
             Some(Msg::RequestQuit)
+        );
+    }
+
+    #[test]
+    fn ctrl_q_quits_even_while_the_redeploy_dialog_is_open() {
+        let quit = key_with_modifiers(KeyCode::Char('q'), KeyModifiers::CONTROL);
+        assert_eq!(
+            map(quit, View::Operation, false, false, true, true),
+            Some(Msg::RequestQuit)
+        );
+    }
+
+    #[test]
+    fn f6_requests_deploy_from_any_view() {
+        for view in [
+            View::Signals,
+            View::Target,
+            View::Controller,
+            View::Operation,
+            View::Help,
+        ] {
+            assert_eq!(
+                map_in(key(KeyCode::F(6)), view),
+                Some(Msg::RequestDeploy),
+                "{view:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn space_toggles_pause_only_while_operation_is_open() {
+        assert_eq!(
+            map_in(key(KeyCode::Char(' ')), View::Operation),
+            Some(Msg::TogglePauseOperation)
+        );
+        assert_eq!(map_in(key(KeyCode::Char(' ')), View::Signals), None);
+    }
+
+    #[test]
+    fn space_still_types_an_ordinary_space_in_the_controller_editor() {
+        // Space is a pacing control only in Operation; in Controller it must
+        // keep being ordinary printable input, not silently swallowed.
+        assert_eq!(
+            map_in(key(KeyCode::Char(' ')), View::Controller),
+            Some(Msg::EditController(EditOp::Insert(' ')))
+        );
+    }
+
+    #[test]
+    fn enter_steps_only_while_operation_is_open() {
+        assert_eq!(
+            map_in(key(KeyCode::Enter), View::Operation),
+            Some(Msg::StepOperationTick)
+        );
+    }
+
+    #[test]
+    fn ctrl_enter_does_not_step_the_operation() {
+        let ctrl_enter = key_with_modifiers(KeyCode::Enter, KeyModifiers::CONTROL);
+        assert_eq!(map_in(ctrl_enter, View::Operation), None);
+    }
+
+    #[test]
+    fn f8_toggles_the_secondary_pane_in_operation_too() {
+        assert_eq!(
+            map_in(key(KeyCode::F(8)), View::Operation),
+            Some(Msg::ToggleSecondaryPane)
         );
     }
 }
