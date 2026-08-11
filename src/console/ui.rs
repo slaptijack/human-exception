@@ -524,14 +524,20 @@ fn display_width_of_prefix(text: &str, char_count: usize) -> usize {
 fn chars_to_skip_for_cell_offset(text: &str, cells: usize) -> usize {
     let mut consumed = 0usize;
     let mut skip = 0usize;
-    let mut prefix = String::new();
-    for c in text.chars() {
+    // Advances by whole extended grapheme clusters, not individual
+    // `char`s: `cells` can land partway through a multi-scalar cluster
+    // (e.g. a ZWJ sequence like "👩‍💻"), and skipping only the leading
+    // scalars of one would leave the visible line starting mid-cluster —
+    // a split glyph ratatui can't render as the single unit it actually
+    // is, at a horizontal-scroll offset the cursor's own grapheme-aware
+    // positioning (`cursor_grapheme_char_range`) assumes lines always
+    // start on a real boundary.
+    for grapheme in text.graphemes(true) {
         if consumed >= cells {
             break;
         }
-        prefix.push(c);
-        consumed = prefix.as_str().cell_width() as usize;
-        skip += 1;
+        consumed += grapheme.cell_width() as usize;
+        skip += grapheme.chars().count();
     }
     skip
 }
@@ -2027,6 +2033,25 @@ mod tests {
             4,
             "reaching cell 1 (where X starts) must skip past all three \
              zero-width marks and X itself, not stop after the first mark"
+        );
+    }
+
+    #[test]
+    fn chars_to_skip_for_cell_offset_never_stops_mid_grapheme_cluster() {
+        // "a👩‍💻b": a (1 cell), then the woman-technologist ZWJ sequence
+        // (2 cells — see `cursor_grapheme_range_spans_a_zero_width_joiner_
+        // sequence`), then b (1 cell). Requesting a cell offset that lands
+        // *inside* that cluster (offset 2, one cell past "a") must still
+        // skip the whole cluster, not stop partway through it and leave a
+        // scrolled line starting on the ZWJ or the trailing emoji alone.
+        let text = "a\u{1F469}\u{200D}\u{1F4BB}b";
+        let chars: Vec<char> = text.chars().collect();
+        assert_eq!(chars.len(), 5, "a, woman, zwj, computer, b");
+        let skip = chars_to_skip_for_cell_offset(text, 2);
+        assert!(
+            skip == 1 || skip == 4,
+            "must land on a grapheme boundary (before or after the \
+             cluster), got skip={skip}"
         );
     }
 

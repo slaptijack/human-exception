@@ -282,19 +282,35 @@ fn should_redraw(
     // check above: a time-based debounce (see `is_repeat_untrustworthy`
     // for why `key.kind` alone isn't enough for them specifically). A
     // second press of the exact same key within `TRANSITION_KEY_DEBOUNCE`
-    // of the last one (accepted *or* itself debounced — the window keeps
-    // sliding forward for as long as presses keep arriving faster than
-    // that, modeling "still held") is treated as a suspected auto-repeat
-    // and dropped — closing the risk of a held `y`/`n` confirming or
-    // cancelling a dialog and then typing straight into the controller it
-    // just reset or the quit it just cancelled. `Enter`/`Esc` don't get
-    // this same treatment: unlike `y`/`n`, a fast player pressing `Enter`
-    // twice on purpose (e.g. drilling straight from Signals through Target
-    // into Controller) is normal, expected use a debounce can't tell apart
-    // from a held key's auto-repeat, so for those two the `kind`-based
-    // check above — best-effort, inert on a terminal that doesn't report
-    // it — is the only protection.
+    // of one that *actually closed a dialog* (accepted *or* itself
+    // debounced — the window keeps sliding forward for as long as presses
+    // keep arriving faster than that, modeling "still held") is treated as
+    // a suspected leaked auto-repeat and dropped — closing the risk of a
+    // held `y`/`n` confirming or cancelling a dialog and then typing
+    // straight into the controller it just reset or the quit it just
+    // cancelled.
+    //
+    // Deliberately scoped to only *record* a press when a dialog is
+    // actually open (i.e. this exact press is what's about to confirm or
+    // cancel it), not every `y`/`n` press unconditionally: `y` and `n` are
+    // also ordinary printable characters, and debouncing them globally
+    // would drop the second character of a legitimate `nn`/`yy` typed
+    // quickly into Controller's source (e.g. mid-identifier), the same way
+    // any other repeated printable character must keep working. A `y`/`n`
+    // press while no dialog is open never updates or consults this record,
+    // so ordinary editing is completely unaffected; only a leaked repeat
+    // arriving soon after an actual dialog-closing press is caught.
+    //
+    // `Enter`/`Esc` don't get this same treatment at all: unlike `y`/`n`,
+    // a fast player pressing `Enter` twice on purpose (e.g. drilling
+    // straight from Signals through Target into Controller) is normal,
+    // expected use a debounce can't tell apart from a held key's
+    // auto-repeat, so for those two the `kind`-based check above —
+    // best-effort, inert on a terminal that doesn't report it — is the
+    // only protection.
     if is_repeat_untrustworthy(key.code) {
+        let dialog_pending =
+            state.reset_confirmation_pending() || state.quit_confirmation_pending();
         let now = Instant::now();
         let debounced = matches!(
             *last_transition_press,
@@ -303,9 +319,15 @@ fn should_redraw(
                     && last_mods == key.modifiers
                     && now.duration_since(last_time) < TRANSITION_KEY_DEBOUNCE
         );
-        *last_transition_press = Some((key.code, key.modifiers, now));
-        if debounced {
+        if dialog_pending {
+            *last_transition_press = Some((key.code, key.modifiers, now));
+        } else if debounced {
             return false;
+        } else {
+            // Ordinary typing unrelated to any dialog: clear any stale
+            // record so it can't debounce a much-later, purely
+            // coincidental same-key press.
+            *last_transition_press = None;
         }
     }
 
@@ -664,6 +686,32 @@ mod tests {
             state.controller_source(),
             Some(format!("{}x", intel::STARTER_CONTROLLER)).as_deref(),
             "the second, debounced n must not have been typed into the source"
+        );
+    }
+
+    #[test]
+    fn typing_two_ns_in_a_row_in_the_controller_inserts_both_when_no_dialog_is_open() {
+        // The y/n debounce must only apply to a leaked repeat right after
+        // a dialog closes (see `a_held_n_does_not_leak_into_the_controller_
+        // after_cancelling_a_dialog`), not to `y`/`n` unconditionally —
+        // `n` and `y` are also ordinary printable characters, and two
+        // typed quickly in a row (e.g. mid-identifier) must both insert,
+        // the same as any other repeated character would.
+        let (state, _) = render(
+            120,
+            40,
+            &[
+                press(KeyCode::Enter), // open Target
+                press(KeyCode::Enter), // commit, opening Controller
+                press(KeyCode::Char('n')),
+                press(KeyCode::Char('n')),
+            ],
+        );
+
+        assert_eq!(
+            state.controller_source(),
+            Some(format!("{}nn", intel::STARTER_CONTROLLER)).as_deref(),
+            "both n presses should have inserted; no dialog was ever open"
         );
     }
 

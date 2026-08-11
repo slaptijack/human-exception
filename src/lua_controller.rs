@@ -256,6 +256,13 @@ fn install_deterministic_string_format(lua: &Lua) -> mlua::Result<()> {
             real_format.call(rebuilt)
         },
     )?;
+    // `real_format` itself can raise a plain string error (e.g. a bad
+    // argument type), and a `%s` conversion can invoke a value's own
+    // custom `__tostring` (unrestricted script code, free to raise
+    // anything) — see `wrap_lua_errors_as_strings` for why either error
+    // would otherwise cross `det_format`'s own Rust closure boundary as
+    // userdata instead of the plain string real Lua would raise.
+    let det_format = wrap_lua_errors_as_strings(lua, det_format)?;
     string_lib.set("format", det_format)?;
     Ok(())
 }
@@ -294,6 +301,50 @@ fn format_argument_conversions(fmt: &[u8]) -> Vec<u8> {
     conversions
 }
 
+/// Wraps `implementation` (a Rust-implemented `Function`) so that any error
+/// it raises reaches a caller's own `pcall` as a genuine Lua string,
+/// instead of the userdata `mlua` always wraps a Rust callback's `Err` in
+/// (confirmed via `mlua`'s own source: `callback_error` unconditionally
+/// wraps whatever a `create_function` closure returns as `Err` in a
+/// `WrappedFailure` userdata before raising it — this is not specific to
+/// any one override here). The wrapper itself is a genuine Lua closure
+/// (built by evaluating a small Lua chunk and calling the factory it
+/// returns with `implementation`), so calling the *returned* function
+/// never crosses a Rust closure boundary on the way out — only
+/// internally, via its own `pcall`, where the caught (possibly userdata,
+/// possibly already a plain value) error is converted with `tostring` and
+/// re-`error`ed at level 0 (no position prefix added, since the original
+/// message already has whatever `error`/`assert` text it needs).
+///
+/// This does not preserve a raised *value*'s original type — a table
+/// passed to `error()` inside a custom callback becomes its `tostring()`
+/// text here, not the table itself, unlike a raise that never crosses any
+/// Rust boundary at all in real Lua. Doing better than that would need
+/// `pairs`/`tostring`/`string.format` (and everything they can call into)
+/// to never touch a Rust closure anywhere on their call path, which is a
+/// materially bigger restructuring than this fixes; every error this
+/// module raises directly is already a plain string, so the only real
+/// loss is for a script's own callback (`__pairs`, `__tostring`) that
+/// raises a non-string value on purpose.
+fn wrap_lua_errors_as_strings(lua: &Lua, implementation: Function) -> mlua::Result<Function> {
+    lua.load(
+        r#"
+        return function(implementation)
+            return function(...)
+                local results = table.pack(pcall(implementation, ...))
+                if not results[1] then
+                    error(tostring(results[2]), 0)
+                end
+                return table.unpack(results, 2, results.n)
+            end
+        end
+    "#,
+    )
+    .set_name("lua_error_string_unwrap_factory")
+    .eval::<Function>()?
+    .call(implementation)
+}
+
 /// Whether `value` is a table carrying its own `__tostring` metamethod.
 /// Lua's standard `setmetatable` only ever attaches to tables, so a table
 /// is the only reference type that can have one; a table that does
@@ -329,8 +380,24 @@ fn table_has_custom_tostring(value: &Value) -> bool {
 fn install_deterministic_tostring(lua: &Lua) -> mlua::Result<()> {
     let globals = lua.globals();
     let real_tostring: Function = globals.get("tostring")?;
-    let det_tostring =
-        lua.create_function(move |lua, value: Value| -> mlua::Result<mlua::LuaString> {
+    let det_tostring = lua.create_function(
+        move |lua, args: MultiValue| -> mlua::Result<mlua::LuaString> {
+            // A single `Value` parameter can't distinguish "no argument at
+            // all" from an explicit `nil` — `mlua` pads a missing argument
+            // to a fixed-arity closure with `Nil` the same way Lua itself
+            // pads a missing parameter in an ordinary function call. Real
+            // Lua's `tostring` is a C function that explicitly checks for
+            // at least one argument (`luaL_checkany`) and raises "bad
+            // argument #1 to 'tostring' (value expected)" for zero
+            // arguments, while `tostring(nil)` (one explicit argument)
+            // succeeds and returns `"nil"` — accepting `MultiValue` instead
+            // keeps that distinction, which matters to controller code that
+            // probes or forwards a call by argument count.
+            let Some(value) = args.into_iter().next() else {
+                return Err(mlua::Error::RuntimeError(
+                    "bad argument #1 to 'tostring' (value expected)".to_string(),
+                ));
+            };
             // Only a table/function/thread/userdata's *default* (no
             // `__tostring`) representation is address-bearing; gate on the
             // input value's type, not just the output text, so an ordinary
@@ -389,7 +456,14 @@ fn install_deterministic_tostring(lua: &Lua) -> mlua::Result<()> {
             };
             placeholder.extend_from_slice(b": 0x0");
             lua.create_string(placeholder)
-        })?;
+        },
+    )?;
+    // A table's custom `__tostring` (called just above via `real_tostring`)
+    // is unrestricted script code, free to raise — see
+    // `wrap_lua_errors_as_strings` for why that error would otherwise
+    // cross `det_tostring`'s own Rust closure boundary as userdata instead
+    // of the plain string real Lua would raise.
+    let det_tostring = wrap_lua_errors_as_strings(lua, det_tostring)?;
     globals.set("tostring", det_tostring)?;
     Ok(())
 }
@@ -475,36 +549,11 @@ fn install_deterministic_table_iteration(lua: &Lua) -> mlua::Result<()> {
             }
         },
     )?;
-    // Any error a Rust-implemented `create_function` closure raises (like
-    // `raw_next`'s "invalid key to 'next'" above) crosses into Lua wrapped
-    // in a full userdata, not a plain string — that's `mlua`'s own
-    // callback-error handling, not something specific to this override.
-    // Real Lua's `next` raises a genuine string, so `local ok, err =
-    // pcall(next, t, bogus_key); type(err)` must be `"string"` here too,
-    // not `"userdata"` — a script inspecting, concatenating, or forwarding
-    // the message would otherwise fail or branch differently than it would
-    // against real Lua. Wrapping `raw_next` in this small Lua-level
-    // `pcall` + `tostring` + re-`error` unwraps that userdata back into a
-    // plain string *before* it ever reaches a script's own `pcall`,
-    // without changing behavior on the success path (every real return
-    // value is repacked and passed through unchanged).
-    let det_next: Function = lua
-        .load(
-            r#"
-            return function(raw_next)
-                return function(...)
-                    local results = table.pack(pcall(raw_next, ...))
-                    if not results[1] then
-                        error(tostring(results[2]), 0)
-                    end
-                    return table.unpack(results, 2, results.n)
-                end
-            end
-        "#,
-        )
-        .set_name("next_error_unwrap_factory")
-        .eval::<Function>()?
-        .call(raw_next)?;
+    // Real Lua's `next` raises a genuine string (e.g. "invalid key to
+    // 'next'" above), so `local ok, err = pcall(next, t, bogus_key);
+    // type(err)` must be `"string"` here too — see
+    // `wrap_lua_errors_as_strings`.
+    let det_next = wrap_lua_errors_as_strings(lua, raw_next)?;
 
     // A tiny Lua-level trampoline used to invoke a table's `__pairs` value
     // through Lua's own call operator rather than Rust matching on
@@ -581,6 +630,12 @@ fn install_deterministic_table_iteration(lua: &Lua) -> mlua::Result<()> {
         // passes back the previous key as the control value) does.
         (det_next_for_pairs.clone(), Value::Table(table), Value::Nil).into_lua_multi(lua)
     })?;
+
+    // Same reasoning as `det_next` above: `det_pairs` calls back into a
+    // table's own `__pairs` (unrestricted script code, free to raise
+    // anything), and that error would otherwise cross `det_pairs`'s own
+    // Rust closure boundary as userdata.
+    let det_pairs = wrap_lua_errors_as_strings(lua, det_pairs)?;
 
     let globals = lua.globals();
     globals.set("next", det_next)?;
@@ -836,9 +891,20 @@ fn load_controller(lua: &Lua, source: &str) -> Result<Function, ControllerError>
         .exec()
         .map_err(ControllerError::ScriptInvalid)?;
 
-    lua.globals()
-        .get::<Function>(ON_TICK)
-        .map_err(|_| ControllerError::MissingCallback)
+    match lua.globals().get::<Function>(ON_TICK) {
+        Ok(callback) => Ok(callback),
+        // `on_tick` is an ordinary global lookup, which a script can route
+        // through its own `__index` metamethod on `_G` (`setmetatable`
+        // isn't restricted). If that metamethod itself raises — as
+        // opposed to just not returning a function — the failure is a
+        // genuine script error, not "the callback is missing"; folding
+        // both into `MissingCallback` would discard the real diagnostic
+        // (and its useful source information) behind a misleading
+        // message. Only a clean type mismatch (nil, or a non-function
+        // value) is really "missing"; anything else is `ScriptInvalid`.
+        Err(mlua::Error::FromLuaConversionError { .. }) => Err(ControllerError::MissingCallback),
+        Err(err) => Err(ControllerError::ScriptInvalid(err)),
+    }
 }
 
 /// The number of Lua VM instructions [`validate`] allows the player's
@@ -1132,6 +1198,33 @@ mod tests {
     }
 
     #[test]
+    fn a_raising_index_metamethod_during_on_tick_lookup_is_script_invalid_not_missing_callback() {
+        // A stateful (or simply buggy) `__index` on `_G` can raise while
+        // `on_tick` is being looked up — a genuine script error, not "the
+        // callback is missing." Folding both into `MissingCallback` would
+        // hide the real diagnostic (and its useful source information)
+        // behind a misleading message.
+        let source = r#"
+            setmetatable(_G, {
+                __index = function(_, key)
+                    error("lookup exploded: " .. tostring(key))
+                end,
+            })
+        "#;
+        let lua = sandboxed_lua();
+        let err = load_controller(&lua, source).unwrap_err();
+        match err {
+            ControllerError::ScriptInvalid(mlua_err) => {
+                assert!(
+                    mlua_err.to_string().contains("lookup exploded"),
+                    "{mlua_err}"
+                );
+            }
+            other => panic!("expected ScriptInvalid, got {other}"),
+        }
+    }
+
+    #[test]
     fn validate_accepts_a_script_defining_on_tick() {
         assert!(validate_locked("function on_tick(observation) return \"wait\" end").is_ok());
     }
@@ -1305,19 +1398,24 @@ mod tests {
     #[test]
     fn pairs_does_not_retain_a_growing_snapshot_per_call() {
         // `pairs(t)` (absent a custom `__pairs`) now returns the same
-        // pre-existing `next` function, the table itself, and `nil` —
-        // nothing newly allocated per call — instead of a fresh closure
-        // wrapping its own sorted-key snapshot. Saving many iterators
-        // without ever driving them (a pattern an earlier version of this
-        // sandbox could accumulate unbounded *host* memory for, since a
-        // Rust-heap `Vec` per call sat outside Lua's own tracked memory)
-        // must therefore stay cheap and succeed, not run into any memory
-        // limit at all.
+        // pre-existing `next` function, the table itself, and `nil` — no
+        // full sorted-key snapshot allocated per call — instead of a fresh
+        // closure wrapping its own copy of the table's entries. Saving many
+        // iterators without ever driving them (a pattern an earlier
+        // version of this sandbox could accumulate unbounded *host* memory
+        // for, since a Rust-heap `Vec` per call sat outside Lua's own
+        // tracked memory) must therefore stay cheap enough to succeed at a
+        // moderate call count, not run into the sandbox's memory limit at
+        // all — a lower call count than an earlier version of this test
+        // used, since `pairs`'s own error-preserving wrapper (see
+        // `wrap_lua_errors_as_strings`) now costs a few real Lua
+        // instructions per call, and 200,000 calls to *anything* eventually
+        // trips the unrelated instruction-budget guard this isn't testing.
         let source = r#"
             local t = {}
             for i = 1, 200 do t["key" .. i] = i end
             local saved = {}
-            for i = 1, 200000 do
+            for i = 1, 10000 do
                 saved[i] = pairs(t)
             end
             function on_tick(observation) return "wait" end
@@ -1777,6 +1875,57 @@ mod tests {
             message.len()
         );
         assert!(message.ends_with("(truncated)"), "{message}");
+    }
+
+    #[test]
+    fn tostring_rejects_being_called_with_no_arguments() {
+        // A single `Value` parameter can't distinguish "no argument" from
+        // an explicit `nil` — real Lua's `tostring` explicitly checks and
+        // raises for zero arguments, while `tostring(nil)` succeeds.
+        let source = r#"
+            local ok = pcall(tostring)
+            assert(not ok, "tostring() with no arguments should raise")
+            assert(tostring(nil) == "nil")
+            function on_tick(observation) return "wait" end
+        "#;
+        assert!(validate_locked(source).is_ok());
+    }
+
+    #[test]
+    fn tostring_error_from_a_custom_tostring_is_a_lua_string_not_userdata() {
+        let source = r#"
+            local raises = setmetatable({}, {__tostring = function(_) error("boom") end})
+            local ok, err = pcall(tostring, raises)
+            assert(not ok, "expected tostring to raise")
+            assert(type(err) == "string", "type(err) was " .. type(err))
+            assert(err:find("boom", 1, true) ~= nil, err)
+            function on_tick(observation) return "wait" end
+        "#;
+        assert!(validate_locked(source).is_ok());
+    }
+
+    #[test]
+    fn pairs_error_from_a_pairs_metamethod_is_a_lua_string_not_userdata() {
+        let source = r#"
+            local proxy = setmetatable({}, {__pairs = function(_) error("boom") end})
+            local ok, err = pcall(pairs, proxy)
+            assert(not ok, "expected pairs to raise")
+            assert(type(err) == "string", "type(err) was " .. type(err))
+            assert(err:find("boom", 1, true) ~= nil, err)
+            function on_tick(observation) return "wait" end
+        "#;
+        assert!(validate_locked(source).is_ok());
+    }
+
+    #[test]
+    fn string_format_error_is_a_lua_string_not_userdata() {
+        let source = r#"
+            local ok, err = pcall(string.format, "%d", {})
+            assert(not ok, "expected string.format to raise")
+            assert(type(err) == "string", "type(err) was " .. type(err))
+            function on_tick(observation) return "wait" end
+        "#;
+        assert!(validate_locked(source).is_ok());
     }
 
     #[test]
