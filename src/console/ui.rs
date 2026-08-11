@@ -4,6 +4,8 @@
 //! operation so it can be exercised against `ratatui`'s `TestBackend`
 //! without a real terminal.
 
+use super::intel::{Signal, TargetDossier, authored_signals, first_contact_dossier};
+use super::state::{AppState, Validation, View, WorkingSet};
 use ratatui::Frame;
 use ratatui::buffer::CellWidth;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -11,9 +13,6 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use unicode_width::UnicodeWidthChar;
-
-use super::intel::{Signal, TargetDossier, authored_signals, first_contact_dossier};
-use super::state::{AppState, Validation, View, WorkingSet};
 
 pub const MIN_COLUMNS: u16 = 80;
 pub const MIN_ROWS: u16 = 24;
@@ -62,7 +61,24 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
 /// not just the body, so it stays visible even below the supported minimum
 /// geometry.
 fn draw_quit_confirmation(frame: &mut Frame, area: Rect) {
-    let lines = vec![
+    let lines = quit_confirmation_lines(area.height);
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// The quit-confirmation dialog's content for a frame `height` rows tall.
+/// `Ctrl+Q` and this confirmation are intentionally still reachable below
+/// the supported minimum geometry (`docs/TUI_DESIGN.md`'s "Quit safety"),
+/// so a terminal resized down to just a few rows must still be able to
+/// confirm or cancel — an unconditional, un-prioritized line list would
+/// instead have its `Enter`/`Esc` action rows (listed last) clipped first
+/// by `Paragraph`'s default truncation, at exactly the moment the player
+/// most needs them, while decorative lines above survive. Picks the
+/// tallest of three fixed candidates that actually fits, most detail
+/// first — the same "drop lowest-priority content first" pattern the
+/// header candidate lists use, rather than a signal a mid-dialog resize
+/// could keep bouncing between.
+fn quit_confirmation_lines(height: u16) -> Vec<Line<'static>> {
+    let full = vec![
         Line::from("HUMAN EXCEPTION // resistance console"),
         Line::from(Span::styled(
             "Modified controller source will be lost.",
@@ -73,7 +89,26 @@ fn draw_quit_confirmation(frame: &mut Frame, area: Rect) {
         Line::from("Enter / y  confirm and quit"),
         Line::from("Esc / n    cancel and return"),
     ];
-    frame.render_widget(Paragraph::new(lines), area);
+    if height as usize >= full.len() {
+        return full;
+    }
+    let compact = vec![
+        Line::from(Span::styled(
+            "Modified controller source will be lost.",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from("Enter / y  confirm and quit"),
+        Line::from("Esc / n    cancel and return"),
+    ];
+    if height as usize >= compact.len() {
+        return compact;
+    }
+    if height == 0 {
+        return Vec::new();
+    }
+    vec![Line::from(
+        "Quit and lose edits? Enter/y confirm, Esc/n cancel",
+    )]
 }
 
 fn draw_geometry_warning(frame: &mut Frame, area: Rect) {
@@ -896,28 +931,34 @@ fn word_wrapped_row_count(text: &str, width: usize) -> usize {
     let mut saw_content = false;
 
     loop {
-        let mut whitespace_width = 0usize;
+        // Measured via `CellWidth` (the same calculation ratatui's own
+        // renderer uses), not a per-character `unicode-width` sum: they can
+        // disagree for character combinations `CellWidth` treats specially
+        // (see `display_width_of_prefix`), which could otherwise reserve
+        // too few rows for a banner and clip its final word.
+        let mut whitespace = String::new();
         while let Some(&c) = chars.peek() {
             if !c.is_whitespace() {
                 break;
             }
-            whitespace_width += UnicodeWidthChar::width(c).unwrap_or(0);
+            whitespace.push(c);
             chars.next();
         }
-        let mut word_width = 0usize;
+        let mut word = String::new();
         while let Some(&c) = chars.peek() {
             if c.is_whitespace() {
                 break;
             }
-            word_width += UnicodeWidthChar::width(c).unwrap_or(0);
+            word.push(c);
             chars.next();
         }
-        if whitespace_width == 0 && word_width == 0 {
+        if whitespace.is_empty() && word.is_empty() {
             break; // end of text
         }
         saw_content = true;
 
-        let segment_width = whitespace_width + word_width;
+        let segment_width =
+            whitespace.as_str().cell_width() as usize + word.as_str().cell_width() as usize;
         if segment_width >= width {
             // The whitespace-plus-word segment alone doesn't fit a row and
             // hard-wraps across as many rows as it needs, the same way a
@@ -1032,6 +1073,10 @@ fn help_lines(state: &AppState) -> Vec<Line<'static>> {
     lines.push(Line::from(
         "and loadfile are not available; scripts using them will fail to load.",
     ));
+    lines.push(Line::from(
+        "print is not available either (it would corrupt the console's own",
+    ));
+    lines.push(Line::from("display)."));
     lines.push(Line::from(
         "math.random always starts from the same fixed seed, so a controller",
     ));
@@ -1524,7 +1569,7 @@ mod tests {
 
         let mut state = AppState::new();
         state.apply(Msg::OpenHelp);
-        let terminal = render(120, 69, &state);
+        let terminal = render(120, 71, &state);
 
         assert!(buffer_contains(&terminal, "scan does not move the drone"));
         assert!(buffer_contains(&terminal, "regardless of walls in the way"));
@@ -1558,7 +1603,7 @@ mod tests {
         // without needing to scroll.
         let mut state = AppState::new();
         state.apply(Msg::OpenHelp);
-        let terminal = render(120, 81, &state);
+        let terminal = render(120, 83, &state);
 
         assert!(buffer_contains(&terminal, "Terminology"));
         assert!(buffer_contains(&terminal, "MACHINE INTERCEPT"));
@@ -1734,6 +1779,35 @@ mod tests {
     }
 
     #[test]
+    fn quit_confirmation_keeps_its_confirm_and_cancel_keys_visible_at_very_short_heights() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.apply(Msg::EditController(super::super::editor::EditOp::Insert(
+            'x',
+        )));
+        state.apply(Msg::RequestQuit);
+
+        for height in [1, 2, 3, 5] {
+            let terminal = render(60, height, &state);
+            let visible = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert!(
+                visible.contains("Enter") && visible.contains("Esc"),
+                "at height {height}, both the confirm (Enter) and cancel (Esc) \
+                 keys should stay visible, got: {visible:?}"
+            );
+        }
+    }
+
+    #[test]
     fn reset_confirmation_is_visible_even_when_the_narrow_reference_pane_was_toggled_on() {
         use super::super::state::Msg;
 
@@ -1795,6 +1869,17 @@ mod tests {
         // predict everything fits on one 78-column row (70 + 1 + 7 = 78).
         let text = format!("{}{}recover", "x".repeat(70), " ".repeat(10));
         assert_eq!(word_wrapped_row_count(&text, 78), 2);
+    }
+
+    #[test]
+    fn word_wrapped_row_count_measures_a_halfwidth_katakana_dakuten_like_ratatui() {
+        // Same underlying divergence as `display_width_matches_ratatui_
+        // for_a_halfwidth_katakana_dakuten`, but exercised through the
+        // word-wrap row counter a banner/Help actually uses: a per-
+        // character `unicode-width` sum treats U+FF9E as zero-width, while
+        // ratatui's own `CellWidth` counts it as an extra occupied cell.
+        let word = "\u{FF76}\u{FF9E}".repeat(40); // 40x (halfwidth カ + dakuten) = 80 cells
+        assert_eq!(word_wrapped_row_count(&word, 78), 80_usize.div_ceil(78));
     }
 
     #[test]

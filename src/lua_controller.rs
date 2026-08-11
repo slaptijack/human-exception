@@ -103,6 +103,27 @@ fn sandboxed_lua() -> Lua {
         let _ = string_lib.set("dump", Value::Nil);
     }
     let _ = lua.set_memory_limit(SANDBOX_MEMORY_LIMIT_BYTES);
+    // Stops Lua's automatic incremental garbage collection entirely for the
+    // rest of this state's lifetime (never restarted — nothing in this
+    // module calls `gc_restart`/`gc_collect`). Without this, an unreachable
+    // table with a `__gc` finalizer can be collected — and that finalizer
+    // run — at a point during top-level execution that depends on the
+    // state's allocation pacing, which [`validate`]'s instruction hook (an
+    // extra allocation source `run` doesn't have) shifts just enough to
+    // make the *same* source's automatic-collection timing differ between
+    // the two: a finalizer that defines `on_tick` could run before
+    // `load_controller` finishes in one but not the other, reporting
+    // `READY`/`MissingCallback` inconsistently with no memory-introspection
+    // API involved at all (`collectgarbage` is already removed above).
+    // Stopping automatic collection in both means neither ever runs a
+    // finalizer *during* the top-level chunk purely because of incidental
+    // allocation timing; `lua_close` (this `Lua`'s `Drop`) still finalizes
+    // everything still unreachable once the state itself goes away, same
+    // as always. The 32MB memory limit set just above is the sole backstop
+    // against uncollected garbage for the rest of a state's lifetime, which
+    // is already sufficient for the on_tick contract's "trivial amount of
+    // state" (see `SANDBOX_MEMORY_LIMIT_BYTES`'s doc comment).
+    lua.gc_stop();
     if let Ok(math) = globals.get::<Table>("math")
         && let Ok(randomseed) = math.get::<Function>("randomseed")
     {
@@ -1653,6 +1674,40 @@ mod tests {
     fn validate_bounds_excessive_native_allocation() {
         let err = validate("local n = 1 << 30\nlocal s = string.rep('x', n)").unwrap_err();
         assert!(matches!(err, ControllerError::ScriptInvalid(_)));
+    }
+
+    #[test]
+    fn validate_and_load_controller_agree_on_a_gc_finalizer_that_would_define_on_tick() {
+        // An unreachable table's `__gc` finalizer running automatically at
+        // some allocation-pacing-dependent point during the top-level
+        // chunk — rather than only at state teardown — used to be able to
+        // define `on_tick` in `validate` (whose instruction hook is an
+        // extra allocation source) without `run`'s unhooked
+        // `load_controller` seeing the same thing happen at the same
+        // point, reporting `READY`/`MissingCallback` inconsistently for
+        // byte-identical source with no memory-introspection API involved.
+        // `sandboxed_lua`'s `gc_stop` means neither ever runs the
+        // finalizer *during* loading at all, so both must agree here.
+        let source = r#"
+            local sentinel = {}
+            setmetatable(sentinel, {__gc = function()
+                function on_tick(observation) return "wait" end
+            end})
+            sentinel = nil
+            for _ = 1, 11 do
+                local _ = string.rep("x", 64)
+            end
+        "#;
+        let validate_result = validate(source);
+        let load_result = load_controller(&sandboxed_lua(), source);
+        assert!(
+            matches!(validate_result, Err(ControllerError::MissingCallback)),
+            "validate: {validate_result:?}"
+        );
+        assert!(
+            matches!(load_result, Err(ControllerError::MissingCallback)),
+            "load_controller: {load_result:?}"
+        );
     }
 
     #[test]
