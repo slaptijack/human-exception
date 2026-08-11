@@ -9,7 +9,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::intel::{Signal, TargetDossier, authored_signals, first_contact_dossier};
 use super::state::{AppState, Validation, View, WorkingSet};
@@ -851,20 +851,66 @@ fn draw_help(frame: &mut Frame, area: Rect, state: &AppState) {
 }
 
 /// How many terminal rows `lines` occupies once wrapped to `width`, matching
-/// the `Wrap { trim: false }` behavior used to render Help.
+/// the `Wrap { trim: false }` behavior used to render Help and the
+/// Controller banner.
 fn wrapped_row_count(lines: &[Line<'static>], width: u16) -> usize {
     let width = width.max(1) as usize;
     lines
         .iter()
         .map(|line| {
-            let line_width = line.width();
-            if line_width == 0 {
-                1
-            } else {
-                line_width.div_ceil(width)
-            }
+            let text: String = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+            word_wrapped_row_count(&text, width)
         })
         .sum()
+}
+
+/// How many rows `text` occupies once word-wrapped to `width` columns,
+/// matching ratatui's own greedy word-wrapping (never splitting a word
+/// across rows unless the word alone is wider than `width`). A naive
+/// `total_width / width` division underestimates this whenever `text`
+/// contains words that individually fit but don't pack evenly — e.g. three
+/// 40-column words in a 78-column line divide to "2 rows" but actually wrap
+/// to 3, since the second word can't share a row with the first.
+fn word_wrapped_row_count(text: &str, width: usize) -> usize {
+    let mut rows = 0usize;
+    let mut current_width = 0usize; // 0 means the row being built is empty
+    let mut saw_word = false;
+    for word in text.split_whitespace() {
+        saw_word = true;
+        let word_width = UnicodeWidthStr::width(word).max(1);
+        if word_width >= width {
+            // A single word wider than the pane can't share a row with
+            // anything else and hard-wraps across as many rows as it needs.
+            if current_width > 0 {
+                rows += 1;
+            }
+            rows += word_width.div_ceil(width);
+            current_width = 0;
+            continue;
+        }
+        let needed = if current_width == 0 {
+            word_width
+        } else {
+            current_width + 1 + word_width // +1 for the separating space
+        };
+        if needed <= width {
+            current_width = needed;
+        } else {
+            rows += 1;
+            current_width = word_width;
+        }
+    }
+    if current_width > 0 {
+        rows += 1;
+    }
+    if !saw_word {
+        rows = rows.max(1);
+    }
+    rows.max(1)
 }
 
 /// Two-level contextual help: the current (or Help-opened-from) view's
@@ -968,6 +1014,12 @@ fn help_lines(state: &AppState) -> Vec<Line<'static>> {
     ));
     lines.push(Line::from(
         "expose native platform layout); nor is collectgarbage.",
+    ));
+    lines.push(Line::from(
+        "pairs/next only iterate tables keyed by booleans, numbers, or",
+    ));
+    lines.push(Line::from(
+        "strings; a table or function key makes the whole traversal fail.",
     ));
     lines.push(Line::from(""));
     lines.push(Line::from(
@@ -1440,7 +1492,7 @@ mod tests {
 
         let mut state = AppState::new();
         state.apply(Msg::OpenHelp);
-        let terminal = render(120, 67, &state);
+        let terminal = render(120, 69, &state);
 
         assert!(buffer_contains(&terminal, "scan does not move the drone"));
         assert!(buffer_contains(&terminal, "regardless of walls in the way"));
@@ -1474,7 +1526,7 @@ mod tests {
         // without needing to scroll.
         let mut state = AppState::new();
         state.apply(Msg::OpenHelp);
-        let terminal = render(120, 79, &state);
+        let terminal = render(120, 81, &state);
 
         assert!(buffer_contains(&terminal, "Terminology"));
         assert!(buffer_contains(&terminal, "MACHINE INTERCEPT"));
@@ -1666,6 +1718,28 @@ mod tests {
             buffer_contains(&terminal, "ZZZZZZZZZZ"),
             "the tail of a long line (where the cursor now is) must still be on screen"
         );
+    }
+
+    #[test]
+    fn word_wrapped_row_count_matches_greedy_word_wrapping_not_total_width_division() {
+        // Three 40-column words in a 78-column line: a naive
+        // total-width/pane-width division sees 120/78 = 2 rows, but real
+        // word wrapping can't fit a second 40-column word on the first
+        // word's row (40 + 1 + 40 = 81 > 78), so it actually takes 3.
+        let word = "x".repeat(40);
+        let text = format!("{word} {word} {word}");
+        assert_eq!(word_wrapped_row_count(&text, 78), 3);
+    }
+
+    #[test]
+    fn word_wrapped_row_count_hard_wraps_a_single_word_wider_than_the_line() {
+        let word = "x".repeat(200);
+        assert_eq!(word_wrapped_row_count(&word, 78), 200_usize.div_ceil(78));
+    }
+
+    #[test]
+    fn word_wrapped_row_count_treats_an_empty_line_as_one_row() {
+        assert_eq!(word_wrapped_row_count("", 78), 1);
     }
 
     #[test]

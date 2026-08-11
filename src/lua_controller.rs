@@ -394,18 +394,26 @@ fn install_deterministic_table_iteration(lua: &Lua) -> mlua::Result<()> {
         },
     )?;
 
+    // A tiny Lua-level trampoline used to invoke a table's `__pairs` value
+    // through Lua's own call operator rather than Rust matching on
+    // `Value::Function`. Real Lua allows *any* callable value there — a
+    // table or userdata with its own `__call` metamethod counts too — and
+    // re-implementing that resolution in Rust would mean re-deriving Lua's
+    // whole call-dispatch chain; delegating the actual call back into Lua
+    // gets that (and its exact "attempt to call a ... value" error wording
+    // for a genuinely uncallable value) for free.
+    let call_pairs_metamethod: Function = lua
+        .load("return function(fn, tbl) return fn(tbl) end")
+        .set_name("pairs_metamethod_dispatch")
+        .eval()?;
+
     let det_pairs = lua.create_function(move |lua, table: Table| -> mlua::Result<MultiValue> {
         // Real Lua 5.4 defers entirely to a table's `__pairs` metamethod
         // when present (checked before ever calling the real `next`);
         // match that instead of silently overriding a proxy/wrapper
         // table's own iteration behavior with ours. A script's own
         // `__pairs` is responsible for its own determinism, same as a
-        // custom `__tostring` is for its own output. A *present but not
-        // callable* `__pairs` (e.g. `__pairs = true`) is a script bug real
-        // Lua reports by trying to call it and raising its own "attempt to
-        // call a boolean value" error — that must still happen here rather
-        // than silently falling through to deterministic iteration as if
-        // no metamethod existed at all.
+        // custom `__tostring` is for its own output.
         if let Some(metatable) = table.metatable() {
             // A raw lookup, not `Table::get`: the latter would follow the
             // metatable's own `__index` chain (if it has one) and could
@@ -414,12 +422,6 @@ fn install_deterministic_table_iteration(lua: &Lua) -> mlua::Result<()> {
             // the metatable's raw `__pairs` entry.
             let pairs_field: Value = metatable.raw_get("__pairs")?;
             if !matches!(pairs_field, Value::Nil) {
-                let Value::Function(pairs_mm) = pairs_field else {
-                    return Err(mlua::Error::RuntimeError(format!(
-                        "attempt to call a {} value (metamethod '__pairs')",
-                        pairs_field.type_name()
-                    )));
-                };
                 // Real Lua 5.4's `pairs` calls `__pairs` requesting exactly
                 // three results (`lua_call(L, 1, 3)`): fewer than three
                 // returned are padded with `nil` by the VM, and more than
@@ -431,8 +433,10 @@ fn install_deterministic_table_iteration(lua: &Lua) -> mlua::Result<()> {
                 // with "got a non-closable value"), or leaves callers that
                 // inspect the result count (`select("#", pairs(t))`)
                 // observing a different arity than real Lua's fixed three.
-                let mut results: Vec<Value> =
-                    pairs_mm.call::<MultiValue>(table)?.into_iter().collect();
+                let mut results: Vec<Value> = call_pairs_metamethod
+                    .call::<MultiValue>((pairs_field, table))?
+                    .into_iter()
+                    .collect();
                 results.resize(3, Value::Nil);
                 return Ok(MultiValue::from_iter(results));
             }
@@ -1149,6 +1153,33 @@ mod tests {
         let source = "for k in pairs(setmetatable({a = 1}, {__pairs = true})) do end";
         let err = validate(source).unwrap_err();
         assert!(matches!(err, ControllerError::ScriptInvalid(_)));
+    }
+
+    #[test]
+    fn pairs_metamethod_can_be_a_table_with_its_own_call_metamethod() {
+        // Real Lua dispatches *any* callable value through `__call`, not
+        // only actual functions — a table whose own metatable sets
+        // `__call` is valid Lua for `__pairs` too.
+        let source = r#"
+            local callable_pairs = setmetatable({}, {
+                __call = function(_, self)
+                    local done = false
+                    return function()
+                        if done then return nil end
+                        done = true
+                        return "only", "value"
+                    end, self, nil
+                end,
+            })
+            local proxy = setmetatable({}, {__pairs = callable_pairs})
+            local seen = {}
+            for k, v in pairs(proxy) do
+                seen[#seen + 1] = k .. "=" .. v
+            end
+            assert(#seen == 1 and seen[1] == "only=value", table.concat(seen, ","))
+            function on_tick(observation) return "wait" end
+        "#;
+        assert!(validate(source).is_ok());
     }
 
     #[test]
