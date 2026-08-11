@@ -135,13 +135,22 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resu
                     // without it every autorepeated or released key still
                     // arrives as plain `Press`, silently defeating the
                     // held-key cascade guard in `should_redraw` below.
+                    //
+                    // Deliberately NOT also requesting
+                    // `REPORT_ALL_KEYS_AS_ESCAPE_CODES`: crossterm's own docs
+                    // say it's needed for plain-text keys (`Enter`, `y`/`n`)
+                    // to report `Repeat`/`Release` too, but it also forces
+                    // *every* key — including ordinary shifted symbol keys
+                    // like `_` and `(`/`)` — through the more complex CSI-u
+                    // encoding, and at least one real terminal/keyboard-
+                    // layout combination stopped reporting those characters
+                    // correctly once it was enabled (confirmed by testing:
+                    // Shift-derived characters silently failed to type in
+                    // Controller's editor). A working editor is far more
+                    // important than `Enter`/`y`/`n` specifically joining
+                    // the held-key cascade guard already applied to
+                    // everything else Kitty can report a `Repeat` kind for.
                     | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-                    // `REPORT_EVENT_TYPES` alone only covers keys already
-                    // sent as CSI-u sequences; plain-text keys like `Enter`
-                    // and `y`/`n` — exactly the transition keys that guard
-                    // cares about — need this too to report `Repeat`/`Release`
-                    // instead of only ever `Press`.
-                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
             )
         )
         .is_ok()
