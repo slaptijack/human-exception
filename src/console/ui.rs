@@ -9,7 +9,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthChar;
 
 use super::intel::{Signal, TargetDossier, authored_signals, first_contact_dossier};
 use super::state::{AppState, Validation, View, WorkingSet};
@@ -876,45 +876,67 @@ fn wrapped_row_count(lines: &[Line<'static>], width: u16) -> usize {
 }
 
 /// How many rows `text` occupies once word-wrapped to `width` columns,
-/// matching ratatui's own greedy word-wrapping (never splitting a word
-/// across rows unless the word alone is wider than `width`). A naive
-/// `total_width / width` division underestimates this whenever `text`
-/// contains words that individually fit but don't pack evenly — e.g. three
-/// 40-column words in a 78-column line divide to "2 rows" but actually wrap
-/// to 3, since the second word can't share a row with the first.
+/// matching ratatui's own greedy word-wrapping with `Wrap { trim: false }`
+/// (never splitting a word across rows unless the word alone is wider than
+/// `width`, and preserving whitespace runs rather than collapsing them). A
+/// word and the whitespace run immediately before it move together as one
+/// unit — the same grouping `Wrap { trim: false }` uses — so e.g. a
+/// 70-column word, 10 columns of spaces, and a short recovery word in a
+/// 78-column pane wrap to two rows (word alone; then the 10 spaces plus the
+/// recovery word, which can't fit on the first row) rather than the one row
+/// a naive total-width division would predict.
 fn word_wrapped_row_count(text: &str, width: usize) -> usize {
+    let width = width.max(1);
     let mut rows = 0usize;
     let mut current_width = 0usize; // 0 means the row being built is empty
-    let mut saw_word = false;
-    for word in text.split_whitespace() {
-        saw_word = true;
-        let word_width = UnicodeWidthStr::width(word).max(1);
-        if word_width >= width {
-            // A single word wider than the pane can't share a row with
-            // anything else and hard-wraps across as many rows as it needs.
+    let mut chars = text.chars().peekable();
+    let mut saw_content = false;
+
+    loop {
+        let mut whitespace_width = 0usize;
+        while let Some(&c) = chars.peek() {
+            if !c.is_whitespace() {
+                break;
+            }
+            whitespace_width += UnicodeWidthChar::width(c).unwrap_or(0);
+            chars.next();
+        }
+        let mut word_width = 0usize;
+        while let Some(&c) = chars.peek() {
+            if c.is_whitespace() {
+                break;
+            }
+            word_width += UnicodeWidthChar::width(c).unwrap_or(0);
+            chars.next();
+        }
+        if whitespace_width == 0 && word_width == 0 {
+            break; // end of text
+        }
+        saw_content = true;
+
+        let segment_width = whitespace_width + word_width;
+        if segment_width >= width {
+            // The whitespace-plus-word segment alone doesn't fit a row and
+            // hard-wraps across as many rows as it needs, the same way a
+            // single overlong word does.
             if current_width > 0 {
                 rows += 1;
             }
-            rows += word_width.div_ceil(width);
-            current_width = 0;
+            rows += segment_width / width;
+            current_width = segment_width % width;
             continue;
         }
-        let needed = if current_width == 0 {
-            word_width
-        } else {
-            current_width + 1 + word_width // +1 for the separating space
-        };
-        if needed <= width {
-            current_width = needed;
+        if current_width + segment_width <= width {
+            current_width += segment_width;
         } else {
             rows += 1;
-            current_width = word_width;
+            current_width = segment_width;
         }
     }
     if current_width > 0 {
         rows += 1;
     }
-    if !saw_word {
+    if !saw_content {
         rows = rows.max(1);
     }
     rows.max(1)
@@ -1758,6 +1780,18 @@ mod tests {
         let word = "x".repeat(40);
         let text = format!("{word} {word} {word}");
         assert_eq!(word_wrapped_row_count(&text, 78), 3);
+    }
+
+    #[test]
+    fn word_wrapped_row_count_preserves_whitespace_runs_instead_of_collapsing_them() {
+        // A 70-column word, ten literal spaces, and a short recovery word
+        // in a 78-column pane: `Wrap { trim: false }` preserves the space
+        // run, so the trailing "recover" (10 + 7 = 17 columns) can't share
+        // a row with the 70-column word (70 + 17 = 87 > 78) and wraps to a
+        // second row — collapsing the run to a single space would instead
+        // predict everything fits on one 78-column row (70 + 1 + 7 = 78).
+        let text = format!("{}{}recover", "x".repeat(70), " ".repeat(10));
+        assert_eq!(word_wrapped_row_count(&text, 78), 2);
     }
 
     #[test]

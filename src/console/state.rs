@@ -8,11 +8,16 @@ use super::editor::{EditOp, Editor};
 use super::intel::authored_signals;
 use crate::lua_controller;
 
-/// An upper bound on how far Help can scroll. The full contextual + Lua
-/// reference content is well under this many lines; capping here just
-/// guarantees `ScrollHelpDown` can never run away toward `u16::MAX` and
-/// leave the player pressing `Up` an impractical number of times to recover.
-const MAX_HELP_SCROLL: u16 = 60;
+/// An upper bound on how far Help can scroll. This exists only so
+/// `ScrollHelpDown` can never run away toward `u16::MAX` and leave the
+/// player pressing `Up` an impractical number of times to recover — the
+/// real, content- and frame-size-aware bound is `ui::help_max_scroll`,
+/// which `console::should_redraw` re-clamps `help_scroll` against after
+/// every scroll key, so this only needs to be comfortably above Help's
+/// actual line count (not tuned to match it), not an accurate ceiling in
+/// its own right. A ceiling tuned too close to that count silently caps
+/// scrolling below the real content height the next time Help grows.
+const MAX_HELP_SCROLL: u16 = 500;
 
 /// The result of the most recent `Msg::ValidateController`, or the fact
 /// that the current source hasn't been checked (or was edited since the

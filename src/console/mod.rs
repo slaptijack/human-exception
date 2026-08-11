@@ -616,4 +616,33 @@ mod tests {
             "Up should immediately move the stored offset, not appear stuck"
         );
     }
+
+    #[test]
+    fn help_can_scroll_all_the_way_to_its_final_content_at_eighty_columns() {
+        // At the supported 80x24 minimum, Help's full contextual + Lua
+        // reference content needs more scroll than the coarse internal
+        // MAX_HELP_SCROLL cap once alone allowed — that cap must stay
+        // comfortably above the real content height, not below it.
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test backend should initialize");
+        let mut state = AppState::new();
+        terminal
+            .draw(|frame| ui::draw(frame, &state))
+            .expect("initial draw should succeed");
+        for event in std::iter::once(press(KeyCode::F(1)))
+            .chain(std::iter::repeat_n(press(KeyCode::Down), 200))
+        {
+            if should_redraw(&mut state, event, (80, 24)) {
+                terminal
+                    .draw(|frame| ui::draw(frame, &state))
+                    .expect("redraw should succeed");
+            }
+        }
+
+        assert!(
+            buffer_contains(&terminal, "? undiscovered"),
+            "200 Down presses should be enough to reach Help's final legend \
+             line at 80x24, not get stuck short of it"
+        );
+    }
 }
