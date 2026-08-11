@@ -12,7 +12,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use unicode_width::UnicodeWidthChar;
+use unicode_segmentation::UnicodeSegmentation;
 
 pub const MIN_COLUMNS: u16 = 80;
 pub const MIN_ROWS: u16 = 24;
@@ -390,7 +390,7 @@ fn draw_controller_source(frame: &mut Frame, area: Rect, state: &AppState) {
     // that one `char` could under-reserve scroll room for a wider unit,
     // clipping it off the pane's edge entirely.
     let (cursor_start_col, cursor_glyph_width) = if cursor_col < cursor_line_chars.len() {
-        let (at_start, at_end) = cursor_grapheme_char_range(&cursor_line_chars, cursor_col);
+        let (at_start, at_end) = cursor_grapheme_char_range(cursor_line_text, cursor_col);
         let glyph: String = cursor_line_chars[at_start..at_end].iter().collect();
         (at_start, (glyph.as_str().cell_width() as usize).max(1))
     } else {
@@ -536,30 +536,36 @@ fn chars_to_skip_for_cell_offset(text: &str, cells: usize) -> usize {
     skip
 }
 
-/// The char-index range `[at_start, at_end)` of the grapheme cluster at
-/// `cursor_col` within `chars` — `cursor_col` itself, widened outward to
-/// include any neighboring zero-width characters (a combining mark, or a
-/// variation selector like U+FE0F that changes how the character before it
-/// renders). Real terminals — and ratatui's own `CellWidth` — render such a
-/// sequence as one visual unit; a standalone zero-width glyph on its own
-/// renders nothing at all, so treating each `char` as its own independent
-/// cell would either lose the cursor highlight entirely (if `cursor_col`
-/// lands on the zero-width character alone) or under-measure the unit's
-/// true rendered width (if it lands on the base character but a following
-/// modifier's contribution is ignored). Shared by [`cursor_line_spans`]
-/// (which highlighting group to render as one reversed unit) and
-/// `draw_controller_source` (how many display cells that unit actually
-/// costs when deciding whether it fits the visible viewport).
-fn cursor_grapheme_char_range(chars: &[char], cursor_col: usize) -> (usize, usize) {
-    let mut at_start = cursor_col;
-    while at_start > 0 && chars[at_start].width().unwrap_or(1) == 0 {
-        at_start -= 1;
+/// The char-index range `[at_start, at_end)` of the extended grapheme
+/// cluster (per Unicode's own segmentation rules, via `unicode-segmentation`
+/// — the same algorithm ratatui uses internally to lay out and measure
+/// text) containing `cursor_col` within `text`. Real terminals — and
+/// ratatui's own `CellWidth` — render a whole cluster as one visual unit,
+/// which is not always "a character plus its immediately adjacent
+/// zero-width neighbors": a zero-width joiner sequence (`👩‍💻`, where
+/// neither the woman nor the computer emoji is itself zero-width — only
+/// the joiner between them is) or a regional-indicator pair forming a flag
+/// (`🇺🇸`, where *neither* component is zero-width) both need real
+/// grapheme-boundary rules to group correctly. Treating each `char` as
+/// independent, or only merging zero-width neighbors, can split a cluster
+/// across a style boundary or under-measure its true rendered width.
+/// Shared by [`cursor_line_spans`] (which highlighting group to render as
+/// one reversed unit) and `draw_controller_source` (how many display cells
+/// that unit actually costs when deciding whether it fits the visible
+/// viewport).
+fn cursor_grapheme_char_range(text: &str, cursor_col: usize) -> (usize, usize) {
+    let mut char_idx = 0usize;
+    for grapheme in text.graphemes(true) {
+        let end = char_idx + grapheme.chars().count();
+        if cursor_col < end {
+            return (char_idx, end);
+        }
+        char_idx = end;
     }
-    let mut at_end = cursor_col + 1;
-    while at_end < chars.len() && chars[at_end].width().unwrap_or(1) == 0 {
-        at_end += 1;
-    }
-    (at_start, at_end)
+    // `cursor_col` is at or past the end of `text`; callers handle the
+    // "past the last character" case themselves, but fall back to a
+    // single-position range just in case.
+    (cursor_col, cursor_col + 1)
 }
 
 fn cursor_line_spans(text: &str, cursor_col: usize) -> Vec<Span<'static>> {
@@ -574,7 +580,7 @@ fn cursor_line_spans(text: &str, cursor_col: usize) -> Vec<Span<'static>> {
         return spans;
     }
 
-    let (at_start, at_end) = cursor_grapheme_char_range(&chars, cursor_col);
+    let (at_start, at_end) = cursor_grapheme_char_range(text, cursor_col);
 
     let before: String = chars[..at_start].iter().collect();
     let at: String = chars[at_start..at_end].iter().collect();
@@ -1951,15 +1957,45 @@ mod tests {
         // cluster ratatui renders as one unit — measuring only the `char`
         // at the cursor (whichever of the two it lands on) misses the
         // other codepoint's contribution to the unit's true display width.
-        let chars: Vec<char> = "a\u{2764}\u{fe0f}b".chars().collect();
-        assert_eq!(cursor_grapheme_char_range(&chars, 1), (1, 3));
-        assert_eq!(cursor_grapheme_char_range(&chars, 2), (1, 3));
+        let text = "a\u{2764}\u{fe0f}b";
+        let chars: Vec<char> = text.chars().collect();
+        assert_eq!(cursor_grapheme_char_range(text, 1), (1, 3));
+        assert_eq!(cursor_grapheme_char_range(text, 2), (1, 3));
         let glyph: String = chars[1..3].iter().collect();
         assert_eq!(
             glyph.as_str().cell_width(),
             2,
             "ratatui renders heart+VS16 as 2 cells, not 1"
         );
+    }
+
+    #[test]
+    fn cursor_grapheme_range_spans_a_zero_width_joiner_sequence() {
+        // "👩‍💻" is WOMAN (U+1F469) + ZWJ (U+200D) + COMPUTER (U+1F4BB) —
+        // one extended grapheme cluster, but neither the woman nor the
+        // computer emoji is itself zero-width (only the joiner between
+        // them is), so a heuristic that only merges *zero-width* neighbors
+        // stops right after the joiner and never reaches the trailing
+        // emoji.
+        let text = "a\u{1F469}\u{200D}\u{1F4BB}b";
+        let chars: Vec<char> = text.chars().collect();
+        assert_eq!(chars.len(), 5, "a, woman, zwj, computer, b");
+        assert_eq!(cursor_grapheme_char_range(text, 1), (1, 4));
+        assert_eq!(cursor_grapheme_char_range(text, 2), (1, 4));
+        assert_eq!(cursor_grapheme_char_range(text, 3), (1, 4));
+    }
+
+    #[test]
+    fn cursor_grapheme_range_spans_a_regional_indicator_flag_pair() {
+        // "🇺🇸" is REGIONAL INDICATOR SYMBOL LETTER U (U+1F1FA) + ... S
+        // (U+1F1F8) — two individually non-zero-width characters that form
+        // one flag grapheme together; nothing about either one alone marks
+        // them as needing to be grouped.
+        let text = "a\u{1F1FA}\u{1F1F8}b";
+        let chars: Vec<char> = text.chars().collect();
+        assert_eq!(chars.len(), 4, "a, U indicator, S indicator, b");
+        assert_eq!(cursor_grapheme_char_range(text, 1), (1, 3));
+        assert_eq!(cursor_grapheme_char_range(text, 2), (1, 3));
     }
 
     #[test]

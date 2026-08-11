@@ -16,6 +16,7 @@ use std::io;
 use std::panic::{self, PanicHookInfo};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use crossterm::cursor::Show;
 use crossterm::event::{
@@ -107,6 +108,7 @@ fn restore_terminal() -> io::Result<()> {
 fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
     let mut state = AppState::new();
     let mut frame_size = (0u16, 0u16);
+    let mut last_transition_press: TransitionKeyDebounce = None;
 
     terminal.draw(|frame| {
         let area = frame.area();
@@ -160,7 +162,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resu
 
     while !state.should_quit() {
         let event = term_event::read()?;
-        if should_redraw(&mut state, event, frame_size) {
+        if should_redraw(&mut state, event, frame_size, &mut last_transition_press) {
             terminal.draw(|frame| {
                 let area = frame.area();
                 frame_size = (area.width, area.height);
@@ -170,6 +172,50 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resu
     }
 
     Ok(())
+}
+
+/// The last (code, modifiers, timestamp) of an accepted-or-debounced press
+/// of one of [`is_repeat_untrustworthy`]'s keys — see
+/// [`TRANSITION_KEY_DEBOUNCE`]. Threaded through every [`should_redraw`]
+/// call site (the real event loop and each test that drives it) rather
+/// than stored on [`AppState`], since it's a terminal-input-timing detail,
+/// not session state.
+type TransitionKeyDebounce = Option<(KeyCode, KeyModifiers, Instant)>;
+
+/// How long after a `Repeat`-untrustworthy transition key is accepted
+/// before another press of the exact *same* key (same code and modifiers)
+/// is treated as a suspected terminal auto-repeat and dropped, rather than
+/// a second deliberate press. Chosen comfortably above a terminal's
+/// typical auto-repeat interval (often tens of milliseconds) but well
+/// under any gap a player would leave between two genuinely separate
+/// presses of the same key.
+const TRANSITION_KEY_DEBOUNCE: Duration = Duration::from_millis(150);
+
+/// Whether `code`'s `Repeat`/`Release` `KeyEventKind` can't be trusted to
+/// distinguish a held key from a fresh press, and so needs
+/// [`TRANSITION_KEY_DEBOUNCE`] instead. Per crossterm's own documentation,
+/// `REPORT_ALL_KEYS_AS_ESCAPE_CODES` is required for a *plain-text* key
+/// (no modifier, not a function key — those are already sent as escape
+/// sequences either way) to report anything but `Press`; `event_loop`
+/// deliberately doesn't request that flag (see its doc comment — it broke
+/// typing shifted symbol keys like `_`/`(`/`)` on a real terminal), so
+/// plain `y`/`n` can no longer rely on `key.kind` at all.
+///
+/// `Enter` and `Esc` are deliberately *not* included here despite having
+/// the same untrustworthy-`kind` problem: unlike `y`/`n` (single-shot
+/// dialog responses nothing legitimately needs to press twice in quick
+/// succession), a fast player pressing `Enter` twice in a row on purpose —
+/// e.g. drilling straight from Signals through Target into Controller — is
+/// a normal, encouraged interaction this console's own flow is built
+/// around, and a debounce can't tell that apart from a held key's
+/// auto-repeat. Between "occasionally lets a genuinely held `Enter`/`Esc`
+/// cascade through an extra transition" and "makes rapid deliberate
+/// double-`Enter` navigation randomly drop the second press," the former
+/// is the smaller cost — and is also the pre-existing baseline on any
+/// terminal that never reported a trustworthy `Repeat` kind for these keys
+/// in the first place, not a new regression.
+fn is_repeat_untrustworthy(code: KeyCode) -> bool {
+    matches!(code, KeyCode::Char('y') | KeyCode::Char('n'))
 }
 
 /// Applies a single terminal event to `state`, returning whether the frame
@@ -183,7 +229,12 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resu
 /// it replaces) depends on the frame size, not on any key event. It also
 /// clears layout-specific state (the narrow-mode secondary-pane toggle) so
 /// it can't leak across a change in available width.
-fn should_redraw(state: &mut AppState, event: Event, frame_size: (u16, u16)) -> bool {
+fn should_redraw(
+    state: &mut AppState,
+    event: Event,
+    frame_size: (u16, u16),
+    last_transition_press: &mut TransitionKeyDebounce,
+) -> bool {
     if matches!(event, Event::Resize(_, _)) {
         state.handle_resize();
         return true;
@@ -199,50 +250,63 @@ fn should_redraw(state: &mut AppState, event: Event, frame_size: (u16, u16)) -> 
     // character in Controller only ever applies once, making ordinary
     // editing through more than a token of source impractical.
     //
-    // `Enter`, `Esc`, `y`/`n`, and the function keys are excluded from
+    // `Enter`, `Esc`, the function keys, and `Ctrl+V` are excluded from
     // `Repeat` entirely, Press-only, because they trigger state
-    // *transitions* (Activate, Confirm/Cancel a dialog, Dismiss Help,
-    // navigate) rather than a repeatable edit: a terminal's repeat events
-    // fire on a timer independent of how fast the app already processed
-    // the initial press, so a held key can otherwise cascade through
-    // several unrelated meanings in a row — e.g. Activate in Signals opens
-    // Target, a later repeat Activates again there and opens Controller,
-    // and a further repeat inserts a newline into its now-visible source,
-    // all from one keypress the player thought they'd already released.
-    // `y`/`n` specifically confirm/cancel a dialog; a held one whose
-    // repeat arrives just after the dialog closes would otherwise type
-    // that letter straight into the controller it just reset or the quit
-    // it just cancelled. The cost is that holding `y`/`n` in Controller
-    // to type several of that letter no longer auto-repeats — a minor,
-    // easily-worked-around loss (press it again) next to that risk.
-    //
-    // `Ctrl+V` (the fallback validation binding, see `event::map`) is
-    // excluded the same way, but only that exact chord — plain `v` (no
-    // Ctrl) is an ordinary printable character that must keep repeating
-    // for typing. Each `Ctrl+V` repeat starts another `validate` worker
-    // (see `lua_controller::validate`'s `MAX_CONCURRENT_VALIDATIONS`
-    // cap), so a terminal that reports a held `Ctrl+V` as a stream of
-    // `Repeat` events could otherwise exhaust every validation slot from
-    // one keypress, the same class of risk transition keys exist for
-    // above.
+    // *transitions* (Activate, navigate, dismiss Help, or — for `Ctrl+V` —
+    // starting another `validate` worker, see `lua_controller::validate`'s
+    // `MAX_CONCURRENT_VALIDATIONS` cap) rather than a repeatable edit: a
+    // terminal's repeat events fire on a timer independent of how fast the
+    // app already processed the initial press, so a held key can otherwise
+    // cascade through several unrelated meanings in a row, or exhaust
+    // every validation slot from one keypress. This only helps on a
+    // terminal that actually reports `Repeat` for these — `event_loop`
+    // deliberately doesn't request `REPORT_ALL_KEYS_AS_ESCAPE_CODES` (see
+    // its doc comment: it broke typing shifted symbols like `_`/`(`/`)` on
+    // a real terminal), which crossterm's own docs say is required for a
+    // plain-text key like `Enter`/`Esc` to report anything but `Press` —
+    // but it's free protection when the terminal does provide it (e.g.
+    // Windows, which crossterm says always reports `kind`), so it stays.
     let is_ctrl_v = key.code == KeyCode::Char('v') && key.modifiers.contains(KeyModifiers::CONTROL);
     let kind_allowed = match key.kind {
         KeyEventKind::Press => true,
         KeyEventKind::Repeat => {
-            !is_ctrl_v
-                && !matches!(
-                    key.code,
-                    KeyCode::Enter
-                        | KeyCode::Esc
-                        | KeyCode::F(_)
-                        | KeyCode::Char('y')
-                        | KeyCode::Char('n')
-                )
+            !is_ctrl_v && !matches!(key.code, KeyCode::Enter | KeyCode::Esc | KeyCode::F(_))
         }
         KeyEventKind::Release => false,
     };
     if !kind_allowed {
         return false;
+    }
+
+    // Plain `y`/`n` get a second, stronger layer on top of the `kind`
+    // check above: a time-based debounce (see `is_repeat_untrustworthy`
+    // for why `key.kind` alone isn't enough for them specifically). A
+    // second press of the exact same key within `TRANSITION_KEY_DEBOUNCE`
+    // of the last one (accepted *or* itself debounced — the window keeps
+    // sliding forward for as long as presses keep arriving faster than
+    // that, modeling "still held") is treated as a suspected auto-repeat
+    // and dropped — closing the risk of a held `y`/`n` confirming or
+    // cancelling a dialog and then typing straight into the controller it
+    // just reset or the quit it just cancelled. `Enter`/`Esc` don't get
+    // this same treatment: unlike `y`/`n`, a fast player pressing `Enter`
+    // twice on purpose (e.g. drilling straight from Signals through Target
+    // into Controller) is normal, expected use a debounce can't tell apart
+    // from a held key's auto-repeat, so for those two the `kind`-based
+    // check above — best-effort, inert on a terminal that doesn't report
+    // it — is the only protection.
+    if is_repeat_untrustworthy(key.code) {
+        let now = Instant::now();
+        let debounced = matches!(
+            *last_transition_press,
+            Some((last_code, last_mods, last_time))
+                if last_code == key.code
+                    && last_mods == key.modifiers
+                    && now.duration_since(last_time) < TRANSITION_KEY_DEBOUNCE
+        );
+        *last_transition_press = Some((key.code, key.modifiers, now));
+        if debounced {
+            return false;
+        }
     }
 
     // Below the supported minimum, only the geometry warning and `Ctrl+Q`
@@ -311,13 +375,19 @@ mod tests {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("test backend should initialize");
         let mut state = AppState::new();
+        let mut last_transition_press: TransitionKeyDebounce = None;
 
         terminal
             .draw(|frame| ui::draw(frame, &state))
             .expect("initial draw should succeed");
 
         for event in events {
-            if should_redraw(&mut state, event.clone(), (width, height)) {
+            if should_redraw(
+                &mut state,
+                event.clone(),
+                (width, height),
+                &mut last_transition_press,
+            ) {
                 terminal
                     .draw(|frame| ui::draw(frame, &state))
                     .expect("redraw should succeed");
@@ -385,6 +455,7 @@ mod tests {
         .into_iter();
 
         let mut state = AppState::new();
+        let mut last_transition_press: TransitionKeyDebounce = None;
         terminal
             .draw(|frame| ui::draw(frame, &state))
             .expect("initial draw should succeed");
@@ -392,7 +463,7 @@ mod tests {
             let event = events
                 .next()
                 .expect("script should quit before running out");
-            should_redraw(&mut state, event, (120, 40));
+            should_redraw(&mut state, event, (120, 40), &mut last_transition_press);
         }
 
         assert!(state.should_quit());
@@ -472,13 +543,19 @@ mod tests {
         let backend = TestBackend::new(60, 20);
         let mut terminal = Terminal::new(backend).expect("test backend should initialize");
         let mut state = AppState::new();
+        let mut last_transition_press: TransitionKeyDebounce = None;
         terminal
             .draw(|frame| ui::draw(frame, &state))
             .expect("initial draw should succeed");
         assert!(buffer_contains(&terminal, "Terminal link degraded."));
 
         terminal.backend_mut().resize(120, 40);
-        if should_redraw(&mut state, Event::Resize(120, 40), (120, 40)) {
+        if should_redraw(
+            &mut state,
+            Event::Resize(120, 40),
+            (120, 40),
+            &mut last_transition_press,
+        ) {
             terminal
                 .draw(|frame| ui::draw(frame, &state))
                 .expect("redraw should succeed");
@@ -562,6 +639,35 @@ mod tests {
     }
 
     #[test]
+    fn a_held_n_does_not_leak_into_the_controller_after_cancelling_a_dialog() {
+        // A terminal reporting a held `n` as a stream of ordinary `Press`
+        // events (indistinguishable from separate presses once `key.kind`
+        // can't be trusted — see `is_repeat_untrustworthy`) must not let a
+        // second `n` arriving just after the reset dialog closes (F7,
+        // since the source is modified) get typed straight into the
+        // now-visible source.
+        let (state, _) = render(
+            120,
+            40,
+            &[
+                press(KeyCode::Enter),     // open Target
+                press(KeyCode::Enter),     // commit, opening Controller
+                press(KeyCode::Char('x')), // modify the controller
+                press(KeyCode::F(7)),      // open the reset confirmation
+                press(KeyCode::Char('n')), // cancel it
+                press(KeyCode::Char('n')), // must be debounced, not typed
+            ],
+        );
+
+        assert!(!state.reset_confirmation_pending());
+        assert_eq!(
+            state.controller_source(),
+            Some(format!("{}x", intel::STARTER_CONTROLLER)).as_deref(),
+            "the second, debounced n must not have been typed into the source"
+        );
+    }
+
+    #[test]
     fn a_key_release_event_does_not_edit_the_controller() {
         let (state, _) = render(
             120,
@@ -599,7 +705,13 @@ mod tests {
         let (mut state, _) = render(90, 30, &[press(KeyCode::F(8))]);
         assert!(state.narrow_secondary_visible());
 
-        should_redraw(&mut state, Event::Resize(90, 30), (90, 30));
+        let mut last_transition_press: TransitionKeyDebounce = None;
+        should_redraw(
+            &mut state,
+            Event::Resize(90, 30),
+            (90, 30),
+            &mut last_transition_press,
+        );
 
         assert!(!state.narrow_secondary_visible());
     }
@@ -607,8 +719,14 @@ mod tests {
     #[test]
     fn help_scroll_offset_stays_bounded_to_the_viewport_not_just_the_render() {
         let (mut state, _) = render(120, 40, &[press(KeyCode::F(1))]);
+        let mut last_transition_press: TransitionKeyDebounce = None;
         for _ in 0..100 {
-            should_redraw(&mut state, press(KeyCode::Down), (120, 40));
+            should_redraw(
+                &mut state,
+                press(KeyCode::Down),
+                (120, 40),
+                &mut last_transition_press,
+            );
         }
         let bound = state.help_scroll();
         assert!(
@@ -617,7 +735,12 @@ mod tests {
              not just the coarse MAX_HELP_SCROLL constant"
         );
 
-        should_redraw(&mut state, press(KeyCode::Up), (120, 40));
+        should_redraw(
+            &mut state,
+            press(KeyCode::Up),
+            (120, 40),
+            &mut last_transition_press,
+        );
 
         assert_eq!(
             state.help_scroll(),
@@ -635,13 +758,14 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).expect("test backend should initialize");
         let mut state = AppState::new();
+        let mut last_transition_press: TransitionKeyDebounce = None;
         terminal
             .draw(|frame| ui::draw(frame, &state))
             .expect("initial draw should succeed");
         for event in std::iter::once(press(KeyCode::F(1)))
             .chain(std::iter::repeat_n(press(KeyCode::Down), 200))
         {
-            if should_redraw(&mut state, event, (80, 24)) {
+            if should_redraw(&mut state, event, (80, 24), &mut last_transition_press) {
                 terminal
                     .draw(|frame| ui::draw(frame, &state))
                     .expect("redraw should succeed");

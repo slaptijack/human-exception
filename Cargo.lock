@@ -357,6 +357,7 @@ dependencies = [
  "crossterm",
  "mlua",
  "ratatui",
+ "unicode-segmentation",
  "unicode-width",
 ]
 

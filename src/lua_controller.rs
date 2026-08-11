@@ -438,7 +438,7 @@ fn install_deterministic_table_iteration(lua: &Lua) -> mlua::Result<()> {
     // it's observed, closing that gap without needing to intercept every
     // raw table assignment (which nothing in the sandboxed API can do).
     let key_history = lua.create_table()?;
-    let det_next = lua.create_function(
+    let raw_next = lua.create_function(
         move |lua, (table, key): (Table, Value)| -> mlua::Result<MultiValue> {
             let entries = sorted_table_entries(&table)?;
             if matches!(key, Value::Nil) {
@@ -475,6 +475,36 @@ fn install_deterministic_table_iteration(lua: &Lua) -> mlua::Result<()> {
             }
         },
     )?;
+    // Any error a Rust-implemented `create_function` closure raises (like
+    // `raw_next`'s "invalid key to 'next'" above) crosses into Lua wrapped
+    // in a full userdata, not a plain string — that's `mlua`'s own
+    // callback-error handling, not something specific to this override.
+    // Real Lua's `next` raises a genuine string, so `local ok, err =
+    // pcall(next, t, bogus_key); type(err)` must be `"string"` here too,
+    // not `"userdata"` — a script inspecting, concatenating, or forwarding
+    // the message would otherwise fail or branch differently than it would
+    // against real Lua. Wrapping `raw_next` in this small Lua-level
+    // `pcall` + `tostring` + re-`error` unwraps that userdata back into a
+    // plain string *before* it ever reaches a script's own `pcall`,
+    // without changing behavior on the success path (every real return
+    // value is repacked and passed through unchanged).
+    let det_next: Function = lua
+        .load(
+            r#"
+            return function(raw_next)
+                return function(...)
+                    local results = table.pack(pcall(raw_next, ...))
+                    if not results[1] then
+                        error(tostring(results[2]), 0)
+                    end
+                    return table.unpack(results, 2, results.n)
+                end
+            end
+        "#,
+        )
+        .set_name("next_error_unwrap_factory")
+        .eval::<Function>()?
+        .call(raw_next)?;
 
     // A tiny Lua-level trampoline used to invoke a table's `__pairs` value
     // through Lua's own call operator rather than Rust matching on
@@ -1358,6 +1388,24 @@ mod tests {
         let source = r#"
             local ok = pcall(next, {b = 1}, "a")
             assert(not ok, "next({b = 1}, 'a') should raise 'invalid key'")
+            function on_tick(observation) return "wait" end
+        "#;
+        assert!(validate_locked(source).is_ok());
+    }
+
+    #[test]
+    fn next_invalid_key_error_is_a_lua_string_not_userdata() {
+        // A Rust-implemented callback's `Err(...)` always crosses into Lua
+        // wrapped in a full userdata (`mlua`'s own callback-error
+        // handling), but real Lua's `next` raises a genuine string — a
+        // script inspecting, concatenating, or forwarding the caught
+        // message needs `type(err) == "string"` to work the same way it
+        // would against real Lua.
+        let source = r#"
+            local ok, err = pcall(next, {b = 1}, "a")
+            assert(not ok, "expected next to raise")
+            assert(type(err) == "string", "type(err) was " .. type(err))
+            assert(err:find("invalid key", 1, true) ~= nil, err)
             function on_tick(observation) return "wait" end
         "#;
         assert!(validate_locked(source).is_ok());
