@@ -92,7 +92,79 @@ fn sandboxed_lua() -> Lua {
             "deterministic tostring install should not fail: {err}"
         );
     }
+    if let Err(err) = install_deterministic_string_format(&lua) {
+        debug_assert!(
+            false,
+            "deterministic string.format install should not fail: {err}"
+        );
+    }
     lua
+}
+
+/// Overrides `string.format` (which also covers `s:format(...)` method
+/// syntax, since both resolve to the same `string` table entry) to reject
+/// a format string containing a `%p` conversion. Lua 5.4 added `%p` to
+/// print a value's raw process pointer — a second, independent way to leak
+/// the same nondeterministic address information [`install_deterministic_tostring`]
+/// closes for the default `tostring` representation, but reachable even
+/// after that fix since `string.format` never calls the (now-overridden)
+/// global `tostring` internally. Unlike `tostring`'s output, `%p`'s
+/// expansion can appear anywhere inside an otherwise arbitrary formatted
+/// string, so there's no reliable output pattern to normalize after the
+/// fact; refusing the call outright (like `dofile`/`loadfile`/`print`
+/// before it) is the safe option.
+fn install_deterministic_string_format(lua: &Lua) -> mlua::Result<()> {
+    let string_lib: Table = lua.globals().get("string")?;
+    let real_format: Function = string_lib.get("format")?;
+    let det_format = lua.create_function(
+        move |_, args: MultiValue| -> mlua::Result<mlua::LuaString> {
+            let mut iter = args.iter();
+            if let Some(Value::String(fmt)) = iter.next()
+                && format_string_uses_pointer_specifier(&fmt.to_str()?)
+            {
+                return Err(mlua::Error::RuntimeError(
+                    "string.format: '%p' is not available (it would expose a process memory \
+                 address, which is nondeterministic)"
+                        .to_string(),
+                ));
+            }
+            real_format.call(args)
+        },
+    )?;
+    string_lib.set("format", det_format)?;
+    Ok(())
+}
+
+/// Whether `fmt` contains a genuine `%p` conversion specifier (as opposed
+/// to a `%%p`, which is an escaped literal `%` followed by the letter
+/// `p`). Handles the usual printf-style flag/width/precision characters
+/// between `%` and the conversion letter (e.g. `%-10p`).
+fn format_string_uses_pointer_specifier(fmt: &str) -> bool {
+    let bytes = fmt.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'%' {
+            i += 1;
+            continue;
+        }
+        i += 1;
+        if i >= bytes.len() {
+            break;
+        }
+        if bytes[i] == b'%' {
+            i += 1;
+            continue;
+        }
+        while i < bytes.len() && matches!(bytes[i], b'-' | b'+' | b' ' | b'#' | b'0'..=b'9' | b'.')
+        {
+            i += 1;
+        }
+        if i < bytes.len() && bytes[i] == b'p' {
+            return true;
+        }
+        i += 1;
+    }
+    false
 }
 
 /// Overrides the global `tostring` so the default (no `__tostring`
@@ -702,6 +774,32 @@ mod tests {
             assert(tostring(labeled) == "named", tostring(labeled))
             assert(tostring(42) == "42")
             assert(tostring(true) == "true")
+            function on_tick(observation) return "wait" end
+        "#;
+        assert!(validate(source).is_ok());
+    }
+
+    #[test]
+    fn string_format_rejects_a_pointer_specifier() {
+        for source in [
+            "string.format('%p', {})",
+            "string.format('addr=%p!', {})",
+            "('%p'):format({})",
+            "string.format('%-10p', print)",
+        ] {
+            let err = validate(source).unwrap_err();
+            assert!(
+                matches!(err, ControllerError::ScriptInvalid(_)),
+                "{source} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn string_format_still_works_for_an_escaped_percent_followed_by_p() {
+        let source = r#"
+            assert(string.format("%%p") == "%p")
+            assert(string.format("%d", 42) == "42")
             function on_tick(observation) return "wait" end
         "#;
         assert!(validate(source).is_ok());

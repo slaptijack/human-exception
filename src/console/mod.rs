@@ -19,8 +19,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossterm::cursor::Show;
 use crossterm::event::{
-    self as term_event, Event, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    self as term_event, Event, KeyCode, KeyEventKind, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -170,11 +170,28 @@ fn should_redraw(state: &mut AppState, event: Event, frame_size: (u16, u16)) -> 
         return false;
     };
     // `Repeat` (a terminal reporting a key still held down) is treated the
-    // same as `Press`: without it, holding an arrow key, Backspace, or a
-    // printable character in Controller only ever applies once, making
-    // ordinary navigation or deletion through more than a token of source
-    // impractical. Only `Release` is ignored.
-    if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+    // same as `Press` for keys whose meaning can't change out from under a
+    // held key: typing, deleting, and moving the cursor or a selection.
+    // Without that, holding an arrow key, Backspace, or a printable
+    // character in Controller only ever applies once, making ordinary
+    // editing through more than a token of source impractical.
+    //
+    // `Enter`, `Esc`, and the function keys are excluded from `Repeat`
+    // entirely, Press-only, because they trigger state *transitions*
+    // (Activate, Confirm/Cancel a dialog, Dismiss Help, navigate) rather
+    // than a repeatable edit: a terminal's repeat events fire on a timer
+    // independent of how fast the app already processed the initial
+    // press, so a held `Enter` can otherwise cascade through several
+    // unrelated meanings in a row — e.g. Activate in Signals opens
+    // Target, a later repeat Activates again there and opens Controller,
+    // and a further repeat inserts a newline into its now-visible source,
+    // all from one keypress the player thought they'd already released.
+    let kind_allowed = match key.kind {
+        KeyEventKind::Press => true,
+        KeyEventKind::Repeat => !matches!(key.code, KeyCode::Enter | KeyCode::Esc | KeyCode::F(_)),
+        KeyEventKind::Release => false,
+    };
+    if !kind_allowed {
         return false;
     }
 
@@ -432,6 +449,27 @@ mod tests {
             Some(format!("{}xx", intel::STARTER_CONTROLLER).as_str()),
             "held-key Repeat events should insert just like Press, not be ignored"
         );
+    }
+
+    #[test]
+    fn a_held_enter_key_does_not_cascade_through_activate_and_newline() {
+        // Reproduces the exact scenario a terminal-generated Repeat stream
+        // can produce: a Press that opens Target, then Repeat events that
+        // arrive after the app already moved on, which must not go on to
+        // Activate again (committing and opening Controller) or insert a
+        // newline into the now-visible source.
+        let (state, _) = render(
+            120,
+            40,
+            &[
+                press(KeyCode::Enter),  // inspect the signal, opening Target
+                repeat(KeyCode::Enter), // must NOT Activate again
+                repeat(KeyCode::Enter), // must NOT insert a newline either
+            ],
+        );
+
+        assert_eq!(state.current_view(), View::Target);
+        assert_eq!(state.working_set(), None);
     }
 
     #[test]
