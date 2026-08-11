@@ -76,6 +76,15 @@ const SANDBOX_RANDOM_SEED: i64 = 1;
 /// randomness involved at all, just a different build target. Nothing in
 /// the on_tick contract needs binary packing, so removing them avoids
 /// needing to validate every format string that reaches them instead.
+/// `string.dump` is removed for the same reason: it serializes a Lua
+/// function to platform-specific bytecode, leaking the same kind of
+/// build-dependent native layout information. `collectgarbage` is removed
+/// too — beyond manual GC control nothing in the on_tick contract needs,
+/// its `"count"` query reports the Lua state's live memory in a way that
+/// differs between [`validate`]'s hooked state and [`run`]'s unhooked one,
+/// letting a script detect which one it's executing under and behave
+/// differently — the same "same source, same behavior" guarantee the rest
+/// of this sandbox exists to uphold.
 fn sandboxed_lua() -> Lua {
     let libs = StdLib::TABLE | StdLib::STRING | StdLib::MATH;
     let lua = Lua::new_with(libs, LuaOptions::default())
@@ -85,10 +94,12 @@ fn sandboxed_lua() -> Lua {
     let _ = globals.set("loadfile", Value::Nil);
     let _ = globals.set("load", Value::Nil);
     let _ = globals.set("print", Value::Nil);
+    let _ = globals.set("collectgarbage", Value::Nil);
     if let Ok(string_lib) = globals.get::<Table>("string") {
         let _ = string_lib.set("pack", Value::Nil);
         let _ = string_lib.set("unpack", Value::Nil);
         let _ = string_lib.set("packsize", Value::Nil);
+        let _ = string_lib.set("dump", Value::Nil);
     }
     let _ = lua.set_memory_limit(SANDBOX_MEMORY_LIMIT_BYTES);
     if let Ok(math) = globals.get::<Table>("math")
@@ -265,8 +276,28 @@ fn install_deterministic_tostring(lua: &Lua) -> mlua::Result<()> {
                 value,
                 Value::Table(_) | Value::Function(_) | Value::Thread(_) | Value::UserData(_)
             );
+            // Lua's standard `setmetatable` only ever attaches to tables, so
+            // a table is the only reference type that can carry a custom
+            // `__tostring` here; a table that has one produces its own,
+            // script-controlled output that must pass through untouched,
+            // never searched for the address marker below (a custom
+            // `__tostring` is free to legitimately contain literal text like
+            // "): 0x" that isn't an address at all).
+            let has_custom_tostring = if let Value::Table(table) = &value {
+                table
+                    .metatable()
+                    .map(|metatable| {
+                        !matches!(
+                            metatable.raw_get::<Value>("__tostring"),
+                            Ok(Value::Nil) | Err(_)
+                        )
+                    })
+                    .unwrap_or(false)
+            } else {
+                false
+            };
             let text: mlua::LuaString = real_tostring.call(value)?;
-            if !is_reference_type {
+            if !is_reference_type || has_custom_tostring {
                 return Ok(text);
             }
             // Lua strings are arbitrary byte sequences, not necessarily
@@ -363,7 +394,12 @@ fn install_deterministic_table_iteration(lua: &Lua) -> mlua::Result<()> {
         // than silently falling through to deterministic iteration as if
         // no metamethod existed at all.
         if let Some(metatable) = table.metatable() {
-            let pairs_field: Value = metatable.get("__pairs")?;
+            // A raw lookup, not `Table::get`: the latter would follow the
+            // metatable's own `__index` chain (if it has one) and could
+            // pick up an *inherited* `__pairs` a script never actually set
+            // on this table's own metatable — real Lua only ever looks at
+            // the metatable's raw `__pairs` entry.
+            let pairs_field: Value = metatable.raw_get("__pairs")?;
             if !matches!(pairs_field, Value::Nil) {
                 let Value::Function(pairs_mm) = pairs_field else {
                     return Err(mlua::Error::RuntimeError(format!(
@@ -687,6 +723,30 @@ const EXECUTION_ALLOWANCE_MESSAGE: &str =
 /// wall-clock timeout enforced from outside the Lua VM.
 const VALIDATE_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// A ceiling on how long a diagnostic message from a failed [`validate`]
+/// crosses the background thread's channel and ends up stored (e.g. in the
+/// console's `AppState`, re-rendered on every frame). Real Lua load/runtime
+/// errors are always short; this exists so a script that deliberately raises
+/// a multi-megabyte string (`error(string.rep("x", 5_000_000))`) can't turn
+/// a validation failure into a UI stall, even though `validate` itself still
+/// finishes well within [`VALIDATE_TIMEOUT`].
+const MAX_DIAGNOSTIC_MESSAGE_LEN: usize = 4096;
+
+/// Truncates `message` to [`MAX_DIAGNOSTIC_MESSAGE_LEN`] bytes (on a char
+/// boundary) with a trailing marker, leaving shorter messages untouched.
+fn truncate_diagnostic_message(message: String) -> String {
+    if message.len() <= MAX_DIAGNOSTIC_MESSAGE_LEN {
+        return message;
+    }
+    let mut end = MAX_DIAGNOSTIC_MESSAGE_LEN;
+    while end > 0 && !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut truncated = message[..end].to_string();
+    truncated.push_str(" ... (truncated)");
+    truncated
+}
+
 /// What a background [`validate`] thread reports back, kept `Send` (unlike
 /// `ControllerError`/`mlua::Error`, which aren't by default) so it can cross
 /// an `mpsc` channel.
@@ -768,7 +828,9 @@ pub fn validate(source: &str) -> Result<(), ControllerError> {
         let outcome = match load_controller(&lua, &source) {
             Ok(()) => ValidationOutcome::Ok,
             Err(ControllerError::MissingCallback) => ValidationOutcome::MissingCallback,
-            Err(ControllerError::ScriptInvalid(err)) => ValidationOutcome::Invalid(err.to_string()),
+            Err(ControllerError::ScriptInvalid(err)) => {
+                ValidationOutcome::Invalid(truncate_diagnostic_message(err.to_string()))
+            }
             Err(_) => ValidationOutcome::Invalid(
                 "controller failed to load for an unexpected reason".to_string(),
             ),
@@ -1221,6 +1283,72 @@ mod tests {
             function on_tick(observation) return "wait" end
         "#;
         assert!(validate(source).is_ok());
+    }
+
+    #[test]
+    fn tostring_does_not_mangle_custom_tostring_output_that_contains_the_address_marker() {
+        // A custom `__tostring` is free to legitimately produce text
+        // containing "): 0x" that isn't an address at all; the override
+        // must trust it completely rather than searching its output for
+        // the same marker it looks for in the *default* representation.
+        let source = r#"
+            local widget = setmetatable({}, {
+                __tostring = function(_) return "widget(id=7): 0x1 of stock" end,
+            })
+            local text = tostring(widget)
+            assert(text == "widget(id=7): 0x1 of stock", text)
+            function on_tick(observation) return "wait" end
+        "#;
+        assert!(validate(source).is_ok());
+    }
+
+    #[test]
+    fn pairs_ignores_an_inherited_pairs_metamethod() {
+        // `__pairs` set on a *parent* metatable (reached through the
+        // metatable's own `__index`) must not be picked up — real Lua only
+        // ever looks at the table's own metatable's raw `__pairs` entry.
+        let source = r#"
+            local base = {__pairs = function(self)
+                error("inherited __pairs must not run")
+            end}
+            local mt = setmetatable({}, {__index = base})
+            local t = setmetatable({a = 1}, mt)
+            local seen = {}
+            for k, v in pairs(t) do
+                seen[#seen + 1] = k .. "=" .. v
+            end
+            assert(#seen == 1 and seen[1] == "a=1", table.concat(seen, ","))
+            function on_tick(observation) return "wait" end
+        "#;
+        assert!(validate(source).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_a_script_using_string_dump() {
+        let err = validate("string.dump(function() end)").unwrap_err();
+        assert!(matches!(err, ControllerError::ScriptInvalid(_)));
+    }
+
+    #[test]
+    fn validate_rejects_a_script_using_collectgarbage() {
+        let err = validate("collectgarbage('count')").unwrap_err();
+        assert!(matches!(err, ControllerError::ScriptInvalid(_)));
+    }
+
+    #[test]
+    fn validate_truncates_an_excessively_large_diagnostic_message() {
+        let source = "error(string.rep('x', 5000000))";
+        let err = validate(source).unwrap_err();
+        let ControllerError::ScriptInvalid(inner) = err else {
+            panic!("expected ScriptInvalid, got {err}");
+        };
+        let message = inner.to_string();
+        assert!(
+            message.len() < 5_000_000,
+            "diagnostic message should be truncated, was {} bytes",
+            message.len()
+        );
+        assert!(message.ends_with("(truncated)"), "{message}");
     }
 
     #[test]

@@ -128,7 +128,21 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resu
     if supports_keyboard_enhancement().unwrap_or(false)
         && execute!(
             io::stdout(),
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    // Required (on Unix; Windows always reports it) for
+                    // `KeyEvent.kind` to ever be `Repeat`/`Release` at all —
+                    // without it every autorepeated or released key still
+                    // arrives as plain `Press`, silently defeating the
+                    // held-key cascade guard in `should_redraw` below.
+                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                    // `REPORT_EVENT_TYPES` alone only covers keys already
+                    // sent as CSI-u sequences; plain-text keys like `Enter`
+                    // and `y`/`n` — exactly the transition keys that guard
+                    // cares about — need this too to report `Repeat`/`Release`
+                    // instead of only ever `Press`.
+                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+            )
         )
         .is_ok()
     {

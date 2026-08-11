@@ -141,10 +141,15 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
                 candidates.push(format!(
                     "MESH: DEGRADED   {signals}   {controller}   {working}"
                 ));
+                // Drop the signals count before dropping controller status —
+                // a modified controller can be lost, so it outranks a count
+                // the player can always re-derive by returning to Signals.
+                candidates.push(format!("MESH: DEGRADED   {controller}   {working}"));
             }
             candidates.push(format!("MESH: DEGRADED   {signals}   {working}"));
             if let Some(controller) = &controller_field {
                 candidates.push(format!("{signals}   {controller}   {working}"));
+                candidates.push(format!("{controller}   {working}"));
             }
             candidates.push(format!("{signals}   {working}"));
             candidates
@@ -958,6 +963,12 @@ fn help_lines(state: &AppState) -> Vec<Line<'static>> {
     lines.push(Line::from(
         "not available (it would undo that determinism if a script called it).",
     ));
+    lines.push(Line::from(
+        "string.pack, unpack, packsize, and dump are also not available (they",
+    ));
+    lines.push(Line::from(
+        "expose native platform layout); nor is collectgarbage.",
+    ));
     lines.push(Line::from(""));
     lines.push(Line::from(
         "observation.drone.x / .y      the drone's current position",
@@ -1531,6 +1542,28 @@ mod tests {
         assert!(
             buffer_contains(&terminal, "CONTROLLER: modified"),
             "a session-only edit at risk of being lost must stay visible from Signals too"
+        );
+    }
+
+    #[test]
+    fn controller_status_stays_visible_from_signals_at_eighty_columns() {
+        use super::super::state::Msg;
+        use super::super::state::View;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.apply(Msg::EditController(super::super::editor::EditOp::Insert(
+            'x',
+        )));
+        state.apply(Msg::Navigate(View::Signals));
+        let terminal = render(80, 30, &state);
+
+        assert!(
+            buffer_contains(&terminal, "CONTROLLER: modified"),
+            "at the narrow 80-column width, a candidate that drops the \
+             signals count instead of controller status should be offered \
+             before one that drops controller status entirely"
         );
     }
 
