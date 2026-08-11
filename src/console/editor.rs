@@ -23,20 +23,6 @@ pub enum EditOp {
     PageDown,
 }
 
-impl EditOp {
-    /// Whether this operation changes the source text, as opposed to only
-    /// moving the cursor. Callers use this to decide whether a prior
-    /// validation result is still trustworthy: moving the cursor after a
-    /// successful or failed check shouldn't silently clear the READY/error
-    /// banner, since the source it describes hasn't changed.
-    pub fn is_mutating(self) -> bool {
-        matches!(
-            self,
-            EditOp::Insert(_) | EditOp::Newline | EditOp::Backspace | EditOp::DeleteForward
-        )
-    }
-}
-
 /// How many lines a `PageUp`/`PageDown` moves the cursor by. Not tied to any
 /// real viewport height (the document model doesn't know one); it's simply
 /// a fixed jump big enough to be useful for scrolling through a short
@@ -85,20 +71,56 @@ impl Editor {
         (line, col)
     }
 
-    pub fn apply(&mut self, op: EditOp) {
+    /// Applies `op`, returning whether it actually changed `source` (as
+    /// opposed to only moving the cursor, or being a boundary edit that
+    /// had nothing to do — `Backspace` at the start of the document,
+    /// `DeleteForward` at its end). Callers use this to decide whether a
+    /// prior validation result is still trustworthy: an edit that left the
+    /// source untouched shouldn't silently clear the READY/error banner.
+    pub fn apply(&mut self, op: EditOp) -> bool {
         match op {
-            EditOp::Insert(c) => self.insert_char(c),
-            EditOp::Newline => self.insert_newline(),
+            EditOp::Insert(c) => {
+                self.insert_char(c);
+                true
+            }
+            EditOp::Newline => {
+                self.insert_newline();
+                true
+            }
             EditOp::Backspace => self.backspace(),
             EditOp::DeleteForward => self.delete_forward(),
-            EditOp::MoveLeft => self.move_left(),
-            EditOp::MoveRight => self.move_right(),
-            EditOp::MoveUp => self.move_up(),
-            EditOp::MoveDown => self.move_down(),
-            EditOp::MoveLineStart => self.move_line_start(),
-            EditOp::MoveLineEnd => self.move_line_end(),
-            EditOp::PageUp => self.move_page_up(),
-            EditOp::PageDown => self.move_page_down(),
+            EditOp::MoveLeft => {
+                self.move_left();
+                false
+            }
+            EditOp::MoveRight => {
+                self.move_right();
+                false
+            }
+            EditOp::MoveUp => {
+                self.move_up();
+                false
+            }
+            EditOp::MoveDown => {
+                self.move_down();
+                false
+            }
+            EditOp::MoveLineStart => {
+                self.move_line_start();
+                false
+            }
+            EditOp::MoveLineEnd => {
+                self.move_line_end();
+                false
+            }
+            EditOp::PageUp => {
+                self.move_page_up();
+                false
+            }
+            EditOp::PageDown => {
+                self.move_page_down();
+                false
+            }
         }
     }
 
@@ -112,23 +134,29 @@ impl Editor {
         self.insert_char('\n');
     }
 
-    pub fn backspace(&mut self) {
+    /// Deletes the character before the cursor, returning `false` (a
+    /// no-op) at the start of the document.
+    pub fn backspace(&mut self) -> bool {
         if self.cursor == 0 {
-            return;
+            return false;
         }
         let prev = self.prev_char_boundary(self.cursor);
         self.source.replace_range(prev..self.cursor, "");
         self.cursor = prev;
         self.sync_preferred_col();
+        true
     }
 
-    pub fn delete_forward(&mut self) {
+    /// Deletes the character at the cursor, returning `false` (a no-op) at
+    /// the end of the document.
+    pub fn delete_forward(&mut self) -> bool {
         if self.cursor == self.source.len() {
-            return;
+            return false;
         }
         let next = self.next_char_boundary(self.cursor);
         self.source.replace_range(self.cursor..next, "");
         self.sync_preferred_col();
+        true
     }
 
     pub fn move_left(&mut self) {

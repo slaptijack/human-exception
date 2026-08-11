@@ -176,19 +176,28 @@ fn should_redraw(state: &mut AppState, event: Event, frame_size: (u16, u16)) -> 
     // character in Controller only ever applies once, making ordinary
     // editing through more than a token of source impractical.
     //
-    // `Enter`, `Esc`, and the function keys are excluded from `Repeat`
-    // entirely, Press-only, because they trigger state *transitions*
-    // (Activate, Confirm/Cancel a dialog, Dismiss Help, navigate) rather
-    // than a repeatable edit: a terminal's repeat events fire on a timer
-    // independent of how fast the app already processed the initial
-    // press, so a held `Enter` can otherwise cascade through several
-    // unrelated meanings in a row — e.g. Activate in Signals opens
+    // `Enter`, `Esc`, `y`/`n`, and the function keys are excluded from
+    // `Repeat` entirely, Press-only, because they trigger state
+    // *transitions* (Activate, Confirm/Cancel a dialog, Dismiss Help,
+    // navigate) rather than a repeatable edit: a terminal's repeat events
+    // fire on a timer independent of how fast the app already processed
+    // the initial press, so a held key can otherwise cascade through
+    // several unrelated meanings in a row — e.g. Activate in Signals opens
     // Target, a later repeat Activates again there and opens Controller,
     // and a further repeat inserts a newline into its now-visible source,
     // all from one keypress the player thought they'd already released.
+    // `y`/`n` specifically confirm/cancel a dialog; a held one whose
+    // repeat arrives just after the dialog closes would otherwise type
+    // that letter straight into the controller it just reset or the quit
+    // it just cancelled. The cost is that holding `y`/`n` in Controller
+    // to type several of that letter no longer auto-repeats — a minor,
+    // easily-worked-around loss (press it again) next to that risk.
     let kind_allowed = match key.kind {
         KeyEventKind::Press => true,
-        KeyEventKind::Repeat => !matches!(key.code, KeyCode::Enter | KeyCode::Esc | KeyCode::F(_)),
+        KeyEventKind::Repeat => !matches!(
+            key.code,
+            KeyCode::Enter | KeyCode::Esc | KeyCode::F(_) | KeyCode::Char('y') | KeyCode::Char('n')
+        ),
         KeyEventKind::Release => false,
     };
     if !kind_allowed {

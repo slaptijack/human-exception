@@ -136,39 +136,51 @@ fn install_deterministic_string_format(lua: &Lua) -> mlua::Result<()> {
             let Some(fmt_value) = iter.next() else {
                 return real_format.call(MultiValue::new());
             };
-            if let Value::String(fmt) = &fmt_value
-                && format_string_uses_pointer_specifier(&fmt.as_bytes())
-            {
+            let Value::String(fmt) = &fmt_value else {
+                // Not a string at all; let `real_format` raise its own
+                // type error rather than second-guessing it here.
+                let mut rebuilt = MultiValue::new();
+                rebuilt.push_back(fmt_value.clone());
+                for value in iter {
+                    rebuilt.push_back(value);
+                }
+                return real_format.call(rebuilt);
+            };
+            let conversions = format_argument_conversions(&fmt.as_bytes());
+            if conversions.contains(&b'p') {
                 return Err(mlua::Error::RuntimeError(
                     "string.format: '%p' is not available (it would expose a process memory \
                  address, which is nondeterministic)"
                         .to_string(),
                 ));
             }
-            // `%s`/`%q` format a value via Lua's own C-level `tolstring`,
+            // `%s` formats a value via Lua's own C-level `tolstring`,
             // which respects a value's `__tostring` metamethod but not
             // our *overridden* global `tostring` — so a table or function
             // argument without one would still get the real, nondeterministic
             // "type: 0xADDRESS" text straight from `%s`, independent of the
-            // `%p` case above. Route any table/function/thread/userdata
-            // argument through the deterministic `tostring` first so
-            // `real_format` only ever sees an ordinary string for it,
-            // regardless of which conversion the format string uses it
-            // with — a specifier that expected a number would already have
-            // rejected the original table/function argument too, so this
-            // doesn't change any currently-succeeding case, only the ones
-            // that were leaking an address.
+            // `%p` case above. Route only the arguments a `%s` conversion
+            // will actually consume through the deterministic `tostring`
+            // first, matched up positionally with `conversions`; unlike
+            // `%s`, `%q` has no default-representation fallback of its own
+            // at all (real Lua rejects a table/function argument to `%q`
+            // outright, since it has no literal form), so leaving those
+            // arguments untouched preserves that rejection instead of
+            // silently succeeding with a normalized placeholder.
             let mut rebuilt = MultiValue::new();
-            rebuilt.push_back(fmt_value);
-            for value in iter {
-                let value = match value {
-                    Value::Table(_)
-                    | Value::Function(_)
-                    | Value::Thread(_)
-                    | Value::UserData(_) => {
-                        Value::String(det_tostring.call::<mlua::LuaString>(value)?)
-                    }
-                    other => other,
+            rebuilt.push_back(fmt_value.clone());
+            for (index, value) in iter.enumerate() {
+                let value = if conversions.get(index) == Some(&b's')
+                    && matches!(
+                        value,
+                        Value::Table(_)
+                            | Value::Function(_)
+                            | Value::Thread(_)
+                            | Value::UserData(_)
+                    ) {
+                    Value::String(det_tostring.call::<mlua::LuaString>(value)?)
+                } else {
+                    value
                 };
                 rebuilt.push_back(value);
             }
@@ -179,38 +191,38 @@ fn install_deterministic_string_format(lua: &Lua) -> mlua::Result<()> {
     Ok(())
 }
 
-/// Whether `fmt` contains a genuine `%p` conversion specifier (as opposed
-/// to a `%%p`, which is an escaped literal `%` followed by the letter
-/// `p`). Handles the usual printf-style flag/width/precision characters
-/// between `%` and the conversion letter (e.g. `%-10p`). Operates on raw
-/// bytes, not `&str`, since Lua strings (including format strings) are
-/// arbitrary byte sequences, not necessarily valid UTF-8.
-fn format_string_uses_pointer_specifier(fmt: &[u8]) -> bool {
-    let bytes = fmt;
+/// The conversion character (`s`, `d`, `q`, `p`, ...) for each
+/// argument-consuming specifier in `fmt`, in order — an escaped `%%`
+/// consumes no argument and contributes nothing to this list. Handles the
+/// usual printf-style flag/width/precision characters between `%` and the
+/// conversion letter (e.g. `%-10s`). Operates on raw bytes, not `&str`,
+/// since Lua strings (including format strings) are arbitrary byte
+/// sequences, not necessarily valid UTF-8.
+fn format_argument_conversions(fmt: &[u8]) -> Vec<u8> {
+    let mut conversions = Vec::new();
     let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] != b'%' {
+    while i < fmt.len() {
+        if fmt[i] != b'%' {
             i += 1;
             continue;
         }
         i += 1;
-        if i >= bytes.len() {
+        if i >= fmt.len() {
             break;
         }
-        if bytes[i] == b'%' {
+        if fmt[i] == b'%' {
             i += 1;
             continue;
         }
-        while i < bytes.len() && matches!(bytes[i], b'-' | b'+' | b' ' | b'#' | b'0'..=b'9' | b'.')
-        {
+        while i < fmt.len() && matches!(fmt[i], b'-' | b'+' | b' ' | b'#' | b'0'..=b'9' | b'.') {
             i += 1;
         }
-        if i < bytes.len() && bytes[i] == b'p' {
-            return true;
+        if i < fmt.len() {
+            conversions.push(fmt[i]);
+            i += 1;
         }
-        i += 1;
     }
-    false
+    conversions
 }
 
 /// Overrides the global `tostring` so the default (no `__tostring`
@@ -229,7 +241,20 @@ fn install_deterministic_tostring(lua: &Lua) -> mlua::Result<()> {
     let real_tostring: Function = globals.get("tostring")?;
     let det_tostring =
         lua.create_function(move |lua, value: Value| -> mlua::Result<mlua::LuaString> {
+            // Only a table/function/thread/userdata's *default* (no
+            // `__tostring`) representation is address-bearing; gate on the
+            // input value's type, not just the output text, so an ordinary
+            // string that merely *looks* like one (`tostring("table:
+            // 0xabc")`, a string literal, must come back unchanged) is
+            // never mistaken for it.
+            let is_reference_type = matches!(
+                value,
+                Value::Table(_) | Value::Function(_) | Value::Thread(_) | Value::UserData(_)
+            );
             let text: mlua::LuaString = real_tostring.call(value)?;
+            if !is_reference_type {
+                return Ok(text);
+            }
             // Lua strings are arbitrary byte sequences, not necessarily
             // UTF-8 (e.g. `tostring(string.char(255))`); work on the raw
             // bytes and hand back the original `LuaString` unchanged
@@ -306,11 +331,23 @@ fn install_deterministic_table_iteration(lua: &Lua) -> mlua::Result<()> {
         // match that instead of silently overriding a proxy/wrapper
         // table's own iteration behavior with ours. A script's own
         // `__pairs` is responsible for its own determinism, same as a
-        // custom `__tostring` is for its own output.
-        if let Some(metatable) = table.metatable()
-            && let Ok(pairs_mm) = metatable.get::<Function>("__pairs")
-        {
-            return pairs_mm.call::<MultiValue>(table);
+        // custom `__tostring` is for its own output. A *present but not
+        // callable* `__pairs` (e.g. `__pairs = true`) is a script bug real
+        // Lua reports by trying to call it and raising its own "attempt to
+        // call a boolean value" error — that must still happen here rather
+        // than silently falling through to deterministic iteration as if
+        // no metamethod existed at all.
+        if let Some(metatable) = table.metatable() {
+            let pairs_field: Value = metatable.get("__pairs")?;
+            if !matches!(pairs_field, Value::Nil) {
+                let Value::Function(pairs_mm) = pairs_field else {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "attempt to call a {} value (metamethod '__pairs')",
+                        pairs_field.type_name()
+                    )));
+                };
+                return pairs_mm.call::<MultiValue>(table);
+            }
         }
         // Snapshot only the sorted *key order* once, here, and walk it by
         // position — not `next`'s comparator-based search on every step,
@@ -322,22 +359,46 @@ fn install_deterministic_table_iteration(lua: &Lua) -> mlua::Result<()> {
         // key is yielded — instead of a value cloned back when `pairs`
         // was first called — keeps Lua's other supported mid-traversal
         // edit, changing an existing field's value before it's visited,
-        // showing that current value rather than a stale one.
-        let keys: Vec<Value> = sorted_table_entries(&table)?
-            .into_iter()
-            .map(|(k, _)| k)
-            .collect();
+        // showing that current value rather than a stale one; a key
+        // deleted before it's reached is skipped entirely, matching real
+        // Lua, instead of yielding it back with a `nil` value.
+        //
+        // The sorted keys are stashed in an ordinary Lua table (allocated
+        // through `lua.create_table`, so it's covered by
+        // `sandboxed_lua`'s memory limit like everything else a script
+        // causes to be allocated) rather than a Rust `Vec` owned by this
+        // closure. A `Vec` here would be invisible to that limit — nothing
+        // stops a script from calling `pairs(t)` in a loop and saving each
+        // returned iterator without ever driving it (`saved[i] =
+        // pairs(t)`), and each call would otherwise retain its own
+        // full-size host-heap copy of every entry, accumulating unbounded
+        // *process* memory no matter how small `t` or the loop count
+        // individually look to the Lua-side limit.
+        let sorted_keys = lua.create_table()?;
+        for (index, (key, _)) in sorted_table_entries(&table)?.into_iter().enumerate() {
+            sorted_keys.set(index + 1, key)?;
+        }
+        let key_count = sorted_keys.raw_len();
         let position = std::cell::Cell::new(0usize);
         let live_table = table.clone();
         let iterator =
             lua.create_function(move |lua, _: MultiValue| -> mlua::Result<MultiValue> {
-                let i = position.get();
-                let Some(key) = keys.get(i) else {
-                    return Ok(MultiValue::new());
-                };
-                position.set(i + 1);
-                let value: Value = live_table.get(key.clone())?;
-                (key.clone(), value).into_lua_multi(lua)
+                loop {
+                    let i = position.get();
+                    if i >= key_count {
+                        return Ok(MultiValue::new());
+                    }
+                    position.set(i + 1);
+                    let key: Value = sorted_keys.get(i + 1)?;
+                    let value: Value = live_table.get(key.clone())?;
+                    if !matches!(value, Value::Nil) {
+                        return (key, value).into_lua_multi(lua);
+                    }
+                    // The key was present when `pairs` snapshotted the sort
+                    // order but has since been deleted (its live value is
+                    // now nil) — skip it and keep looking, rather than
+                    // yielding a key the table no longer actually has.
+                }
             })?;
         (iterator, Value::Nil, Value::Nil).into_lua_multi(lua)
     })?;
@@ -370,6 +431,33 @@ fn sorted_table_entries(table: &Table) -> mlua::Result<Vec<(Value, Value)>> {
     Ok(entries)
 }
 
+/// Compares an integer key against a float key without the precision loss
+/// a plain `i as f64` cast (as either operand) can introduce once the
+/// magnitude exceeds what `f64`'s 53-bit mantissa can represent exactly —
+/// `i64::MAX` and `9223372036854775808.0` (2^63) are distinct table keys
+/// that a naive cast makes compare equal, since `i64::MAX as f64` rounds
+/// up to exactly `2^63`. Table keys can never be NaN (Lua rejects that at
+/// assignment), so `n` is always a comparable value here.
+fn compare_integer_and_number(i: i64, n: f64) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    const TWO_POW_63: f64 = 9223372036854775808.0; // one past i64::MAX
+    const I64_MIN_AS_F64: f64 = -9223372036854775808.0; // exactly representable
+    if n >= TWO_POW_63 {
+        return Ordering::Less; // every i64 is less than any such n
+    }
+    if n < I64_MIN_AS_F64 {
+        return Ordering::Greater; // every i64 is greater than any such n
+    }
+    // n now fits within `i64`'s range (with room to spare below i64::MAX,
+    // since TWO_POW_63 was excluded above), so floor(n) truncates safely.
+    let n_floor = n.floor();
+    let n_floor_i = n_floor as i64;
+    match i.cmp(&n_floor_i) {
+        Ordering::Equal if n > n_floor => Ordering::Less, // n has a fractional part above i
+        other => other,
+    }
+}
+
 fn compare_lua_keys(a: &Value, b: &Value) -> std::cmp::Ordering {
     fn rank(value: &Value) -> u8 {
         match value {
@@ -388,8 +476,8 @@ fn compare_lua_keys(a: &Value, b: &Value) -> std::cmp::Ordering {
         (Value::Boolean(x), Value::Boolean(y)) => x.cmp(y),
         (Value::Integer(x), Value::Integer(y)) => x.cmp(y),
         (Value::Number(x), Value::Number(y)) => x.total_cmp(y),
-        (Value::Integer(x), Value::Number(y)) => (*x as f64).total_cmp(y),
-        (Value::Number(x), Value::Integer(y)) => x.total_cmp(&(*y as f64)),
+        (Value::Integer(x), Value::Number(y)) => compare_integer_and_number(*x, *y),
+        (Value::Number(x), Value::Integer(y)) => compare_integer_and_number(*y, *x).reverse(),
         (Value::String(x), Value::String(y)) => x.as_bytes().cmp(&y.as_bytes()),
         _ => std::cmp::Ordering::Equal,
     }
@@ -859,6 +947,81 @@ mod tests {
     }
 
     #[test]
+    fn pairs_orders_a_boundary_integer_and_float_key_without_precision_loss() {
+        // i64::MAX and 2.0^63 (one past it) are distinct table keys, but a
+        // naive `integer as f64` cast rounds i64::MAX up to exactly 2^63,
+        // making the two compare equal and causing `next` to skip one of
+        // them when resuming from the other.
+        let source = r#"
+            local order = {}
+            for k in pairs({[9223372036854775807] = "int", [9223372036854775808.0] = "float"}) do
+                order[#order + 1] = tostring(k)
+            end
+            assert(#order == 2, #order)
+            assert(order[1] == "9223372036854775807", order[1])
+            function on_tick(observation) return "wait" end
+        "#;
+        assert!(validate(source).is_ok());
+    }
+
+    #[test]
+    fn pairs_retained_snapshots_are_bounded_by_the_sandbox_memory_limit() {
+        // Before this fix, each `pairs(t)` call retained a Rust-heap `Vec`
+        // outside Lua's own tracked memory, so saving many iterators
+        // without ever driving them could accumulate unbounded *host*
+        // memory no matter how small `t` or the sandbox's 32MB Lua memory
+        // limit looked. The sorted key snapshot is now itself a Lua table,
+        // so retaining enough of them runs into that same limit and fails
+        // cleanly instead.
+        //
+        // Exercises `sandboxed_lua`/`load_controller` directly rather than
+        // going through `validate`'s wall-clock timeout: with the timeout
+        // in the mix, this workload hits that first regardless of which
+        // failure `pairs` itself would eventually produce, which wouldn't
+        // actually prove the memory limit is what's catching it (the test
+        // would "pass" the same way even without this fix).
+        let lua = sandboxed_lua();
+        let source = r#"
+            local t = {}
+            for i = 1, 200 do t["key" .. i] = i end
+            local saved = {}
+            for i = 1, 200000 do
+                saved[i] = pairs(t)
+            end
+            function on_tick(observation) return "wait" end
+        "#;
+        let err = load_controller(&lua, source).unwrap_err();
+        match err {
+            ControllerError::ScriptInvalid(mlua_err) => {
+                assert!(
+                    mlua_err.to_string().contains("not enough memory"),
+                    "expected the sandbox's own memory limit to be what fails this, got: \
+                     {mlua_err}"
+                );
+            }
+            other => panic!("expected ScriptInvalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn string_format_rejects_a_table_argument_to_percent_q() {
+        // Unlike %s, %q has no default representation to fall back to at
+        // all — real Lua rejects a table argument outright since it has
+        // no literal form. The pointer-hiding %s treatment must not mask
+        // that by unconditionally normalizing every reference-typed
+        // argument regardless of which specifier consumes it.
+        let err = validate("string.format('%q', {})").unwrap_err();
+        assert!(matches!(err, ControllerError::ScriptInvalid(_)));
+    }
+
+    #[test]
+    fn pairs_propagates_an_error_for_a_non_callable_pairs_metamethod() {
+        let source = "for k in pairs(setmetatable({a = 1}, {__pairs = true})) do end";
+        let err = validate(source).unwrap_err();
+        assert!(matches!(err, ControllerError::ScriptInvalid(_)));
+    }
+
+    #[test]
     fn pairs_rejects_a_table_valued_key_instead_of_leaving_it_nondeterministic() {
         let err = validate("for k in pairs({[{}] = 1}) do end").unwrap_err();
         assert!(matches!(err, ControllerError::ScriptInvalid(_)));
@@ -956,6 +1119,16 @@ mod tests {
                            assert(text == 'table: 0x0', text)\n\
                            function on_tick(observation) return 'wait' end";
         assert!(validate(lua_source).is_ok());
+    }
+
+    #[test]
+    fn tostring_leaves_an_ordinary_string_that_looks_like_the_address_pattern_alone() {
+        let source = r#"
+            local text = tostring("table: 0xabc")
+            assert(text == "table: 0xabc", text)
+            function on_tick(observation) return "wait" end
+        "#;
+        assert!(validate(source).is_ok());
     }
 
     #[test]

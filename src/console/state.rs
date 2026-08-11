@@ -260,11 +260,10 @@ impl AppState {
                 self.help_scroll = self.help_scroll.saturating_add(1).min(MAX_HELP_SCROLL);
             }
             Msg::EditController(op) => {
-                if let Some(controller) = self.controller.as_mut() {
-                    controller.apply(op);
-                    if op.is_mutating() {
-                        self.validation = Validation::Unchecked;
-                    }
+                if let Some(controller) = self.controller.as_mut()
+                    && controller.apply(op)
+                {
+                    self.validation = Validation::Unchecked;
                 }
             }
             Msg::ValidateController => {
@@ -541,6 +540,35 @@ mod tests {
             state.validation(),
             &Validation::Valid,
             "cursor movement doesn't change the source, so a prior validation is still accurate"
+        );
+    }
+
+    #[test]
+    fn a_no_op_boundary_delete_preserves_a_prior_validation() {
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate); // cursor starts at the end of the source
+        state.apply(Msg::ValidateController);
+        assert_eq!(state.validation(), &Validation::Valid);
+
+        // DeleteForward at the document's end and Backspace at its start
+        // are both no-ops (Editor::apply reports no mutation), so neither
+        // should invalidate a result that's still accurate.
+        state.apply(Msg::EditController(EditOp::DeleteForward));
+        assert_eq!(
+            state.validation(),
+            &Validation::Valid,
+            "DeleteForward at the end of the document didn't change anything"
+        );
+
+        state.apply(Msg::EditController(EditOp::PageUp));
+        state.apply(Msg::EditController(EditOp::PageUp));
+        state.apply(Msg::EditController(EditOp::MoveLineStart));
+        state.apply(Msg::EditController(EditOp::Backspace));
+        assert_eq!(
+            state.validation(),
+            &Validation::Valid,
+            "Backspace at the start of the document didn't change anything either"
         );
     }
 
