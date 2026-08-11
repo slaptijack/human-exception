@@ -316,9 +316,14 @@ fn install_deterministic_tostring(lua: &Lua) -> mlua::Result<()> {
             // be sidestepped by a metatable the sandbox doesn't otherwise
             // restrict. Look for the `": 0x"` marker common to every one of
             // these default representations instead, and normalize
-            // whatever precedes it.
+            // whatever precedes it — the *last* occurrence, not the first:
+            // Lua always appends the real marker after the (possibly
+            // script-controlled, via `__name`) name, so a `__name` that
+            // itself happens to contain "): 0x" (e.g. `__name = "literal:
+            // 0xabc"`) must have that literal text left alone, with only
+            // the genuine trailing address marker replaced.
             let bytes = text.as_bytes();
-            if let Some(marker) = find_bytes(&bytes, b": 0x") {
+            if let Some(marker) = rfind_bytes(&bytes, b": 0x") {
                 let prefix_end = marker + 2; // keep "<name>: ", drop "0x..."
                 let mut placeholder = bytes[..prefix_end].to_vec();
                 placeholder.extend_from_slice(b"0x0");
@@ -330,13 +335,13 @@ fn install_deterministic_tostring(lua: &Lua) -> mlua::Result<()> {
     Ok(())
 }
 
-/// The byte offset of the first occurrence of `needle` in `haystack`, or
+/// The byte offset of the last occurrence of `needle` in `haystack`, or
 /// `None` if it doesn't appear.
-fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+fn rfind_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || haystack.len() < needle.len() {
         return None;
     }
-    haystack.windows(needle.len()).position(|w| w == needle)
+    haystack.windows(needle.len()).rposition(|w| w == needle)
 }
 
 /// Overrides the global `pairs`/`next` with versions that iterate a
@@ -367,19 +372,27 @@ fn install_deterministic_table_iteration(lua: &Lua) -> mlua::Result<()> {
     // `key`'s value still tells us where it *would* sort even once it's no
     // longer a member of `table` at all, so a deleted key resumes
     // iteration correctly instead of silently ending it.
-    let det_next = lua.create_function(|_, (table, key): (Table, Value)| {
-        let entries = sorted_table_entries(&table)?;
-        if matches!(key, Value::Nil) {
-            return Ok(entries
-                .into_iter()
-                .next()
-                .unwrap_or((Value::Nil, Value::Nil)));
-        }
-        Ok(entries
-            .into_iter()
-            .find(|(k, _)| compare_lua_keys(k, &key) == std::cmp::Ordering::Greater)
-            .unwrap_or((Value::Nil, Value::Nil)))
-    })?;
+    let det_next = lua.create_function(
+        |lua, (table, key): (Table, Value)| -> mlua::Result<MultiValue> {
+            let entries = sorted_table_entries(&table)?;
+            let found = if matches!(key, Value::Nil) {
+                entries.into_iter().next()
+            } else {
+                entries
+                    .into_iter()
+                    .find(|(k, _)| compare_lua_keys(k, &key) == std::cmp::Ordering::Greater)
+            };
+            match found {
+                // Lua 5.4's real `next` returns exactly one `nil` once
+                // exhausted, not a `nil, nil` pair — `select("#", next({}))`
+                // is `1`, and controller code that inspects the return
+                // arity to detect the end of a traversal would otherwise
+                // see a different arity here than in real Lua.
+                None => (Value::Nil,).into_lua_multi(lua),
+                Some((k, v)) => (k, v).into_lua_multi(lua),
+            }
+        },
+    )?;
 
     let det_pairs = lua.create_function(move |lua, table: Table| -> mlua::Result<MultiValue> {
         // Real Lua 5.4 defers entirely to a table's `__pairs` metamethod
@@ -407,7 +420,16 @@ fn install_deterministic_table_iteration(lua: &Lua) -> mlua::Result<()> {
                         pairs_field.type_name()
                     )));
                 };
-                return pairs_mm.call::<MultiValue>(table);
+                // Real Lua 5.4's `pairs` returns only the *first three*
+                // results of calling `__pairs`, not however many it
+                // returned — forwarding more than that leaks extra values
+                // into the generic `for` loop's own protocol (its 4th slot
+                // is the to-be-closed value, so a leaked non-nil 4th value
+                // here can make an otherwise-valid `for k, v in pairs(t)`
+                // fail with "got a non-closable value" instead of working
+                // like it would against real Lua).
+                let results = pairs_mm.call::<MultiValue>(table)?;
+                return Ok(results.into_iter().take(3).collect());
             }
         }
         // Snapshot only the sorted *key order* once, here, and walk it by
@@ -1185,6 +1207,22 @@ mod tests {
     }
 
     #[test]
+    fn next_returns_a_single_nil_once_exhausted() {
+        // Real Lua 5.4's `next` returns exactly one `nil` when there's
+        // nothing left to yield, not a `nil, nil` pair — `select("#", ...)`
+        // is how a script would observe the difference.
+        let source = r##"
+            assert(select("#", next({})) == 1, select("#", next({})))
+            local t = {only = 1}
+            local k = next(t)
+            assert(k == "only", k)
+            assert(select("#", next(t, k)) == 1, select("#", next(t, k)))
+            function on_tick(observation) return "wait" end
+        "##;
+        assert!(validate(source).is_ok());
+    }
+
+    #[test]
     fn pairs_sees_a_live_update_to_a_not_yet_visited_field() {
         let source = r#"
             local t = {a = 1, b = 2}
@@ -1230,6 +1268,32 @@ mod tests {
     }
 
     #[test]
+    fn pairs_truncates_a_pairs_metamethod_that_returns_more_than_three_values() {
+        // Real Lua 5.4's `pairs` forwards only the first three results of
+        // calling `__pairs`; a fourth (or later) leaked value would be
+        // mistaken by the generic `for` loop's own protocol for a
+        // to-be-closed value, breaking a loop that works fine against real
+        // Lua.
+        let source = r#"
+            local proxy = setmetatable({}, {
+                __pairs = function(self)
+                    local done = false
+                    return function()
+                        if done then return nil end
+                        done = true
+                        return "only", "value"
+                    end, self, nil, "leaked fourth value"
+                end,
+            })
+            for k, v in pairs(proxy) do
+                assert(k == "only" and v == "value", k .. "=" .. v)
+            end
+            function on_tick(observation) return "wait" end
+        "#;
+        assert!(validate(source).is_ok());
+    }
+
+    #[test]
     fn tostring_hides_the_process_address_of_a_table() {
         let lua_source = "local text = tostring({})\n\
                            assert(text == 'table: 0x0', text)\n\
@@ -1253,6 +1317,21 @@ mod tests {
             local named = setmetatable({}, {__name = "sentinel"})
             local text = tostring(named)
             assert(text == "sentinel: 0x0", text)
+            function on_tick(observation) return "wait" end
+        "#;
+        assert!(validate(source).is_ok());
+    }
+
+    #[test]
+    fn tostring_preserves_a_custom_name_that_itself_contains_the_address_marker() {
+        // `__name` is entirely script-controlled text; Lua always appends
+        // the real ": 0x<address>" marker *after* it, so only the trailing
+        // occurrence is the genuine one to normalize — a name that happens
+        // to contain "): 0x" earlier in the string must be preserved as-is.
+        let source = r#"
+            local named = setmetatable({}, {__name = "literal: 0xabc"})
+            local text = tostring(named)
+            assert(text == "literal: 0xabc: 0x0", text)
             function on_tick(observation) return "wait" end
         "#;
         assert!(validate(source).is_ok());
