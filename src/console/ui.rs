@@ -163,6 +163,12 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
                 candidates.push(format!(
                     "MESH: DEGRADED   {target}   {controller}   {working}"
                 ));
+                // Drop the Target field itself (its own dossier title)
+                // before dropping controller status — a modified controller
+                // is session-only and can be lost, so it outranks a title
+                // the player can always re-derive by returning to Target
+                // (or that's already echoed by WORKING SET once committed).
+                candidates.push(format!("MESH: DEGRADED   {controller}   {working}"));
             }
             candidates.push(format!(
                 "MESH: DEGRADED   {target}   {confidence}   {working}"
@@ -174,6 +180,7 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
             candidates.push(format!("MESH: DEGRADED   {target}   {working}"));
             if let Some(controller) = &controller_field {
                 candidates.push(format!("{target}   {controller}   {working}"));
+                candidates.push(format!("{controller}   {working}"));
             }
             candidates.push(format!("{target}   {confidence}   {working}"));
             candidates.push(format!("{target}   {working}"));
@@ -1615,6 +1622,28 @@ mod tests {
             buffer_contains(&terminal, "CONTROLLER: modified"),
             "at the narrow 80-column width, a candidate that drops the \
              signals count instead of controller status should be offered \
+             before one that drops controller status entirely"
+        );
+    }
+
+    #[test]
+    fn controller_status_stays_visible_from_target_at_eighty_columns() {
+        use super::super::state::Msg;
+        use super::super::state::View;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.apply(Msg::EditController(super::super::editor::EditOp::Insert(
+            'x',
+        )));
+        state.apply(Msg::Navigate(View::Target));
+        let terminal = render(80, 30, &state);
+
+        assert!(
+            buffer_contains(&terminal, "CONTROLLER: modified"),
+            "at the narrow 80-column width, a candidate that drops the \
+             Target field instead of controller status should be offered \
              before one that drops controller status entirely"
         );
     }

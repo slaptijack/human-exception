@@ -508,7 +508,15 @@ fn install_deterministic_table_iteration(lua: &Lua) -> mlua::Result<()> {
                     // yielding a key the table no longer actually has.
                 }
             })?;
-        (iterator, Value::Nil, Value::Nil).into_lua_multi(lua)
+        // Real Lua's `pairs` (absent a custom `__pairs`) returns `next,
+        // t, nil` — the source table itself as the iterator *state*, not
+        // `nil`. This iterator closure ignores the state/control
+        // arguments it's called with (it tracks position internally), so
+        // an ordinary `for` loop works either way, but controller code
+        // that inspects or forwards these three results directly (generic
+        // iteration helpers, `local f, s, k = pairs(t)`) would see a
+        // different value here than real Lua's.
+        (iterator, Value::Table(table), Value::Nil).into_lua_multi(lua)
     })?;
 
     let globals = lua.globals();
@@ -1364,6 +1372,20 @@ mod tests {
         let source = r##"
             local f, s, k = pairs({})
             assert(select("#", f(s, k)) == 1, select("#", f(s, k)))
+            function on_tick(observation) return "wait" end
+        "##;
+        assert!(validate(source).is_ok());
+    }
+
+    #[test]
+    fn pairs_returns_the_table_itself_as_the_iterator_state() {
+        // Real Lua's `pairs(t)` (absent a custom `__pairs`) returns `next,
+        // t, nil` — the table itself as the second result, not `nil`.
+        let source = r##"
+            local t = {a = 1}
+            local f, s, k = pairs(t)
+            assert(s == t, s)
+            assert(k == nil, k)
             function on_tick(observation) return "wait" end
         "##;
         assert!(validate(source).is_ok());
