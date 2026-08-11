@@ -936,10 +936,19 @@ fn help_lines(state: &AppState) -> Vec<Line<'static>> {
         "Available standard libraries: table, string, math. Player Lua is",
     ));
     lines.push(Line::from(
-        "untrusted input, so io, os, package, coroutine, debug, dofile, and",
+        "untrusted input, so io, os, package, coroutine, debug, load, dofile,",
     ));
     lines.push(Line::from(
-        "loadfile are not available; scripts using them will fail to load.",
+        "and loadfile are not available; scripts using them will fail to load.",
+    ));
+    lines.push(Line::from(
+        "math.random always starts from the same fixed seed, so a controller",
+    ));
+    lines.push(Line::from(
+        "using it behaves identically on every deployment; math.randomseed is",
+    ));
+    lines.push(Line::from(
+        "not available (it would undo that determinism if a script called it).",
     ));
     lines.push(Line::from(""));
     lines.push(Line::from(
@@ -1257,6 +1266,7 @@ mod tests {
         assert!(buffer_contains(&terminal, "table, string, math"));
         assert!(buffer_contains(&terminal, "io, os, package"));
         assert!(buffer_contains(&terminal, "dofile"));
+        assert!(buffer_contains(&terminal, "math.randomseed"));
     }
 
     #[test]
@@ -1411,7 +1421,7 @@ mod tests {
 
         let mut state = AppState::new();
         state.apply(Msg::OpenHelp);
-        let terminal = render(120, 64, &state);
+        let terminal = render(120, 67, &state);
 
         assert!(buffer_contains(&terminal, "scan does not move the drone"));
         assert!(buffer_contains(&terminal, "regardless of walls in the way"));
@@ -1445,7 +1455,7 @@ mod tests {
         // without needing to scroll.
         let mut state = AppState::new();
         state.apply(Msg::OpenHelp);
-        let terminal = render(120, 76, &state);
+        let terminal = render(120, 79, &state);
 
         assert!(buffer_contains(&terminal, "Terminology"));
         assert!(buffer_contains(&terminal, "MACHINE INTERCEPT"));

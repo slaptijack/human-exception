@@ -53,13 +53,20 @@ const SANDBOX_RANDOM_SEED: i64 = 1;
 /// Builds a `Lua` instance exposing only the standard libraries a
 /// controller's `on_tick` contract needs (tables, strings, numbers), never
 /// `io`, `os`, `package`, `coroutine`, or `debug`, with `dofile`/`loadfile`/
-/// `print` additionally stripped (the base library installs them
+/// `load`/`print` additionally stripped (the base library installs them
 /// regardless of which `StdLib` flags are requested) and a bounded memory
 /// ceiling. Player Lua is untrusted input (AGENTS.md, "Treat Lua programs
 /// as untrusted input"); nothing in the on_tick contract needs filesystem,
-/// process, or module-loading access, and `print` writes straight to
-/// process stdout — including raw escape sequences — which would corrupt
-/// the alternate screen ratatui owns while the console is running.
+/// process, module-loading, or dynamic-code-loading access. `print` writes
+/// straight to process stdout — including raw escape sequences — which
+/// would corrupt the alternate screen ratatui owns while the console is
+/// running. `load` accepts Lua 5.4 *binary* chunks as well as text by
+/// default; unlike text source (which the parser fully validates),
+/// malformed bytecode is trusted structurally and can crash the process
+/// outright rather than fail as a recoverable Lua error — and the string
+/// library alone is enough to assemble arbitrary bytes for one. Nothing in
+/// the on_tick contract needs to load code dynamically at all, so removing
+/// `load` avoids needing to reason about restricting it to text-only mode.
 fn sandboxed_lua() -> Lua {
     let libs = StdLib::TABLE | StdLib::STRING | StdLib::MATH;
     let lua = Lua::new_with(libs, LuaOptions::default())
@@ -67,6 +74,7 @@ fn sandboxed_lua() -> Lua {
     let globals = lua.globals();
     let _ = globals.set("dofile", Value::Nil);
     let _ = globals.set("loadfile", Value::Nil);
+    let _ = globals.set("load", Value::Nil);
     let _ = globals.set("print", Value::Nil);
     let _ = lua.set_memory_limit(SANDBOX_MEMORY_LIMIT_BYTES);
     if let Ok(math) = globals.get::<Table>("math")
@@ -181,26 +189,40 @@ fn format_string_uses_pointer_specifier(fmt: &str) -> bool {
 fn install_deterministic_tostring(lua: &Lua) -> mlua::Result<()> {
     let globals = lua.globals();
     let real_tostring: Function = globals.get("tostring")?;
-    let det_tostring = lua.create_function(move |_, value: Value| -> mlua::Result<String> {
-        let text: mlua::LuaString = real_tostring.call(value)?;
-        let text = text.to_str()?.to_string();
-        for prefix in ["table: ", "function: ", "thread: ", "userdata: "] {
-            if let Some(rest) = text.strip_prefix(prefix)
-                && rest.starts_with("0x")
-            {
-                return Ok(format!("{prefix}0x0"));
+    let det_tostring =
+        lua.create_function(move |lua, value: Value| -> mlua::Result<mlua::LuaString> {
+            let text: mlua::LuaString = real_tostring.call(value)?;
+            // Lua strings are arbitrary byte sequences, not necessarily
+            // UTF-8 (e.g. `tostring(string.char(255))`); work on the raw
+            // bytes and hand back the original `LuaString` unchanged
+            // whenever no address pattern matches, rather than routing
+            // through a Rust `String` (which would reject anything that
+            // isn't valid UTF-8, breaking `tostring` for ordinary binary
+            // Lua strings this override was never meant to touch).
+            let bytes = text.as_bytes();
+            for prefix in [
+                &b"table: "[..],
+                &b"function: "[..],
+                &b"thread: "[..],
+                &b"userdata: "[..],
+            ] {
+                if let Some(rest) = bytes.strip_prefix(prefix)
+                    && rest.starts_with(b"0x")
+                {
+                    let mut placeholder = prefix.to_vec();
+                    placeholder.extend_from_slice(b"0x0");
+                    return lua.create_string(placeholder);
+                }
             }
-        }
-        Ok(text)
-    })?;
+            Ok(text)
+        })?;
     globals.set("tostring", det_tostring)?;
     Ok(())
 }
 
 /// Overrides the global `pairs`/`next` with versions that iterate a
-/// table's entries in a fixed order (numbers, then strings, then anything
-/// else in whatever order the real `next` produced them), instead of
-/// Lua 5.4's real order.
+/// table's entries in a fixed order (booleans, then numbers, then strings)
+/// instead of Lua 5.4's real order.
 ///
 /// Lua's own table/string hashing is randomized per `Lua` instance from
 /// wall-clock time and the state's memory address specifically to resist
@@ -209,7 +231,13 @@ fn install_deterministic_tostring(lua: &Lua) -> mlua::Result<()> {
 /// same string-keyed table in a different order and make a different
 /// choice from it (e.g. `for k in pairs(actions) do return k end`),
 /// breaking the same "same input, same output" guarantee `sandboxed_lua`'s
-/// fixed `math.random` seed exists to uphold.
+/// fixed `math.random` seed exists to uphold. A key of any other type
+/// (table, function, thread, userdata) has no identity that's both stable
+/// across separate `Lua` instances and independent of its own address —
+/// there is no meaningful deterministic order to assign it — so
+/// [`sorted_table_entries`] rejects such a key outright instead of
+/// silently leaving it in whatever order the randomized native iteration
+/// produced.
 fn install_deterministic_table_iteration(lua: &Lua) -> mlua::Result<()> {
     let det_next = lua.create_function(|_, (table, key): (Table, Value)| {
         let entries = sorted_table_entries(&table)?;
@@ -225,7 +253,6 @@ fn install_deterministic_table_iteration(lua: &Lua) -> mlua::Result<()> {
         Ok((Value::Nil, Value::Nil))
     })?;
 
-    let pairs_next = det_next.clone();
     let det_pairs = lua.create_function(move |lua, table: Table| -> mlua::Result<MultiValue> {
         // Real Lua 5.4 defers entirely to a table's `__pairs` metamethod
         // when present (checked before ever calling the real `next`);
@@ -238,7 +265,28 @@ fn install_deterministic_table_iteration(lua: &Lua) -> mlua::Result<()> {
         {
             return pairs_mm.call::<MultiValue>(table);
         }
-        (pairs_next.clone(), table, Value::Nil).into_lua_multi(lua)
+        // Snapshot the sorted entries once, here, and walk them by
+        // position rather than re-deriving "where we are" by searching a
+        // freshly recomputed entry list for the previous key on every
+        // step (what `next` above does, matching its stateless contract).
+        // That search-based approach breaks a table cleared mid-traversal
+        // — `for k in pairs(t) do t[k] = nil end` — since the deleted key
+        // is no longer present in the entries recomputed on the following
+        // call, so the search never finds it and iteration silently stops
+        // after one entry. A position-based snapshot is immune to that:
+        // it doesn't care what the table looks like on later calls at all.
+        let entries = sorted_table_entries(&table)?;
+        let position = std::cell::Cell::new(0usize);
+        let iterator =
+            lua.create_function(move |lua, _: MultiValue| -> mlua::Result<MultiValue> {
+                let i = position.get();
+                let Some((k, v)) = entries.get(i) else {
+                    return Ok(MultiValue::new());
+                };
+                position.set(i + 1);
+                (k.clone(), v.clone()).into_lua_multi(lua)
+            })?;
+        (iterator, Value::Nil, Value::Nil).into_lua_multi(lua)
     })?;
 
     let globals = lua.globals();
@@ -247,14 +295,24 @@ fn install_deterministic_table_iteration(lua: &Lua) -> mlua::Result<()> {
     Ok(())
 }
 
-/// `table`'s entries in a fixed order: numeric keys by value, then string
-/// keys by byte content, then any other key type in whatever (already
-/// nondeterministic, but rare enough not to be worth solving) order the
-/// real iteration produced them — using such a key at all is far outside
-/// the documented Lua contract.
+/// `table`'s entries in a fixed order: `false` before `true`, then numeric
+/// keys by value, then string keys by byte content. Errors if any key is
+/// of a type without a meaningful deterministic order to assign it (table,
+/// function, thread, userdata) — see [`install_deterministic_table_iteration`].
 fn sorted_table_entries(table: &Table) -> mlua::Result<Vec<(Value, Value)>> {
     let mut entries: Vec<(Value, Value)> =
         table.pairs::<Value, Value>().collect::<mlua::Result<_>>()?;
+    for (key, _) in &entries {
+        if !matches!(
+            key,
+            Value::Boolean(_) | Value::Integer(_) | Value::Number(_) | Value::String(_)
+        ) {
+            return Err(mlua::Error::RuntimeError(format!(
+                "table keys of type '{}' cannot be iterated deterministically",
+                key.type_name()
+            )));
+        }
+    }
     entries.sort_by(|(a, _), (b, _)| compare_lua_keys(a, b));
     Ok(entries)
 }
@@ -262,9 +320,10 @@ fn sorted_table_entries(table: &Table) -> mlua::Result<Vec<(Value, Value)>> {
 fn compare_lua_keys(a: &Value, b: &Value) -> std::cmp::Ordering {
     fn rank(value: &Value) -> u8 {
         match value {
-            Value::Integer(_) | Value::Number(_) => 0,
-            Value::String(_) => 1,
-            _ => 2,
+            Value::Boolean(_) => 0,
+            Value::Integer(_) | Value::Number(_) => 1,
+            Value::String(_) => 2,
+            _ => 3,
         }
     }
 
@@ -273,6 +332,7 @@ fn compare_lua_keys(a: &Value, b: &Value) -> std::cmp::Ordering {
         return rank_a.cmp(&rank_b);
     }
     match (a, b) {
+        (Value::Boolean(x), Value::Boolean(y)) => x.cmp(y),
         (Value::Integer(x), Value::Integer(y)) => x.cmp(y),
         (Value::Number(x), Value::Number(y)) => x.total_cmp(y),
         (Value::Integer(x), Value::Number(y)) => (*x as f64).total_cmp(y),
@@ -733,6 +793,45 @@ mod tests {
     }
 
     #[test]
+    fn pairs_orders_boolean_keys_deterministically() {
+        let source = r#"
+            local order = {}
+            for k in pairs({[true] = 1, [false] = 2}) do
+                order[#order + 1] = tostring(k)
+            end
+            assert(table.concat(order, ",") == "false,true", table.concat(order, ","))
+            function on_tick(observation) return "wait" end
+        "#;
+        assert!(validate(source).is_ok());
+    }
+
+    #[test]
+    fn pairs_rejects_a_table_valued_key_instead_of_leaving_it_nondeterministic() {
+        let err = validate("for k in pairs({[{}] = 1}) do end").unwrap_err();
+        assert!(matches!(err, ControllerError::ScriptInvalid(_)));
+    }
+
+    #[test]
+    fn pairs_survives_clearing_the_current_field_during_iteration() {
+        // A common idiom for clearing a table; the naive "search for the
+        // previous key in a freshly recomputed entry list" implementation
+        // silently stops after the first deletion because the deleted key
+        // is no longer present to search for.
+        let source = r#"
+            local t = {a = 1, b = 2, c = 3}
+            local seen = 0
+            for k in pairs(t) do
+                t[k] = nil
+                seen = seen + 1
+            end
+            assert(seen == 3, seen)
+            assert(next(t) == nil)
+            function on_tick(observation) return "wait" end
+        "#;
+        assert!(validate(source).is_ok());
+    }
+
+    #[test]
     fn a_table_with_pairs_metamethod_still_iterates_through_it() {
         // Real Lua 5.4 defers entirely to `__pairs` when a table has one;
         // the deterministic override must do the same, not silently
@@ -777,6 +876,22 @@ mod tests {
             function on_tick(observation) return "wait" end
         "#;
         assert!(validate(source).is_ok());
+    }
+
+    #[test]
+    fn tostring_preserves_a_non_utf8_lua_string_unchanged() {
+        let source = r#"
+            local raw = string.char(255)
+            assert(tostring(raw) == raw)
+            function on_tick(observation) return "wait" end
+        "#;
+        assert!(validate(source).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_a_script_that_calls_load() {
+        let err = validate("load('return 1')").unwrap_err();
+        assert!(matches!(err, ControllerError::ScriptInvalid(_)));
     }
 
     #[test]

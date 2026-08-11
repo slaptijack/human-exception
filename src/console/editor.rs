@@ -189,7 +189,7 @@ impl Editor {
         let source = source.into();
         self.cursor = source.len();
         self.source = source;
-        self.preferred_col = 0;
+        self.sync_preferred_col();
     }
 
     /// Moves the cursor to `target_line`, landing as close as possible to
@@ -405,5 +405,25 @@ mod tests {
         editor.reset("xyz");
         assert_eq!(editor.source(), "xyz");
         assert_eq!(editor.cursor_line_col(), (0, 3));
+    }
+
+    #[test]
+    fn reset_synchronizes_the_preferred_column_with_the_new_cursor_position() {
+        // Without this, the next vertical move after a reset jumps to
+        // whatever column an edit before the reset happened to leave
+        // behind (or column 0, if none), rather than the cursor's actual
+        // displayed column on the replacement source's final line.
+        let mut editor = Editor::new("a\nbb");
+        editor.move_line_start(); // column 0, not the end of the document
+        editor.reset("first\nsecond\nthird");
+
+        editor.move_up();
+        assert_eq!(
+            editor.cursor_line_col(),
+            (1, "third".chars().count()),
+            "Up should land at the reset cursor's actual column (end of \
+             the last line, \"third\"), not column 0; \"second\" is long \
+             enough that this column wouldn't be reached by clamping alone"
+        );
     }
 }
