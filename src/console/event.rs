@@ -61,6 +61,7 @@ pub fn map(
     let help_is_open = current_view == View::Help;
     let controller_is_open = current_view == View::Controller;
     let operation_is_open = current_view == View::Operation;
+    let after_action_is_open = current_view == View::AfterAction;
 
     match key.code {
         KeyCode::F(1) => Some(if help_is_open {
@@ -82,15 +83,16 @@ pub fn map(
         KeyCode::F(6) => Some(Msg::RequestDeploy),
         KeyCode::F(7) if controller_is_open => Some(Msg::RequestResetController),
         // F8's narrow-layout pane toggle applies to Signals/Target/
-        // Controller/Operation (`docs/TUI_DESIGN.md`, "Responsive
-        // behavior"); mapping it elsewhere — e.g. while Help is open —
-        // would flip the hidden toggle without a resize or navigation to
-        // ever reset it.
+        // Controller/Operation/AfterAction (`docs/TUI_DESIGN.md`,
+        // "Responsive behavior"); mapping it elsewhere — e.g. while Help is
+        // open — would flip the hidden toggle without a resize or
+        // navigation to ever reset it.
         KeyCode::F(8)
             if current_view == View::Signals
                 || current_view == View::Target
                 || controller_is_open
-                || operation_is_open =>
+                || operation_is_open
+                || after_action_is_open =>
         {
             Some(Msg::ToggleSecondaryPane)
         }
@@ -407,10 +409,8 @@ mod tests {
     }
 
     #[test]
-    fn f8_is_inert_outside_signals_target_controller_and_operation() {
-        for view in [View::AfterAction, View::Help] {
-            assert_eq!(map_in(key(KeyCode::F(8)), view), None);
-        }
+    fn f8_is_inert_outside_signals_target_controller_operation_and_after_action() {
+        assert_eq!(map_in(key(KeyCode::F(8)), View::Help), None);
     }
 
     #[test]
@@ -812,6 +812,14 @@ mod tests {
     fn f8_toggles_the_secondary_pane_in_operation_too() {
         assert_eq!(
             map_in(key(KeyCode::F(8)), View::Operation),
+            Some(Msg::ToggleSecondaryPane)
+        );
+    }
+
+    #[test]
+    fn f8_toggles_the_secondary_pane_in_after_action_too() {
+        assert_eq!(
+            map_in(key(KeyCode::F(8)), View::AfterAction),
             Some(Msg::ToggleSecondaryPane)
         );
     }

@@ -3,8 +3,8 @@
 //! This module hosts the interactive shell described by
 //! `docs/TUI_DESIGN.md`: a session/state model ([`state`]), key-to-intent
 //! mapping ([`event`]), and rendering ([`ui`]). Signals, Target, Controller,
-//! and Operation are populated; After Action still shows placeholder
-//! content for #46 to populate.
+//! Operation, and After Action are all populated, completing the
+//! edit-deploy-observe-retry loop.
 
 pub mod editor;
 pub mod event;
@@ -926,5 +926,91 @@ mod tests {
         assert_eq!(state.current_view(), View::Operation);
         assert!(state.operation().unwrap().paused);
         assert!(buffer_contains(&terminal, "STATUS: PAUSED"));
+    }
+
+    const ROUTE_TO_UPLINK: &str = r#"
+        local route = { "north", "east", "east", "east", "east", "north", "north", "north" }
+        local step = 0
+        function on_tick(observation)
+            step = step + 1
+            return route[step]
+        end
+    "#;
+
+    /// Clears the starter controller (backspacing every character from its
+    /// end-of-document starting cursor) and types `source` in its place,
+    /// exactly as a player replacing the controller script would.
+    fn clear_and_type(source: &str) -> Vec<Event> {
+        let mut events: Vec<Event> = std::iter::repeat_n(
+            press(KeyCode::Backspace),
+            intel::STARTER_CONTROLLER.chars().count(),
+        )
+        .collect();
+        events.extend(source.chars().map(|c| {
+            if c == '\n' {
+                press(KeyCode::Enter)
+            } else {
+                press(KeyCode::Char(c))
+            }
+        }));
+        events
+    }
+
+    #[test]
+    fn completing_a_scripted_route_lands_on_after_action_with_recognizable_text() {
+        // The run auto-advances only while unpaused, and `Enter` only
+        // steps a single tick while paused (`docs/TUI_DESIGN.md`, "Pacing
+        // controls") — pause immediately after deploying, then step
+        // through every remaining tick explicitly to reach completion
+        // deterministically.
+        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
+        events.extend(clear_and_type(ROUTE_TO_UPLINK));
+        events.push(press(KeyCode::F(6)));
+        events.push(press(KeyCode::Char(' '))); // pause
+        events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
+
+        let (state, terminal) = render(120, 40, &events);
+
+        assert_eq!(state.current_view(), View::AfterAction);
+        assert!(state.operation().unwrap().finished);
+        assert!(buffer_contains(&terminal, "AFTER-ACTION REPORT"));
+        assert!(buffer_contains(&terminal, "OPERATION SUCCESSFUL"));
+    }
+
+    #[test]
+    fn deploying_a_syntactically_invalid_controller_lands_directly_on_after_action() {
+        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
+        events.extend(clear_and_type("function on_tick("));
+        events.push(press(KeyCode::F(6)));
+
+        let (state, terminal) = render(120, 40, &events);
+
+        assert_eq!(state.current_view(), View::AfterAction);
+        assert!(state.operation().unwrap().finished);
+        assert!(buffer_contains(&terminal, "AFTER-ACTION REPORT"));
+        assert!(buffer_contains(&terminal, "controller script error"));
+    }
+
+    #[test]
+    fn editing_and_redeploying_from_after_action_completes_the_retry_loop() {
+        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
+        events.extend(clear_and_type("function on_tick("));
+        events.push(press(KeyCode::F(6))); // lands on After Action
+        events.push(press(KeyCode::F(4))); // back to Controller, edits intact
+        let (state, _) = render(120, 40, &events);
+        assert_eq!(state.current_view(), View::Controller);
+        assert_eq!(state.controller_source(), Some("function on_tick("));
+
+        events.extend(clear_and_type(
+            "function on_tick(observation) return \"wait\" end",
+        ));
+        events.push(press(KeyCode::F(6))); // redeploy: no confirmation, nothing active
+        let (state, _) = render(120, 40, &events);
+
+        assert_eq!(state.current_view(), View::Operation);
+        assert_eq!(
+            state.operation().unwrap().deployed_source,
+            "function on_tick(observation) return \"wait\" end"
+        );
     }
 }
