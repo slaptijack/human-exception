@@ -4,14 +4,15 @@
 //! operation so it can be exercised against `ratatui`'s `TestBackend`
 //! without a real terminal.
 
+use super::intel::{Signal, TargetDossier, authored_signals, first_contact_dossier};
+use super::state::{AppState, Validation, View, WorkingSet};
 use ratatui::Frame;
+use ratatui::buffer::CellWidth;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-
-use super::intel::{Signal, TargetDossier, authored_signals, first_contact_dossier};
-use super::state::{AppState, View, WorkingSet};
+use unicode_segmentation::UnicodeSegmentation;
 
 pub const MIN_COLUMNS: u16 = 80;
 pub const MIN_ROWS: u16 = 24;
@@ -26,6 +27,18 @@ const TITLE: &str = "HUMAN EXCEPTION // RESISTANCE CONSOLE";
 /// Draws the full console frame for the current session state.
 pub fn draw(frame: &mut Frame, state: &AppState) {
     let area = frame.area();
+
+    // Checked before the undersized-geometry return, and drawn without the
+    // header/body/footer layout that return skips past: `Ctrl+Q` is global
+    // and the confirmation must stay reachable at any size (`docs/
+    // TUI_DESIGN.md`, "Below 80 columns" — "Quitting remains available,
+    // subject to the same modified-source confirmation rule"). Rendering it
+    // only after the geometry check would make it swallow input invisibly
+    // whenever a modified session got resized below the minimum.
+    if state.quit_confirmation_pending() {
+        draw_quit_confirmation(frame, area);
+        return;
+    }
 
     if area.width < MIN_COLUMNS || area.height < MIN_ROWS {
         draw_geometry_warning(frame, area);
@@ -44,6 +57,60 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
     draw_footer(frame, footer, state, area.width);
 }
 
+/// Rendered in place of the entire frame (like [`draw_geometry_warning`]),
+/// not just the body, so it stays visible even below the supported minimum
+/// geometry.
+fn draw_quit_confirmation(frame: &mut Frame, area: Rect) {
+    let lines = quit_confirmation_lines(area.height);
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// The quit-confirmation dialog's content for a frame `height` rows tall.
+/// `Ctrl+Q` and this confirmation are intentionally still reachable below
+/// the supported minimum geometry (`docs/TUI_DESIGN.md`'s "Quit safety"),
+/// so a terminal resized down to just a few rows must still be able to
+/// confirm or cancel — an unconditional, un-prioritized line list would
+/// instead have its `Enter`/`Esc` action rows (listed last) clipped first
+/// by `Paragraph`'s default truncation, at exactly the moment the player
+/// most needs them, while decorative lines above survive. Picks the
+/// tallest of three fixed candidates that actually fits, most detail
+/// first — the same "drop lowest-priority content first" pattern the
+/// header candidate lists use, rather than a signal a mid-dialog resize
+/// could keep bouncing between.
+fn quit_confirmation_lines(height: u16) -> Vec<Line<'static>> {
+    let full = vec![
+        Line::from("HUMAN EXCEPTION // resistance console"),
+        Line::from(Span::styled(
+            "Modified controller source will be lost.",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from("Cross-launch persistence isn't implemented, so this edit can't be saved."),
+        Line::from(""),
+        Line::from("Enter / y  confirm and quit"),
+        Line::from("Esc / n    cancel and return"),
+    ];
+    if height as usize >= full.len() {
+        return full;
+    }
+    let compact = vec![
+        Line::from(Span::styled(
+            "Modified controller source will be lost.",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from("Enter / y  confirm and quit"),
+        Line::from("Esc / n    cancel and return"),
+    ];
+    if height as usize >= compact.len() {
+        return compact;
+    }
+    if height == 0 {
+        return Vec::new();
+    }
+    vec![Line::from(
+        "Quit and lose edits? Enter/y confirm, Esc/n cancel",
+    )]
+}
+
 fn draw_geometry_warning(frame: &mut Frame, area: Rect) {
     let text = vec![
         Line::from("HUMAN EXCEPTION // resistance console"),
@@ -59,6 +126,31 @@ fn draw_geometry_warning(frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(text), area);
 }
 
+/// `CONTROLLER: starter/modified/invalid`, or `None` before a working set
+/// has seeded any source. Shared by every header branch so a modified
+/// controller's at-risk status stays visible no matter which view the
+/// player is currently looking at (`docs/TUI_DESIGN.md`, "Persistent
+/// header").
+fn controller_status_field(state: &AppState) -> Option<String> {
+    state.controller_source()?;
+    let status = if matches!(state.validation(), Validation::Invalid(_)) {
+        "invalid"
+    } else if state.controller_modified() {
+        "modified"
+    } else {
+        "starter"
+    };
+    // `docs/TUI_DESIGN.md`'s persistent-header mockup shows `STATUS: READY`
+    // as its own field alongside `CONTROLLER: ...`, not folded into it — a
+    // successfully validated controller stays "READY" independent of
+    // whether it's still the unmodified starter, so it needs a field of
+    // its own rather than a fourth `CONTROLLER:` state. `Invalid` doesn't
+    // get a matching `STATUS:` value here since `CONTROLLER: invalid`
+    // already says as much on its own.
+    let ready = matches!(state.validation(), Validation::Valid).then_some("   STATUS: READY");
+    Some(format!("CONTROLLER: {status}{}", ready.unwrap_or_default()))
+}
+
 fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
     let working_set = match state.working_set() {
         Some(WorkingSet::FirstContact) => "FIRST CONTACT",
@@ -70,48 +162,79 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
     // always the last-dropped field, since it's the one status the header
     // priorities in `docs/TUI_DESIGN.md` ("Persistent header") most need to
     // stay visible at the supported minimum width.
+    let controller_field = controller_status_field(state);
+
     let candidates: Vec<String> = match state.current_view() {
         View::Signals => {
             let signals = format!("SIGNALS: {:02}", authored_signals().len());
-            vec![
-                format!("MESH: DEGRADED   {signals}   {working}"),
-                format!("{signals}   {working}"),
-            ]
+            let mut candidates = Vec::new();
+            // A controller's status — `starter`/`modified`/`invalid`, plus
+            // `STATUS: READY` once validated — is session-only state the
+            // player can lose (an unsaved edit, a validation result), so
+            // every candidate that keeps it is tried before any that drops
+            // it, MESH included: MESH is a static "link condition" label
+            // the player can always re-derive by looking at any other
+            // view, but a lost controller status is gone for good. Within
+            // each of those two groups, MESH is still dropped before the
+            // signals count, and the signals count before controller
+            // status itself, matching every other view's priority order.
+            if let Some(controller) = &controller_field {
+                candidates.push(format!(
+                    "MESH: DEGRADED   {signals}   {controller}   {working}"
+                ));
+                candidates.push(format!("MESH: DEGRADED   {controller}   {working}"));
+                candidates.push(format!("{signals}   {controller}   {working}"));
+                candidates.push(format!("{controller}   {working}"));
+            }
+            candidates.push(format!("MESH: DEGRADED   {signals}   {working}"));
+            candidates.push(format!("{signals}   {working}"));
+            candidates
         }
         View::Target => {
             let dossier = first_contact_dossier();
             let target = format!("TARGET: {}", dossier.title);
             let confidence = format!("CONFIDENCE: {}", dossier.confidence_summary);
-            vec![
-                format!("MESH: DEGRADED   {target}   {confidence}   {working}"),
-                // Confidence is the lowest-priority field here — drop it,
-                // not MESH, so Target doesn't lose link condition while
-                // every other view keeps it at the same widths.
-                format!("MESH: DEGRADED   {target}   {working}"),
-                format!("{target}   {confidence}   {working}"),
-                format!("{target}   {working}"),
-            ]
-        }
-        _ => {
-            // No Lua editing exists yet (#44), so "starter" is the only
-            // controller state reachable once a working set seeds source;
-            // "modified"/"invalid" become possible once editing does.
-            match state.controller_source() {
-                Some(_) => vec![
-                    format!(
-                        "MESH: DEGRADED   SATLINK: COMPROMISED   CONTROLLER: starter   {working}"
-                    ),
-                    format!("SATLINK: COMPROMISED   CONTROLLER: starter   {working}"),
-                    format!("CONTROLLER: starter   {working}"),
-                    working.clone(),
-                ],
-                None => vec![
-                    format!("MESH: DEGRADED   SATLINK: COMPROMISED   {working}"),
-                    format!("SATLINK: COMPROMISED   {working}"),
-                    working.clone(),
-                ],
+            let mut candidates = Vec::new();
+            if let Some(controller) = &controller_field {
+                candidates.push(format!(
+                    "MESH: DEGRADED   {target}   {controller}   {working}"
+                ));
+                // Drop the Target field itself (its own dossier title)
+                // before dropping controller status — a modified controller
+                // is session-only and can be lost, so it outranks a title
+                // the player can always re-derive by returning to Target
+                // (or that's already echoed by WORKING SET once committed).
+                candidates.push(format!("MESH: DEGRADED   {controller}   {working}"));
             }
+            candidates.push(format!(
+                "MESH: DEGRADED   {target}   {confidence}   {working}"
+            ));
+            // Confidence and controller status are both lower-priority than
+            // MESH here — drop them first, not MESH, so Target doesn't lose
+            // link condition while every other view keeps it at the same
+            // widths.
+            candidates.push(format!("MESH: DEGRADED   {target}   {working}"));
+            if let Some(controller) = &controller_field {
+                candidates.push(format!("{target}   {controller}   {working}"));
+                candidates.push(format!("{controller}   {working}"));
+            }
+            candidates.push(format!("{target}   {confidence}   {working}"));
+            candidates.push(format!("{target}   {working}"));
+            candidates
         }
+        _ => match &controller_field {
+            Some(controller) => vec![
+                format!("MESH: DEGRADED   SATLINK: COMPROMISED   {controller}   {working}"),
+                format!("SATLINK: COMPROMISED   {controller}   {working}"),
+                format!("{controller}   {working}"),
+                working.clone(),
+            ],
+            None => vec![
+                format!("MESH: DEGRADED   SATLINK: COMPROMISED   {working}"),
+                format!("SATLINK: COMPROMISED   {working}"),
+                working.clone(),
+            ],
+        },
     };
 
     let inner_width = area.width.saturating_sub(2) as usize;
@@ -131,14 +254,7 @@ fn draw_body(frame: &mut Frame, area: Rect, state: &AppState) {
         View::Signals => draw_signals(frame, area, state),
         View::Target => draw_target(frame, area, state),
         View::Help => draw_help(frame, area, state),
-        View::Controller => {
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .title(view_title(View::Controller));
-            let inner = block.inner(area);
-            frame.render_widget(block, area);
-            frame.render_widget(Paragraph::new(controller_body(state)), inner);
-        }
+        View::Controller => draw_controller(frame, area, state),
         view => {
             let block = Block::default()
                 .borders(Borders::ALL)
@@ -150,17 +266,383 @@ fn draw_body(frame: &mut Frame, area: Rect, state: &AppState) {
     }
 }
 
-fn controller_body(state: &AppState) -> Vec<Line<'static>> {
-    match state.controller_source() {
-        Some(_) => vec![
-            Line::from("Starter controller loaded for FIRST CONTACT."),
-            Line::from("The in-console Lua editor will appear here (see #44)."),
-        ],
-        None => vec![
-            Line::from("No controller is loaded yet."),
-            Line::from("The captured-controller Lua editor will appear here (see #44)."),
-        ],
+/// Whether Controller's source pane (rather than the Lua reference pane
+/// `F8` can swap in at 80-99 columns) is what's actually on screen for
+/// `frame_width`. Exposed so the event mapper can gate editing keys on it —
+/// typing while the reference pane is showing must not silently edit an
+/// invisible source (see `event::map`).
+pub(crate) fn controller_source_visible(state: &AppState, frame_width: u16) -> bool {
+    frame_width >= TWO_PANE_MIN_COLUMNS
+        || !state.narrow_secondary_visible()
+        || state.reset_confirmation_pending()
+}
+
+fn draw_controller(frame: &mut Frame, area: Rect, state: &AppState) {
+    if area.width >= TWO_PANE_MIN_COLUMNS {
+        let [left, right] =
+            Layout::horizontal([Constraint::Percentage(70), Constraint::Percentage(30)])
+                .areas(area);
+        draw_controller_source(frame, left, state);
+        draw_pane(
+            frame,
+            right,
+            "LUA FIELD REFERENCE",
+            lua_field_reference_lines(),
+        );
+    } else if state.narrow_secondary_visible() && !state.reset_confirmation_pending() {
+        // Unlike the wide two-pane layout above (where the source pane and
+        // its banner are always visible alongside the reference), this is
+        // the only place the reference pane can be shown *instead of* the
+        // source, so validation/reset feedback needs its own copy of the
+        // banner here too — otherwise pressing Ctrl+Enter/Ctrl+V while
+        // looking at the reference would appear to do nothing.
+        draw_controller_reference(frame, area, state);
+    } else {
+        // A pending reset confirmation always wins the narrow-layout toggle:
+        // its banner only ever renders inside the source pane, so showing
+        // the reference pane instead while it's pending would leave the
+        // prompt (and the `Enter`/`Esc` it's waiting on) invisible.
+        draw_controller_source(frame, area, state);
     }
+}
+
+/// The narrow-layout (80-99 column) stand-in for the source pane when `F8`
+/// has swapped the Lua reference in instead. Renders the same validation
+/// banner `draw_controller_source` would, since that pane isn't on screen
+/// to show it.
+fn draw_controller_reference(frame: &mut Frame, area: Rect, state: &AppState) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("LUA FIELD REFERENCE");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let banner = controller_banner(state);
+    let (content_area, banner_area) = if let Some(banner) = &banner {
+        let rows = banner_height(banner, inner.width);
+        let [content, banner_row] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(rows)]).areas(inner);
+        (content, Some(banner_row))
+    } else {
+        (inner, None)
+    };
+
+    frame.render_widget(
+        Paragraph::new(lua_field_reference_lines()).wrap(Wrap { trim: false }),
+        content_area,
+    );
+
+    if let (Some(banner_area), Some(banner)) = (banner_area, banner) {
+        frame.render_widget(
+            Paragraph::new(banner).wrap(Wrap { trim: false }),
+            banner_area,
+        );
+    }
+}
+
+/// An upper bound on how many rows [`controller_banner`] can claim, so one
+/// long message can't swallow the whole pane.
+const MAX_BANNER_ROWS: u16 = 4;
+
+/// How many rows to reserve for `banner` at `width`, wrapping instead of
+/// clipping a message that runs past one row — a Lua syntax error easily
+/// exceeds the supported 80-column pane's width, and clipping it can lose
+/// the `:line:` location `docs/TUI_DESIGN.md` requires stay visible.
+fn banner_height(banner: &Line<'static>, width: u16) -> u16 {
+    (wrapped_row_count(std::slice::from_ref(banner), width) as u16).clamp(1, MAX_BANNER_ROWS)
+}
+
+fn draw_controller_source(frame: &mut Frame, area: Rect, state: &AppState) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("CAPTURED CONTROLLER // controller.lua");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let banner = controller_banner(state);
+    let (content_area, banner_area) = if let Some(banner) = &banner {
+        let rows = banner_height(banner, inner.width);
+        let [content, banner_row] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(rows)]).areas(inner);
+        (content, Some(banner_row))
+    } else {
+        (inner, None)
+    };
+
+    let source = state.controller_source().unwrap_or_default();
+    let (cursor_line, cursor_col) = state.controller_cursor().unwrap_or((0, 0));
+    let total_lines = source.split('\n').count();
+    let gutter_width = source_gutter_width(total_lines);
+    let text_width = (content_area.width as usize).saturating_sub(gutter_width);
+    // Scrolling is computed in terminal display cells, not `char`s: a
+    // double-width character (e.g. CJK text in a comment or string) still
+    // costs two columns on screen even though it's one `char`, so indexing
+    // by `char` count alone can leave the cursor's true screen column
+    // outside a narrow pane while this thinks it's still visible.
+    let cursor_line_text = source.split('\n').nth(cursor_line).unwrap_or("");
+    let cursor_line_chars: Vec<char> = cursor_line_text.chars().collect();
+    // The cursor's highlighted unit is a whole grapheme cluster (see
+    // `cursor_grapheme_char_range`), not necessarily the single `char` at
+    // `cursor_col` — `cursor_col` can land on a zero-width character (a
+    // combining mark, or a variation selector like U+FE0F) whose own
+    // `unicode-width` value says nothing about the *combined* cell width
+    // ratatui's `CellWidth` actually renders for the pair. Measuring only
+    // that one `char` could under-reserve scroll room for a wider unit,
+    // clipping it off the pane's edge entirely.
+    let (cursor_start_col, cursor_glyph_width) = if cursor_col < cursor_line_chars.len() {
+        let (at_start, at_end) = cursor_grapheme_char_range(cursor_line_text, cursor_col);
+        let glyph: String = cursor_line_chars[at_start..at_end].iter().collect();
+        (at_start, (glyph.as_str().cell_width() as usize).max(1))
+    } else {
+        (cursor_col, 1usize) // past the last character: the synthetic trailing cursor cell
+    };
+    let cursor_display_col = display_width_of_prefix(cursor_line_text, cursor_start_col);
+    // Scroll far enough to fit the cursor glyph's *far* edge, not just its
+    // start column: reserving only one cell for a double-width character
+    // (e.g. CJK) leaves it straddling the pane's right edge, and ratatui
+    // won't render a two-cell glyph that doesn't fully fit, making the
+    // cursor disappear.
+    let cursor_display_end = cursor_display_col + cursor_glyph_width - 1;
+    let first_visible_cell = first_visible_offset(cursor_display_end, text_width);
+    let lines = controller_editor_lines(source, cursor_line, cursor_col, first_visible_cell);
+    let viewport_height = content_area.height as usize;
+    let first_visible_row = first_visible_offset(cursor_line, viewport_height);
+    // Clamp is separate from `first_visible_offset` itself so a document
+    // shorter than the viewport never scrolls past its own last line, which
+    // matters vertically (there's a fixed document length to respect) but
+    // not horizontally (each line has its own length, so there's no single
+    // "last column" to clamp against).
+    let max_first_row = total_lines.saturating_sub(viewport_height);
+    let first_visible_row = first_visible_row.min(max_first_row);
+    let visible_lines: Vec<Line<'static>> = lines
+        .into_iter()
+        .skip(first_visible_row)
+        .take(viewport_height)
+        .collect();
+    frame.render_widget(Paragraph::new(visible_lines), content_area);
+
+    if let (Some(banner_area), Some(banner)) = (banner_area, banner) {
+        frame.render_widget(
+            Paragraph::new(banner).wrap(Wrap { trim: false }),
+            banner_area,
+        );
+    }
+}
+
+/// The confirmation prompt or validation result shown as a fixed last row
+/// under the source, or `None` when there's nothing to say (an unmodified,
+/// unchecked controller keeps the full pane for source).
+fn controller_banner(state: &AppState) -> Option<Line<'static>> {
+    // The quit-confirmation prompt is drawn globally by `draw` (it can be
+    // triggered from any view), so it isn't handled here even though it's
+    // Controller-adjacent state.
+    if state.reset_confirmation_pending() {
+        return Some(Line::from(Span::styled(
+            "Reset controller? Edits will be lost. Enter/y confirm  Esc/n cancel",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+    }
+    match state.validation() {
+        Validation::Unchecked => None,
+        Validation::Valid => Some(Line::from(Span::styled(
+            "READY: controller loads and defines on_tick",
+            Style::default().add_modifier(Modifier::BOLD),
+        ))),
+        Validation::Invalid(message) => Some(Line::from(Span::styled(
+            format!("INVALID: {message}"),
+            Style::default().add_modifier(Modifier::BOLD),
+        ))),
+    }
+}
+
+/// The gutter column width (digits plus one trailing space) for a document
+/// of `total_lines` lines. Shared between the line-rendering and the
+/// horizontal-viewport-width calculation so they can't drift apart.
+fn source_gutter_width(total_lines: usize) -> usize {
+    total_lines.to_string().len().max(2) + 1
+}
+
+/// Renders `source` as line-numbered rows with the cursor shown as a
+/// reversed-style character (or a reversed space at end-of-line/on an empty
+/// line), one [`Line`] per source line. `first_visible_col` horizontally
+/// scrolls every line together (the same offset for all of them, as
+/// ordinary editors do), so a line longer than the pane doesn't leave the
+/// cursor invisible off the right edge once it moves or types past it.
+fn controller_editor_lines(
+    source: &str,
+    cursor_line: usize,
+    cursor_col: usize,
+    first_visible_cell: usize,
+) -> Vec<Line<'static>> {
+    let raw_lines: Vec<&str> = source.split('\n').collect();
+    let gutter_width = source_gutter_width(raw_lines.len()) - 1;
+    raw_lines
+        .iter()
+        .enumerate()
+        .map(|(idx, text)| {
+            let number = Span::styled(
+                format!("{:>gutter_width$} ", idx + 1),
+                Style::default().add_modifier(Modifier::DIM),
+            );
+            let mut spans = vec![number];
+            let skip_chars = chars_to_skip_for_cell_offset(text, first_visible_cell);
+            let visible: String = text.chars().skip(skip_chars).collect();
+            if idx == cursor_line {
+                let visible_cursor_col = cursor_col.saturating_sub(skip_chars);
+                spans.extend(cursor_line_spans(&visible, visible_cursor_col));
+            } else {
+                spans.push(Span::raw(visible));
+            }
+            Line::from(spans)
+        })
+        .collect()
+}
+
+/// The display-cell width of the first `char_count` characters of `text`,
+/// computed via ratatui's own [`CellWidth`] — the exact same calculation
+/// `Buffer`/`Paragraph` use to lay out and clip rendered text — rather than
+/// summing each character's individual `unicode-width` value in isolation.
+/// Those can disagree: `CellWidth` applies a terminal-compatibility
+/// adjustment for a few grapheme-forming character combinations (e.g.
+/// halfwidth katakana dakuten/handakuten marks, which `unicode-width`
+/// reports as zero-width on their own but which terminals render as an
+/// extra occupied cell) that a naive per-character sum misses entirely,
+/// under- or over-counting exactly the columns this function's callers use
+/// to decide what's on screen and where the cursor cell actually falls.
+fn display_width_of_prefix(text: &str, char_count: usize) -> usize {
+    let prefix: String = text.chars().take(char_count).collect();
+    prefix.cell_width() as usize
+}
+
+/// How many leading characters of `text` to skip so that they, combined,
+/// consume at least `cells` display-cell columns — the character-count
+/// equivalent of a cell-based horizontal scroll offset, since `chars()`
+/// iterates by character, not display width. Uses the same [`CellWidth`]
+/// calculation as [`display_width_of_prefix`], for the same reason: it
+/// must agree with ratatui's own rendering, not an independent per-character
+/// unicode-width sum that can diverge from it.
+fn chars_to_skip_for_cell_offset(text: &str, cells: usize) -> usize {
+    let mut consumed = 0usize;
+    let mut skip = 0usize;
+    // Advances by whole extended grapheme clusters, not individual
+    // `char`s: `cells` can land partway through a multi-scalar cluster
+    // (e.g. a ZWJ sequence like "👩‍💻"), and skipping only the leading
+    // scalars of one would leave the visible line starting mid-cluster —
+    // a split glyph ratatui can't render as the single unit it actually
+    // is, at a horizontal-scroll offset the cursor's own grapheme-aware
+    // positioning (`cursor_grapheme_char_range`) assumes lines always
+    // start on a real boundary.
+    for grapheme in text.graphemes(true) {
+        if consumed >= cells {
+            break;
+        }
+        consumed += grapheme.cell_width() as usize;
+        skip += grapheme.chars().count();
+    }
+    skip
+}
+
+/// The char-index range `[at_start, at_end)` of the extended grapheme
+/// cluster (per Unicode's own segmentation rules, via `unicode-segmentation`
+/// — the same algorithm ratatui uses internally to lay out and measure
+/// text) containing `cursor_col` within `text`. Real terminals — and
+/// ratatui's own `CellWidth` — render a whole cluster as one visual unit,
+/// which is not always "a character plus its immediately adjacent
+/// zero-width neighbors": a zero-width joiner sequence (`👩‍💻`, where
+/// neither the woman nor the computer emoji is itself zero-width — only
+/// the joiner between them is) or a regional-indicator pair forming a flag
+/// (`🇺🇸`, where *neither* component is zero-width) both need real
+/// grapheme-boundary rules to group correctly. Treating each `char` as
+/// independent, or only merging zero-width neighbors, can split a cluster
+/// across a style boundary or under-measure its true rendered width.
+/// Shared by [`cursor_line_spans`] (which highlighting group to render as
+/// one reversed unit) and `draw_controller_source` (how many display cells
+/// that unit actually costs when deciding whether it fits the visible
+/// viewport).
+fn cursor_grapheme_char_range(text: &str, cursor_col: usize) -> (usize, usize) {
+    let mut char_idx = 0usize;
+    for grapheme in text.graphemes(true) {
+        let end = char_idx + grapheme.chars().count();
+        if cursor_col < end {
+            return (char_idx, end);
+        }
+        char_idx = end;
+    }
+    // `cursor_col` is at or past the end of `text`; callers handle the
+    // "past the last character" case themselves, but fall back to a
+    // single-position range just in case.
+    (cursor_col, cursor_col + 1)
+}
+
+fn cursor_line_spans(text: &str, cursor_col: usize) -> Vec<Span<'static>> {
+    let chars: Vec<char> = text.chars().collect();
+    let cursor_style = Style::default().add_modifier(Modifier::REVERSED);
+    if cursor_col >= chars.len() {
+        let mut spans = Vec::new();
+        if !chars.is_empty() {
+            spans.push(Span::raw(chars.iter().collect::<String>()));
+        }
+        spans.push(Span::styled(" ", cursor_style));
+        return spans;
+    }
+
+    let (at_start, at_end) = cursor_grapheme_char_range(text, cursor_col);
+
+    let before: String = chars[..at_start].iter().collect();
+    let at: String = chars[at_start..at_end].iter().collect();
+    let after: String = chars[at_end..].iter().collect();
+    vec![
+        Span::raw(before),
+        Span::styled(at, cursor_style),
+        Span::raw(after),
+    ]
+}
+
+/// The first line/column to render so that `cursor` stays within a
+/// `viewport_len`-cell window, scrolling only as far as needed. Used both
+/// vertically (rows) and horizontally (columns); the vertical caller
+/// additionally clamps against the document's total length (see
+/// `draw_controller_source`) so it never scrolls past a short document's
+/// last line — there's no equivalent "last column" to clamp against
+/// horizontally, since each line has its own length.
+fn first_visible_offset(cursor: usize, viewport_len: usize) -> usize {
+    if viewport_len == 0 {
+        return 0;
+    }
+    cursor.saturating_sub(viewport_len.saturating_sub(1))
+}
+
+/// A short, representative subset of the Lua contract shown as a cheat
+/// sheet next to (or, at narrow widths, instead of) the editor. See
+/// `help_lines`'s "Lua contract" section for the complete reference; the
+/// two are checked for consistency in tests so they can't silently drift.
+fn lua_field_reference_lines() -> Vec<Line<'static>> {
+    vec![
+        Line::from(Span::styled(
+            "on_tick(observation)",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from("observation.drone.x / .y"),
+        Line::from("observation.tick"),
+        Line::from("observation.budget_remaining"),
+        Line::from("observation.discovered[]"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "return:",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from("north south east west"),
+        Line::from("wait scan"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "libraries:",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from("table, string, math only"),
+        Line::from(""),
+        Line::from("F1 opens the complete reference"),
+    ]
 }
 
 fn view_title(view: View) -> &'static str {
@@ -446,20 +928,94 @@ fn draw_help(frame: &mut Frame, area: Rect, state: &AppState) {
 }
 
 /// How many terminal rows `lines` occupies once wrapped to `width`, matching
-/// the `Wrap { trim: false }` behavior used to render Help.
+/// the `Wrap { trim: false }` behavior used to render Help and the
+/// Controller banner.
 fn wrapped_row_count(lines: &[Line<'static>], width: u16) -> usize {
     let width = width.max(1) as usize;
     lines
         .iter()
         .map(|line| {
-            let line_width = line.width();
-            if line_width == 0 {
-                1
-            } else {
-                line_width.div_ceil(width)
-            }
+            let text: String = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+            word_wrapped_row_count(&text, width)
         })
         .sum()
+}
+
+/// How many rows `text` occupies once word-wrapped to `width` columns,
+/// matching ratatui's own greedy word-wrapping with `Wrap { trim: false }`
+/// (never splitting a word across rows unless the word alone is wider than
+/// `width`, and preserving whitespace runs rather than collapsing them). A
+/// word and the whitespace run immediately before it move together as one
+/// unit — the same grouping `Wrap { trim: false }` uses — so e.g. a
+/// 70-column word, 10 columns of spaces, and a short recovery word in a
+/// 78-column pane wrap to two rows (word alone; then the 10 spaces plus the
+/// recovery word, which can't fit on the first row) rather than the one row
+/// a naive total-width division would predict.
+fn word_wrapped_row_count(text: &str, width: usize) -> usize {
+    let width = width.max(1);
+    let mut rows = 0usize;
+    let mut current_width = 0usize; // 0 means the row being built is empty
+    let mut chars = text.chars().peekable();
+    let mut saw_content = false;
+
+    loop {
+        // Measured via `CellWidth` (the same calculation ratatui's own
+        // renderer uses), not a per-character `unicode-width` sum: they can
+        // disagree for character combinations `CellWidth` treats specially
+        // (see `display_width_of_prefix`), which could otherwise reserve
+        // too few rows for a banner and clip its final word.
+        let mut whitespace = String::new();
+        while let Some(&c) = chars.peek() {
+            if !c.is_whitespace() {
+                break;
+            }
+            whitespace.push(c);
+            chars.next();
+        }
+        let mut word = String::new();
+        while let Some(&c) = chars.peek() {
+            if c.is_whitespace() {
+                break;
+            }
+            word.push(c);
+            chars.next();
+        }
+        if whitespace.is_empty() && word.is_empty() {
+            break; // end of text
+        }
+        saw_content = true;
+
+        let segment_width =
+            whitespace.as_str().cell_width() as usize + word.as_str().cell_width() as usize;
+        if segment_width >= width {
+            // The whitespace-plus-word segment alone doesn't fit a row and
+            // hard-wraps across as many rows as it needs, the same way a
+            // single overlong word does.
+            if current_width > 0 {
+                rows += 1;
+            }
+            rows += segment_width / width;
+            current_width = segment_width % width;
+            continue;
+        }
+        if current_width + segment_width <= width {
+            current_width += segment_width;
+        } else {
+            rows += 1;
+            current_width = segment_width;
+        }
+    }
+    if current_width > 0 {
+        rows += 1;
+    }
+    if !saw_content {
+        rows = rows.max(1);
+    }
+    rows.max(1)
 }
 
 /// Two-level contextual help: the current (or Help-opened-from) view's
@@ -506,7 +1062,27 @@ fn help_lines(state: &AppState) -> Vec<Line<'static>> {
         "F5 Operation     (unavailable: work an opportunity from Target first)"
     }));
     lines.push(Line::from(
-        "F6 Deploy        run the current controller (unavailable, see #44/#45)",
+        "F6 Deploy        run the current controller (unavailable, see #45)",
+    ));
+    lines.push(Line::from(if state.view_available(View::Controller) {
+        "F7 Reset         (Controller) restore the starter controller"
+    } else {
+        "F7 Reset         (Controller, unavailable: work an opportunity first)"
+    }));
+    lines.push(Line::from(
+        "Ctrl+Enter       (Controller) load the source and check for on_tick,",
+    ));
+    lines.push(Line::from(
+        "                 without calling on_tick itself (top-level code",
+    ));
+    lines.push(Line::from(
+        "                 outside on_tick does run, e.g. local state setup)",
+    ));
+    lines.push(Line::from(
+        "Ctrl+V           (Controller) same as Ctrl+Enter, for terminals that",
+    ));
+    lines.push(Line::from(
+        "                 can't tell Ctrl+Enter apart from plain Enter",
     ));
     lines.push(Line::from("Ctrl+Q Quit      exit and restore the terminal"));
     lines.push(Line::from(""));
@@ -519,6 +1095,41 @@ fn help_lines(state: &AppState) -> Vec<Line<'static>> {
         "Define a global on_tick(observation) function. It runs once per",
     ));
     lines.push(Line::from("tick and must return the name of one action."));
+    lines.push(Line::from(""));
+    lines.push(Line::from(
+        "Available standard libraries: table, string, math. Player Lua is",
+    ));
+    lines.push(Line::from(
+        "untrusted input, so io, os, package, coroutine, debug, load, dofile,",
+    ));
+    lines.push(Line::from(
+        "and loadfile are not available; scripts using them will fail to load.",
+    ));
+    lines.push(Line::from(
+        "print is not available either (it would corrupt the console's own",
+    ));
+    lines.push(Line::from("display)."));
+    lines.push(Line::from(
+        "math.random always starts from the same fixed seed, so a controller",
+    ));
+    lines.push(Line::from(
+        "using it behaves identically on every deployment; math.randomseed is",
+    ));
+    lines.push(Line::from(
+        "not available (it would undo that determinism if a script called it).",
+    ));
+    lines.push(Line::from(
+        "string.pack, unpack, packsize, and dump are also not available (they",
+    ));
+    lines.push(Line::from(
+        "expose native platform layout); nor is collectgarbage.",
+    ));
+    lines.push(Line::from(
+        "pairs/next only iterate tables keyed by booleans, numbers, or",
+    ));
+    lines.push(Line::from(
+        "strings; a table or function key makes the whole traversal fail.",
+    ));
     lines.push(Line::from(""));
     lines.push(Line::from(
         "observation.drone.x / .y      the drone's current position",
@@ -632,7 +1243,13 @@ fn view_specific_help(view: View) -> Vec<Line<'static>> {
             Line::from("Esc    back to Signals"),
             Line::from("F8     (80-99 columns) switch between intel and provenance"),
         ],
-        View::Controller => vec![Line::from("The Lua editor arrives in a later build (#44).")],
+        View::Controller => vec![
+            Line::from("Type to edit; arrows/Home/End/PageUp/PageDown move the cursor"),
+            Line::from("F7          reset to the starter controller (confirms if modified)"),
+            Line::from("Ctrl+Enter  load the source and check for on_tick, without calling it"),
+            Line::from("Ctrl+V      same as Ctrl+Enter (works on every terminal)"),
+            Line::from("F8          (80-99 columns) switch between source and reference"),
+        ],
         View::Operation => vec![Line::from("Live telemetry arrives in a later build (#45).")],
         View::AfterAction => vec![Line::from(
             "After-action reporting arrives in a later build (#46).",
@@ -659,9 +1276,14 @@ fn footer_hint_items(state: &AppState, show_f8: bool) -> Vec<(&'static str, &'st
             "F5 Op",
             state.view_available(View::Operation),
         ),
-        // F6 has no prerequisite controller to deploy yet (see #44/#45).
+        // F6 has no operation to deploy yet (see #45).
         ("F6 Deploy", "F6 Dep", false),
     ];
+    if state.current_view() == View::Controller {
+        let has_controller = state.controller_source().is_some();
+        items.push(("F7 Reset", "F7 Rst", has_controller));
+        items.push(("Ctrl+Enter Validate", "^Ent Val", has_controller));
+    }
     if show_f8 {
         items.push(("F8 Toggle Pane", "F8 Pane", true));
     }
@@ -707,7 +1329,10 @@ fn footer_line_width(labels: &[(&'static str, bool)]) -> usize {
 
 fn draw_footer(frame: &mut Frame, area: Rect, state: &AppState, full_width: u16) {
     let show_f8 = full_width < TWO_PANE_MIN_COLUMNS
-        && matches!(state.current_view(), View::Signals | View::Target);
+        && matches!(
+            state.current_view(),
+            View::Signals | View::Target | View::Controller
+        );
     let items = footer_hint_items(state, show_f8);
     let inner_width = area.width.saturating_sub(2) as usize;
 
@@ -811,6 +1436,20 @@ mod tests {
     }
 
     #[test]
+    fn help_documents_the_restricted_lua_standard_library() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::OpenHelp);
+        let terminal = render(120, 60, &state);
+
+        assert!(buffer_contains(&terminal, "table, string, math"));
+        assert!(buffer_contains(&terminal, "io, os, package"));
+        assert!(buffer_contains(&terminal, "dofile"));
+        assert!(buffer_contains(&terminal, "math.randomseed"));
+    }
+
+    #[test]
     fn help_advertises_its_own_scrolling_at_the_supported_minimum_geometry() {
         use super::super::state::Msg;
 
@@ -888,6 +1527,21 @@ mod tests {
     }
 
     #[test]
+    fn footer_keeps_the_quit_hint_visible_in_controller_at_minimum_width() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+
+        assert!(
+            buffer_contains(&terminal, "Ctrl+Q Quit"),
+            "Controller's extra F7/Ctrl+Enter hints must not crowd out the global quit hint"
+        );
+    }
+
+    #[test]
     fn header_keeps_working_set_visible_at_minimum_width() {
         use super::super::state::Msg;
 
@@ -947,7 +1601,7 @@ mod tests {
 
         let mut state = AppState::new();
         state.apply(Msg::OpenHelp);
-        let terminal = render(120, 60, &state);
+        let terminal = render(120, 71, &state);
 
         assert!(buffer_contains(&terminal, "scan does not move the drone"));
         assert!(buffer_contains(&terminal, "regardless of walls in the way"));
@@ -981,7 +1635,7 @@ mod tests {
         // without needing to scroll.
         let mut state = AppState::new();
         state.apply(Msg::OpenHelp);
-        let terminal = render(120, 70, &state);
+        let terminal = render(120, 83, &state);
 
         assert!(buffer_contains(&terminal, "Terminology"));
         assert!(buffer_contains(&terminal, "MACHINE INTERCEPT"));
@@ -1008,7 +1662,7 @@ mod tests {
     }
 
     #[test]
-    fn controller_view_acknowledges_the_seeded_starter() {
+    fn controller_view_shows_the_seeded_starter_source() {
         use super::super::state::Msg;
 
         let mut state = AppState::new();
@@ -1016,8 +1670,8 @@ mod tests {
         state.apply(Msg::Activate);
         let terminal = render(120, 40, &state);
 
-        assert!(buffer_contains(&terminal, "Starter controller loaded"));
-        assert!(!buffer_contains(&terminal, "No controller is loaded yet."));
+        assert!(buffer_contains(&terminal, "function on_tick(observation)"));
+        assert!(buffer_contains(&terminal, "CAPTURED CONTROLLER"));
     }
 
     #[test]
@@ -1030,6 +1684,397 @@ mod tests {
         let terminal = render(120, 40, &state);
 
         assert!(buffer_contains(&terminal, "CONTROLLER: starter"));
+    }
+
+    #[test]
+    fn controller_status_stays_visible_after_navigating_away() {
+        use super::super::state::Msg;
+        use super::super::state::View;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.apply(Msg::EditController(super::super::editor::EditOp::Insert(
+            'x',
+        )));
+        state.apply(Msg::Navigate(View::Signals));
+        let terminal = render(120, 40, &state);
+
+        assert!(
+            buffer_contains(&terminal, "CONTROLLER: modified"),
+            "a session-only edit at risk of being lost must stay visible from Signals too"
+        );
+    }
+
+    #[test]
+    fn controller_status_stays_visible_from_signals_at_eighty_columns() {
+        use super::super::state::Msg;
+        use super::super::state::View;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.apply(Msg::EditController(super::super::editor::EditOp::Insert(
+            'x',
+        )));
+        state.apply(Msg::Navigate(View::Signals));
+        let terminal = render(80, 30, &state);
+
+        assert!(
+            buffer_contains(&terminal, "CONTROLLER: modified"),
+            "at the narrow 80-column width, a candidate that drops the \
+             signals count instead of controller status should be offered \
+             before one that drops controller status entirely"
+        );
+    }
+
+    #[test]
+    fn controller_status_stays_visible_from_target_at_eighty_columns() {
+        use super::super::state::Msg;
+        use super::super::state::View;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.apply(Msg::EditController(super::super::editor::EditOp::Insert(
+            'x',
+        )));
+        state.apply(Msg::Navigate(View::Target));
+        let terminal = render(80, 30, &state);
+
+        assert!(
+            buffer_contains(&terminal, "CONTROLLER: modified"),
+            "at the narrow 80-column width, a candidate that drops the \
+             Target field instead of controller status should be offered \
+             before one that drops controller status entirely"
+        );
+    }
+
+    #[test]
+    fn header_shows_status_ready_after_a_successful_validation_from_any_view() {
+        use super::super::state::Msg;
+        use super::super::state::View;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.apply(Msg::ValidateController);
+        state.apply(Msg::Navigate(View::Signals));
+        let terminal = render(120, 40, &state);
+
+        assert!(
+            buffer_contains(&terminal, "STATUS: READY"),
+            "docs/TUI_DESIGN.md's persistent header shows STATUS: READY \
+             alongside CONTROLLER: ..., not only inside Controller's own banner"
+        );
+    }
+
+    #[test]
+    fn quit_confirmation_is_visible_from_every_view_not_only_controller() {
+        use super::super::state::Msg;
+        use super::super::state::View;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.apply(Msg::EditController(super::super::editor::EditOp::Insert(
+            'x',
+        )));
+        state.apply(Msg::Navigate(View::Signals));
+        state.apply(Msg::RequestQuit);
+        let terminal = render(120, 40, &state);
+
+        assert!(state.quit_confirmation_pending());
+        assert!(buffer_contains(
+            &terminal,
+            "Modified controller source will be lost."
+        ));
+    }
+
+    #[test]
+    fn quit_confirmation_is_visible_even_below_the_supported_minimum_geometry() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.apply(Msg::EditController(super::super::editor::EditOp::Insert(
+            'x',
+        )));
+        state.apply(Msg::RequestQuit);
+        let terminal = render(60, 20, &state);
+
+        assert!(buffer_contains(
+            &terminal,
+            "Modified controller source will be lost."
+        ));
+    }
+
+    #[test]
+    fn quit_confirmation_keeps_its_confirm_and_cancel_keys_visible_at_very_short_heights() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.apply(Msg::EditController(super::super::editor::EditOp::Insert(
+            'x',
+        )));
+        state.apply(Msg::RequestQuit);
+
+        for height in [1, 2, 3, 5] {
+            let terminal = render(60, height, &state);
+            let visible = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert!(
+                visible.contains("Enter") && visible.contains("Esc"),
+                "at height {height}, both the confirm (Enter) and cancel (Esc) \
+                 keys should stay visible, got: {visible:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn reset_confirmation_is_visible_even_when_the_narrow_reference_pane_was_toggled_on() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.apply(Msg::EditController(super::super::editor::EditOp::Insert(
+            'x',
+        )));
+        state.apply(Msg::ToggleSecondaryPane); // swap to the Lua reference pane
+        state.apply(Msg::RequestResetController);
+        let terminal = render(90, 30, &state);
+
+        assert!(state.narrow_secondary_visible());
+        assert!(state.reset_confirmation_pending());
+        assert!(buffer_contains(
+            &terminal,
+            "Reset controller? Edits will be lost."
+        ));
+    }
+
+    #[test]
+    fn a_long_source_line_keeps_the_cursor_visible_by_scrolling_horizontally() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        let long_marker = "Z".repeat(100);
+        for c in long_marker.chars() {
+            state.apply(Msg::EditController(super::super::editor::EditOp::Insert(c)));
+        }
+        let terminal = render(120, 40, &state);
+
+        assert!(
+            buffer_contains(&terminal, "ZZZZZZZZZZ"),
+            "the tail of a long line (where the cursor now is) must still be on screen"
+        );
+    }
+
+    #[test]
+    fn word_wrapped_row_count_matches_greedy_word_wrapping_not_total_width_division() {
+        // Three 40-column words in a 78-column line: a naive
+        // total-width/pane-width division sees 120/78 = 2 rows, but real
+        // word wrapping can't fit a second 40-column word on the first
+        // word's row (40 + 1 + 40 = 81 > 78), so it actually takes 3.
+        let word = "x".repeat(40);
+        let text = format!("{word} {word} {word}");
+        assert_eq!(word_wrapped_row_count(&text, 78), 3);
+    }
+
+    #[test]
+    fn word_wrapped_row_count_preserves_whitespace_runs_instead_of_collapsing_them() {
+        // A 70-column word, ten literal spaces, and a short recovery word
+        // in a 78-column pane: `Wrap { trim: false }` preserves the space
+        // run, so the trailing "recover" (10 + 7 = 17 columns) can't share
+        // a row with the 70-column word (70 + 17 = 87 > 78) and wraps to a
+        // second row — collapsing the run to a single space would instead
+        // predict everything fits on one 78-column row (70 + 1 + 7 = 78).
+        let text = format!("{}{}recover", "x".repeat(70), " ".repeat(10));
+        assert_eq!(word_wrapped_row_count(&text, 78), 2);
+    }
+
+    #[test]
+    fn word_wrapped_row_count_measures_a_halfwidth_katakana_dakuten_like_ratatui() {
+        // Same underlying divergence as `display_width_matches_ratatui_
+        // for_a_halfwidth_katakana_dakuten`, but exercised through the
+        // word-wrap row counter a banner/Help actually uses: a per-
+        // character `unicode-width` sum treats U+FF9E as zero-width, while
+        // ratatui's own `CellWidth` counts it as an extra occupied cell.
+        let word = "\u{FF76}\u{FF9E}".repeat(40); // 40x (halfwidth カ + dakuten) = 80 cells
+        assert_eq!(word_wrapped_row_count(&word, 78), 80_usize.div_ceil(78));
+    }
+
+    #[test]
+    fn word_wrapped_row_count_hard_wraps_a_single_word_wider_than_the_line() {
+        let word = "x".repeat(200);
+        assert_eq!(word_wrapped_row_count(&word, 78), 200_usize.div_ceil(78));
+    }
+
+    #[test]
+    fn word_wrapped_row_count_treats_an_empty_line_as_one_row() {
+        assert_eq!(word_wrapped_row_count("", 78), 1);
+    }
+
+    #[test]
+    fn display_width_of_prefix_counts_double_width_characters_as_two_cells() {
+        // "中" (CJK) occupies two terminal columns despite being one `char`;
+        // a scroll calculation based on `char` count alone would place the
+        // cursor two columns short of its true screen position.
+        assert_eq!(display_width_of_prefix("中文", 1), 2);
+        assert_eq!(display_width_of_prefix("中文", 2), 4);
+        assert_eq!(display_width_of_prefix("ab", 2), 2);
+    }
+
+    #[test]
+    fn cursor_on_a_combining_mark_is_highlighted_together_with_its_base_character() {
+        // "e" + U+0301 (combining acute accent) is a decomposed grapheme:
+        // the mark alone is zero-width, so highlighting it by itself would
+        // render no visible cursor cell at all.
+        let text = "e\u{0301}bc";
+        let cursor_span = |cursor_col: usize| {
+            cursor_line_spans(text, cursor_col)
+                .into_iter()
+                .find(|span| span.style.add_modifier.contains(Modifier::REVERSED))
+                .expect("one span should carry the cursor style")
+        };
+
+        // Cursor on the mark itself (col 1): the highlighted unit must
+        // include the base character before it.
+        assert_eq!(cursor_span(1).content, "e\u{0301}");
+        // Cursor on the base character (col 0): the highlighted unit must
+        // include the mark trailing it.
+        assert_eq!(cursor_span(0).content, "e\u{0301}");
+    }
+
+    #[test]
+    fn cursor_grapheme_range_spans_a_heart_and_its_variation_selector() {
+        // U+2764 (heavy black heart) + U+FE0F (variation selector-16,
+        // requesting emoji presentation) is a two-codepoint grapheme
+        // cluster ratatui renders as one unit — measuring only the `char`
+        // at the cursor (whichever of the two it lands on) misses the
+        // other codepoint's contribution to the unit's true display width.
+        let text = "a\u{2764}\u{fe0f}b";
+        let chars: Vec<char> = text.chars().collect();
+        assert_eq!(cursor_grapheme_char_range(text, 1), (1, 3));
+        assert_eq!(cursor_grapheme_char_range(text, 2), (1, 3));
+        let glyph: String = chars[1..3].iter().collect();
+        assert_eq!(
+            glyph.as_str().cell_width(),
+            2,
+            "ratatui renders heart+VS16 as 2 cells, not 1"
+        );
+    }
+
+    #[test]
+    fn cursor_grapheme_range_spans_a_zero_width_joiner_sequence() {
+        // "👩‍💻" is WOMAN (U+1F469) + ZWJ (U+200D) + COMPUTER (U+1F4BB) —
+        // one extended grapheme cluster, but neither the woman nor the
+        // computer emoji is itself zero-width (only the joiner between
+        // them is), so a heuristic that only merges *zero-width* neighbors
+        // stops right after the joiner and never reaches the trailing
+        // emoji.
+        let text = "a\u{1F469}\u{200D}\u{1F4BB}b";
+        let chars: Vec<char> = text.chars().collect();
+        assert_eq!(chars.len(), 5, "a, woman, zwj, computer, b");
+        assert_eq!(cursor_grapheme_char_range(text, 1), (1, 4));
+        assert_eq!(cursor_grapheme_char_range(text, 2), (1, 4));
+        assert_eq!(cursor_grapheme_char_range(text, 3), (1, 4));
+    }
+
+    #[test]
+    fn cursor_grapheme_range_spans_a_regional_indicator_flag_pair() {
+        // "🇺🇸" is REGIONAL INDICATOR SYMBOL LETTER U (U+1F1FA) + ... S
+        // (U+1F1F8) — two individually non-zero-width characters that form
+        // one flag grapheme together; nothing about either one alone marks
+        // them as needing to be grouped.
+        let text = "a\u{1F1FA}\u{1F1F8}b";
+        let chars: Vec<char> = text.chars().collect();
+        assert_eq!(chars.len(), 4, "a, U indicator, S indicator, b");
+        assert_eq!(cursor_grapheme_char_range(text, 1), (1, 3));
+        assert_eq!(cursor_grapheme_char_range(text, 2), (1, 3));
+    }
+
+    #[test]
+    fn chars_to_skip_for_cell_offset_accounts_for_double_width_characters() {
+        // Skipping 2 display cells must skip exactly one CJK character, not
+        // zero (which char-count-only scrolling would do, since 2 chars
+        // would be requested but only 1 exists at that cell offset).
+        assert_eq!(chars_to_skip_for_cell_offset("中文abc", 2), 1);
+        assert_eq!(chars_to_skip_for_cell_offset("中文abc", 4), 2);
+        assert_eq!(chars_to_skip_for_cell_offset("abc", 2), 2);
+    }
+
+    #[test]
+    fn chars_to_skip_for_cell_offset_treats_zero_width_marks_as_zero_cells() {
+        // Previously this function clamped every character's contribution
+        // to at least one cell, so three zero-width combining marks were
+        // (wrongly) treated as consuming three whole display columns —
+        // disagreeing with `display_width_of_prefix`'s accounting of the
+        // very same text and potentially leaving the cursor's true screen
+        // column outside the scrolled viewport.
+        let text = "\u{0301}\u{0301}\u{0301}X"; // three combining marks, then "X"
+        assert_eq!(
+            chars_to_skip_for_cell_offset(text, 0),
+            0,
+            "nothing needs skipping to reach the very first cell"
+        );
+        assert_eq!(
+            chars_to_skip_for_cell_offset(text, 1),
+            4,
+            "reaching cell 1 (where X starts) must skip past all three \
+             zero-width marks and X itself, not stop after the first mark"
+        );
+    }
+
+    #[test]
+    fn chars_to_skip_for_cell_offset_never_stops_mid_grapheme_cluster() {
+        // "a👩‍💻b": a (1 cell), then the woman-technologist ZWJ sequence
+        // (2 cells — see `cursor_grapheme_range_spans_a_zero_width_joiner_
+        // sequence`), then b (1 cell). Requesting a cell offset that lands
+        // *inside* that cluster (offset 2, one cell past "a") must still
+        // skip the whole cluster, not stop partway through it and leave a
+        // scrolled line starting on the ZWJ or the trailing emoji alone.
+        let text = "a\u{1F469}\u{200D}\u{1F4BB}b";
+        let chars: Vec<char> = text.chars().collect();
+        assert_eq!(chars.len(), 5, "a, woman, zwj, computer, b");
+        let skip = chars_to_skip_for_cell_offset(text, 2);
+        assert!(
+            skip == 1 || skip == 4,
+            "must land on a grapheme boundary (before or after the \
+             cluster), got skip={skip}"
+        );
+    }
+
+    #[test]
+    fn display_width_matches_ratatui_for_a_halfwidth_katakana_dakuten() {
+        // `unicode-width` alone reports U+FF9E (a halfwidth katakana
+        // voiced-sound mark) as zero-width, but ratatui's own `CellWidth`
+        // adds a terminal-compatibility +1 for it (real terminals render it
+        // as its own occupied cell) — a naive per-character sum disagrees
+        // with what actually gets rendered, exactly the class of mismatch
+        // that could clip the cursor off the edge of a scrolled line.
+        let text = "\u{FF76}\u{FF9E}"; // halfwidth カ + dakuten
+        assert_eq!(
+            display_width_of_prefix(text, 2),
+            2,
+            "ratatui renders the halfwidth katakana + dakuten pair as 2 cells"
+        );
+        assert_eq!(
+            chars_to_skip_for_cell_offset(text, 2),
+            2,
+            "reaching cell 2 must skip past both characters, not treat the \
+             dakuten as contributing zero cells"
+        );
     }
 
     #[test]
