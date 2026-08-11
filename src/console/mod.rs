@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossterm::cursor::Show;
 use crossterm::event::{
-    self as term_event, Event, KeyCode, KeyEventKind, KeyboardEnhancementFlags,
+    self as term_event, Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
@@ -206,12 +206,30 @@ fn should_redraw(state: &mut AppState, event: Event, frame_size: (u16, u16)) -> 
     // it just cancelled. The cost is that holding `y`/`n` in Controller
     // to type several of that letter no longer auto-repeats — a minor,
     // easily-worked-around loss (press it again) next to that risk.
+    //
+    // `Ctrl+V` (the fallback validation binding, see `event::map`) is
+    // excluded the same way, but only that exact chord — plain `v` (no
+    // Ctrl) is an ordinary printable character that must keep repeating
+    // for typing. Each `Ctrl+V` repeat starts another `validate` worker
+    // (see `lua_controller::validate`'s `MAX_CONCURRENT_VALIDATIONS`
+    // cap), so a terminal that reports a held `Ctrl+V` as a stream of
+    // `Repeat` events could otherwise exhaust every validation slot from
+    // one keypress, the same class of risk transition keys exist for
+    // above.
+    let is_ctrl_v = key.code == KeyCode::Char('v') && key.modifiers.contains(KeyModifiers::CONTROL);
     let kind_allowed = match key.kind {
         KeyEventKind::Press => true,
-        KeyEventKind::Repeat => !matches!(
-            key.code,
-            KeyCode::Enter | KeyCode::Esc | KeyCode::F(_) | KeyCode::Char('y') | KeyCode::Char('n')
-        ),
+        KeyEventKind::Repeat => {
+            !is_ctrl_v
+                && !matches!(
+                    key.code,
+                    KeyCode::Enter
+                        | KeyCode::Esc
+                        | KeyCode::F(_)
+                        | KeyCode::Char('y')
+                        | KeyCode::Char('n')
+                )
+        }
         KeyEventKind::Release => false,
     };
     if !kind_allowed {
@@ -264,6 +282,12 @@ mod tests {
 
     fn repeat(code: KeyCode) -> Event {
         let mut key = KeyEvent::new(code, KeyModifiers::NONE);
+        key.kind = KeyEventKind::Repeat;
+        Event::Key(key)
+    }
+
+    fn repeat_ctrl(code: KeyCode) -> Event {
+        let mut key = KeyEvent::new(code, KeyModifiers::CONTROL);
         key.kind = KeyEventKind::Repeat;
         Event::Key(key)
     }
@@ -493,6 +517,39 @@ mod tests {
 
         assert_eq!(state.current_view(), View::Target);
         assert_eq!(state.working_set(), None);
+    }
+
+    #[test]
+    fn a_held_ctrl_v_does_not_repeatedly_start_new_validations() {
+        // Each `Ctrl+V` triggers a background `validate` worker (see
+        // `lua_controller::validate`'s `MAX_CONCURRENT_VALIDATIONS` cap); a
+        // terminal reporting a held `Ctrl+V` as a stream of `Repeat` events
+        // must not start one worker per repeat, the same held-key cascade
+        // risk the Enter/Esc/F-key/y/n guard exists for above.
+        let (_, terminal) = render(
+            120,
+            40,
+            &[
+                press(KeyCode::Enter), // open Target
+                press(KeyCode::Enter), // commit, opening Controller
+                press_ctrl(KeyCode::Char('v')),
+                repeat_ctrl(KeyCode::Char('v')),
+                repeat_ctrl(KeyCode::Char('v')),
+            ],
+        );
+
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+                .contains("STATUS: READY"),
+            "the initial Press should still validate; only the Repeats \
+             that follow it must be suppressed"
+        );
     }
 
     #[test]

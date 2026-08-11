@@ -103,16 +103,30 @@ pub fn map(
         // While the reference pane is swapped in at 80-99 columns, the
         // source isn't on screen at all, so ordinary editing keys must not
         // silently mutate it — only F8 (handled above) can bring it back.
-        _ if controller_is_open && controller_source_visible => map_controller_edit(key.code, ctrl),
+        _ if controller_is_open && controller_source_visible => {
+            // AltGr (used on many non-US keyboard layouts to type
+            // punctuation like `{`, `}`, `[`, `]`, `\`, `@`) is reported by
+            // some terminals — notably on Windows — as `CONTROL | ALT`
+            // rather than a distinct modifier, indistinguishable at this
+            // level from an actual Ctrl+Alt chord. None of this console's
+            // own bindings use Alt at all, so a `Char` arriving with ALT
+            // held alongside CONTROL is always AltGr-produced printable
+            // input here, never a real control binding, and must still be
+            // inserted rather than silently dropped.
+            let altgr = ctrl && key.modifiers.contains(KeyModifiers::ALT);
+            map_controller_edit(key.code, ctrl, altgr)
+        }
         _ => None,
     }
 }
 
 /// Ordinary editing/cursor-movement keys, only reachable once Controller is
-/// showing and neither confirmation dialog is open (see [`map`]).
-fn map_controller_edit(code: KeyCode, ctrl: bool) -> Option<Msg> {
+/// showing and neither confirmation dialog is open (see [`map`]). `altgr`
+/// is set when `ctrl` is only true because of an AltGr chord (`CONTROL |
+/// ALT` together), which must still type its printable character.
+fn map_controller_edit(code: KeyCode, ctrl: bool, altgr: bool) -> Option<Msg> {
     let op = match code {
-        KeyCode::Char(c) if !ctrl => EditOp::Insert(c),
+        KeyCode::Char(c) if !ctrl || altgr => EditOp::Insert(c),
         // A single space keeps indentation as ordinary printable characters
         // (no literal tab byte in the source) without pretending to be a
         // real indent-width-aware editor.
@@ -252,6 +266,33 @@ mod tests {
             Some(Msg::ValidateController)
         );
         assert_eq!(map_in(ctrl_v, View::Signals), None);
+    }
+
+    #[test]
+    fn altgr_produced_characters_are_still_inserted_in_the_editor() {
+        // Some terminals (notably on Windows) report AltGr as `CONTROL |
+        // ALT` rather than a distinct modifier, indistinguishable at this
+        // level from an actual Ctrl+Alt chord — but this console has no
+        // Alt-based bindings at all, so any such `Char` must still type,
+        // not be swallowed as if it were an unrecognized control shortcut.
+        let altgr_at = key_with_modifiers(
+            KeyCode::Char('@'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        );
+        assert_eq!(
+            map_in(altgr_at, View::Controller),
+            Some(Msg::EditController(EditOp::Insert('@')))
+        );
+    }
+
+    #[test]
+    fn plain_ctrl_characters_are_still_rejected_by_the_editor() {
+        // Unlike the AltGr case above, an ordinary Ctrl+<letter> chord
+        // (ALT not held) that isn't one of the console's own bindings must
+        // still be swallowed rather than typed — it's not printable input
+        // in that case, matching every terminal's real Ctrl+letter chords.
+        let ctrl_x = key_with_modifiers(KeyCode::Char('x'), KeyModifiers::CONTROL);
+        assert_eq!(map_in(ctrl_x, View::Controller), None);
     }
 
     #[test]

@@ -420,16 +420,21 @@ fn install_deterministic_table_iteration(lua: &Lua) -> mlua::Result<()> {
                         pairs_field.type_name()
                     )));
                 };
-                // Real Lua 5.4's `pairs` returns only the *first three*
-                // results of calling `__pairs`, not however many it
-                // returned — forwarding more than that leaks extra values
+                // Real Lua 5.4's `pairs` calls `__pairs` requesting exactly
+                // three results (`lua_call(L, 1, 3)`): fewer than three
+                // returned are padded with `nil` by the VM, and more than
+                // three are discarded. Forwarding *however many* the
+                // metamethod actually returned instead leaks extra values
                 // into the generic `for` loop's own protocol (its 4th slot
                 // is the to-be-closed value, so a leaked non-nil 4th value
-                // here can make an otherwise-valid `for k, v in pairs(t)`
-                // fail with "got a non-closable value" instead of working
-                // like it would against real Lua).
-                let results = pairs_mm.call::<MultiValue>(table)?;
-                return Ok(results.into_iter().take(3).collect());
+                // can make an otherwise-valid `for k, v in pairs(t)` fail
+                // with "got a non-closable value"), or leaves callers that
+                // inspect the result count (`select("#", pairs(t))`)
+                // observing a different arity than real Lua's fixed three.
+                let mut results: Vec<Value> =
+                    pairs_mm.call::<MultiValue>(table)?.into_iter().collect();
+                results.resize(3, Value::Nil);
+                return Ok(MultiValue::from_iter(results));
             }
         }
         // Snapshot only the sorted *key order* once, here, and walk it by
@@ -469,7 +474,16 @@ fn install_deterministic_table_iteration(lua: &Lua) -> mlua::Result<()> {
                 loop {
                     let i = position.get();
                     if i >= key_count {
-                        return Ok(MultiValue::new());
+                        // Real Lua's `pairs` (absent a custom `__pairs`)
+                        // returns `next` itself as the iterator function,
+                        // and `next` returns a single `nil` once
+                        // exhausted — not zero values. Match that arity
+                        // here too, not just on the standalone `next`
+                        // override above, since controller code can call
+                        // this returned iterator function directly
+                        // (`local f, s, k = pairs(t)`) instead of only
+                        // through a `for` loop.
+                        return (Value::Nil,).into_lua_multi(lua);
                     }
                     position.set(i + 1);
                     let key: Value = sorted_keys.get(i + 1)?;
@@ -1290,6 +1304,37 @@ mod tests {
             end
             function on_tick(observation) return "wait" end
         "#;
+        assert!(validate(source).is_ok());
+    }
+
+    #[test]
+    fn pairs_pads_a_pairs_metamethod_that_returns_fewer_than_three_values() {
+        // Real Lua 5.4 requests exactly three results from `__pairs`; a
+        // metamethod returning fewer must be padded with `nil`, not left
+        // short — `select("#", pairs(t))` is `3` in real Lua even when
+        // `__pairs` only returns one value.
+        let source = r##"
+            local proxy = setmetatable({}, {
+                __pairs = function(self) return next, self end,
+            })
+            local count = select("#", pairs(proxy))
+            assert(count == 3, count)
+            function on_tick(observation) return "wait" end
+        "##;
+        assert!(validate(source).is_ok());
+    }
+
+    #[test]
+    fn pairs_iterator_returns_a_single_nil_once_exhausted_when_called_directly() {
+        // The position-based iterator `pairs` returns (absent a custom
+        // `__pairs`) must match `next`'s exhaustion arity too, since
+        // controller code can call it directly instead of only through a
+        // `for` loop.
+        let source = r##"
+            local f, s, k = pairs({})
+            assert(select("#", f(s, k)) == 1, select("#", f(s, k)))
+            function on_tick(observation) return "wait" end
+        "##;
         assert!(validate(source).is_ok());
     }
 
