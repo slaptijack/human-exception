@@ -10,11 +10,13 @@
 //! `Observation` table and only ever produces an action name. The contract
 //! is intentionally small and provisional.
 
+use std::cell::Cell;
 use std::error::Error;
 use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -760,6 +762,12 @@ pub enum ControllerError {
     CallbackFailed(mlua::Error),
     /// `on_tick` returned a value that is not a valid action.
     InvalidAction(String),
+    /// A single `on_tick` call exceeded its per-tick execution allowance
+    /// (see [`TICK_INSTRUCTION_BUDGET`]), most likely because it never
+    /// returns. Distinct from [`ControllerError::CallbackFailed`] so a live
+    /// deployment can show the player a precise "this is a runaway
+    /// controller" diagnostic rather than a generic Lua error.
+    ExecutionLimitExceeded,
 }
 
 impl fmt::Display for ControllerError {
@@ -783,6 +791,12 @@ impl fmt::Display for ControllerError {
             ControllerError::InvalidAction(detail) => {
                 write!(f, "'{ON_TICK}' returned an invalid action: {detail}")
             }
+            ControllerError::ExecutionLimitExceeded => {
+                write!(
+                    f,
+                    "'{ON_TICK}' exceeded its execution allowance and was stopped"
+                )
+            }
         }
     }
 }
@@ -792,7 +806,9 @@ impl Error for ControllerError {
         match self {
             ControllerError::ScriptUnreadable { source, .. } => Some(source),
             ControllerError::ScriptInvalid(err) | ControllerError::CallbackFailed(err) => Some(err),
-            ControllerError::MissingCallback | ControllerError::InvalidAction(_) => None,
+            ControllerError::MissingCallback
+            | ControllerError::InvalidAction(_)
+            | ControllerError::ExecutionLimitExceeded => None,
         }
     }
 }
@@ -835,36 +851,199 @@ pub fn run(
     let mut simulation = Simulation::new();
 
     loop {
-        let observation_table = observation_to_table(&lua, simulation.observe())
-            .map_err(ControllerError::ScriptInvalid)?;
+        let record = advance_tick(&lua, &callback, &mut simulation)?;
+        let outcome = record.outcome;
+        observer(record);
 
-        let response: String = callback
-            .call(observation_table)
-            .map_err(ControllerError::CallbackFailed)?;
-
-        let action = parse_action(&response)?;
-
-        let report = simulation
-            .step(action)
-            .map_err(|err| invalid_action_error(&response, err))?;
-
-        let obs = simulation.observe();
-        let map = simulation.map();
-        observer(TickRecord {
-            tick: obs.tick,
-            drone_position: obs.drone_position,
-            action,
-            budget_remaining: obs.budget_remaining,
-            outcome: report.outcome,
-            events: report.events,
-            map_width: map.width(),
-            map_height: map.height(),
-            discovered: obs.discovered,
-        });
-
-        if report.outcome != TickOutcome::Running {
-            return Ok(report.outcome);
+        if outcome != TickOutcome::Running {
+            return Ok(outcome);
         }
+    }
+}
+
+/// Runs exactly one tick: builds the observation table for `simulation`'s
+/// current state, calls `callback`, validates and applies the returned
+/// action, and reports the result as a [`TickRecord`]. Shared by [`run`]
+/// (which loops this to completion for the noninteractive CLI path) and
+/// [`LiveOperation::step`] (which runs it once per player-paced tick in the
+/// interactive console), so the two can't drift apart.
+fn advance_tick(
+    lua: &Lua,
+    callback: &Function,
+    simulation: &mut Simulation,
+) -> Result<TickRecord, ControllerError> {
+    let observation_table =
+        observation_to_table(lua, simulation.observe()).map_err(ControllerError::ScriptInvalid)?;
+
+    let response: String = callback
+        .call(observation_table)
+        .map_err(ControllerError::CallbackFailed)?;
+
+    let action = parse_action(&response)?;
+
+    let report = simulation
+        .step(action)
+        .map_err(|err| invalid_action_error(&response, err))?;
+
+    let obs = simulation.observe();
+    let map = simulation.map();
+    Ok(TickRecord {
+        tick: obs.tick,
+        drone_position: obs.drone_position,
+        action,
+        budget_remaining: obs.budget_remaining,
+        outcome: report.outcome,
+        events: report.events,
+        map_width: map.width(),
+        map_height: map.height(),
+        discovered: obs.discovered,
+    })
+}
+
+/// The number of Lua VM instructions a single [`LiveOperation::step`] call
+/// allows `on_tick` to execute before treating it as runaway. A recurring
+/// trigger (fires every `n`th instruction for the sandboxed `Lua`'s entire
+/// lifetime, not a one-shot budget that must be reset per tick), so an
+/// ordinary multi-tick operation's cumulative instruction count — at most a
+/// few thousand instructions per tick across the fixed scenario's short
+/// budget — never comes close to tripping it, while a genuine infinite loop
+/// inside any single `on_tick` call still ends the deployment quickly. See
+/// `docs/TUI_DESIGN.md`, "Runaway Lua and responsiveness".
+const TICK_INSTRUCTION_BUDGET: u32 = 2_000_000;
+
+/// A live, steppable deployment of a player's controller against a fresh
+/// [`Simulation`]: the console's interactive counterpart to [`run`]. Unlike
+/// `run`, which drives a script to completion in one blocking call,
+/// [`LiveOperation::step`] advances exactly one tick per call so the
+/// interactive console can pace ticks under player control (`Space`
+/// pause/resume, `Enter` single-step — see `docs/TUI_DESIGN.md`'s
+/// "Operation" section) instead of just observing a finished run.
+pub struct LiveOperation {
+    lua: Lua,
+    callback: Function,
+    simulation: Simulation,
+    /// Set by the per-tick instruction hook installed in [`deploy`] when a
+    /// single `step` call's `on_tick` invocation ran past
+    /// [`TICK_INSTRUCTION_BUDGET`]. The hook's own error is an ordinary
+    /// catchable Lua error — a script that wraps its own infinite loop in
+    /// `pcall` could otherwise absorb it and return an apparently normal
+    /// action — so `step` checks this flag independently of whatever
+    /// `callback.call` itself returned, the same defense `validate` applies
+    /// to the top-level load.
+    hook_fired: Rc<Cell<bool>>,
+    finished: bool,
+}
+
+// `mlua::Lua`/`Function` don't implement `Debug`, so this can't be derived.
+// Deliberately doesn't print `lua`/`callback`/`simulation`'s contents (Lua
+// state isn't meaningfully inspectable this way anyway) — just enough for
+// `unwrap`/`unwrap_err`/`{:?}` in tests and any future caller-side logging.
+impl fmt::Debug for LiveOperation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LiveOperation")
+            .field("finished", &self.finished)
+            .finish_non_exhaustive()
+    }
+}
+
+impl LiveOperation {
+    /// Loads `source` into a fresh sandboxed `Lua` against a fresh
+    /// [`Simulation`], the same way [`run`] does, but returns a value that
+    /// can be stepped one tick at a time instead of driven to completion
+    /// immediately.
+    pub fn deploy(source: &str) -> Result<LiveOperation, ControllerError> {
+        let lua = sandboxed_lua();
+        let callback = load_controller(&lua, source)?;
+
+        let hook_fired = Rc::new(Cell::new(false));
+        let hook_fired_in_hook = Rc::clone(&hook_fired);
+        let _ = lua.set_hook(
+            HookTriggers {
+                every_nth_instruction: Some(TICK_INSTRUCTION_BUDGET),
+                ..HookTriggers::default()
+            },
+            move |_, _| -> mlua::Result<VmState> {
+                hook_fired_in_hook.set(true);
+                Err(mlua::Error::RuntimeError(
+                    "controller exceeded its execution allowance while running".to_string(),
+                ))
+            },
+        );
+
+        Ok(LiveOperation {
+            lua,
+            callback,
+            simulation: Simulation::new(),
+            hook_fired,
+            finished: false,
+        })
+    }
+
+    /// Advances the deployment by exactly one tick, calling `on_tick` once
+    /// and applying the action it returns. Returns an error (without
+    /// advancing the simulation) if the callback fails, returns an invalid
+    /// action, or exceeds its per-tick execution allowance. Calling `step`
+    /// again after the operation has already finished (a prior call
+    /// returned an `outcome` other than [`TickOutcome::Running`], or this
+    /// method already returned an error) is a programmer error the caller
+    /// should avoid by checking [`LiveOperation::is_finished`] first;
+    /// `step` does not re-check that itself so a caller inspecting the
+    /// final tick's own result doesn't need an extra call first.
+    pub fn step(&mut self) -> Result<TickRecord, ControllerError> {
+        let result = advance_tick(&self.lua, &self.callback, &mut self.simulation);
+
+        if self.hook_fired.get() {
+            self.finished = true;
+            return Err(ControllerError::ExecutionLimitExceeded);
+        }
+
+        match result {
+            Ok(record) => {
+                if record.outcome != TickOutcome::Running {
+                    self.finished = true;
+                }
+                Ok(record)
+            }
+            Err(err) => {
+                self.finished = true;
+                Err(err)
+            }
+        }
+    }
+
+    /// Whether this deployment has ended — successfully, in failure, or
+    /// because [`LiveOperation::step`] returned an error — and should not
+    /// be stepped again.
+    pub fn is_finished(&self) -> bool {
+        self.finished
+    }
+
+    /// The fixed scenario's starting operational budget, for rendering
+    /// `budget_remaining / starting_budget` telemetry. Every [`LiveOperation`]
+    /// runs the same fixed "First Contact" scenario (see [`Simulation::new`]),
+    /// so this needs no per-deployment state to compute.
+    pub fn starting_budget(&self) -> u32 {
+        crate::simulation::Scenario::first_contact().starting_budget()
+    }
+
+    /// A read-only snapshot of the current state, independent of whether
+    /// any tick has run yet — immediately after [`LiveOperation::deploy`],
+    /// this already reflects the drone's starting position and whatever
+    /// [`Simulation::new`] reveals around it, for rendering before the
+    /// first tick completes.
+    pub fn observe(&self) -> Observation {
+        self.simulation.observe()
+    }
+
+    /// The fixed scenario's facility width, for rendering the satellite
+    /// feed before any [`TickRecord`] (which also carries it) exists yet.
+    pub fn map_width(&self) -> i32 {
+        self.simulation.map().width()
+    }
+
+    /// The fixed scenario's facility height; see [`LiveOperation::map_width`].
+    pub fn map_height(&self) -> i32 {
+        self.simulation.map().height()
     }
 }
 
@@ -1149,6 +1328,7 @@ fn invalid_action_error(response: &str, err: ActionError) -> ControllerError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::simulation::FailureReason;
 
     /// `MAX_CONCURRENT_VALIDATIONS` is a *production* safety cap sized for
     /// the single sequential caller the console's event loop actually is
@@ -2075,5 +2255,191 @@ mod tests {
                 "{source} should fail to load without host library access"
             );
         }
+    }
+
+    fn step_to_completion(op: &mut LiveOperation) -> (Vec<TickRecord>, ControllerError) {
+        let mut records = Vec::new();
+        loop {
+            match op.step() {
+                Ok(record) if record.outcome == TickOutcome::Running => records.push(record),
+                Ok(record) => {
+                    records.push(record);
+                    panic!("expected step_to_completion to be used only on failing scripts");
+                }
+                Err(err) => return (records, err),
+            }
+        }
+    }
+
+    #[test]
+    fn live_operation_deploy_rejects_a_syntax_error() {
+        let err = LiveOperation::deploy("function on_tick( ").unwrap_err();
+        assert!(matches!(err, ControllerError::ScriptInvalid(_)));
+    }
+
+    #[test]
+    fn live_operation_deploy_rejects_a_script_missing_on_tick() {
+        let err =
+            LiveOperation::deploy("function some_other_function(observation) return 'wait' end")
+                .unwrap_err();
+        assert!(matches!(err, ControllerError::MissingCallback));
+    }
+
+    #[test]
+    fn live_operation_step_advances_exactly_one_tick() {
+        let mut op = LiveOperation::deploy("function on_tick(observation) return 'wait' end")
+            .expect("valid controller");
+        assert!(!op.is_finished());
+
+        let first = op.step().expect("wait is always a valid action");
+        assert_eq!(first.tick, 1);
+        assert_eq!(first.outcome, TickOutcome::Running);
+        assert!(!op.is_finished());
+
+        let second = op.step().expect("wait is always a valid action");
+        assert_eq!(second.tick, 2);
+        assert!(!op.is_finished());
+    }
+
+    #[test]
+    fn live_operation_reports_a_callback_error_and_finishes() {
+        let mut op = LiveOperation::deploy(
+            "function on_tick(observation) error('simulated controller malfunction') end",
+        )
+        .expect("script loads even though on_tick will fail when called");
+
+        let err = op.step().unwrap_err();
+        assert!(matches!(err, ControllerError::CallbackFailed(_)), "{err}");
+        assert!(op.is_finished());
+    }
+
+    #[test]
+    fn live_operation_reports_an_invalid_action() {
+        let mut op = LiveOperation::deploy("function on_tick(observation) return 'north-east' end")
+            .expect("script loads");
+
+        let err = op.step().unwrap_err();
+        assert!(matches!(err, ControllerError::InvalidAction(_)), "{err}");
+        assert!(op.is_finished());
+    }
+
+    #[test]
+    fn live_operation_runs_a_route_to_a_deterministic_success() {
+        let source = r#"
+            local route = { "north", "east", "east", "east", "east", "north", "north", "north" }
+            local step = 0
+            function on_tick(observation)
+                step = step + 1
+                return route[step]
+            end
+        "#;
+        let mut op = LiveOperation::deploy(source).expect("valid controller");
+
+        let mut last_outcome = TickOutcome::Running;
+        let mut ticks = 0;
+        while last_outcome == TickOutcome::Running {
+            let record = op.step().expect("route never returns an invalid action");
+            last_outcome = record.outcome;
+            ticks += 1;
+            assert!(ticks <= 8, "route should reach the uplink within 8 ticks");
+        }
+        assert_eq!(last_outcome, TickOutcome::Succeeded);
+        assert!(op.is_finished());
+    }
+
+    #[test]
+    fn live_operation_running_the_same_source_twice_produces_identical_ticks() {
+        let source = r#"
+            local route = { "north", "east", "east", "east", "east", "north", "north", "north" }
+            local step = 0
+            function on_tick(observation)
+                step = step + 1
+                return route[step]
+            end
+        "#;
+
+        let run_to_completion = || {
+            let mut op = LiveOperation::deploy(source).expect("valid controller");
+            let mut records = Vec::new();
+            loop {
+                let record = op.step().expect("route never returns an invalid action");
+                let finished = record.outcome != TickOutcome::Running;
+                records.push(record);
+                if finished {
+                    return records;
+                }
+            }
+        };
+
+        assert_eq!(run_to_completion(), run_to_completion());
+    }
+
+    #[test]
+    fn live_operation_budget_exhaustion_fails_deterministically() {
+        let mut op = LiveOperation::deploy("function on_tick(observation) return 'wait' end")
+            .expect("valid controller");
+
+        let mut last_outcome = TickOutcome::Running;
+        while last_outcome == TickOutcome::Running {
+            last_outcome = op.step().expect("wait is always valid").outcome;
+        }
+        assert_eq!(
+            last_outcome,
+            TickOutcome::Failed(FailureReason::BudgetExhausted)
+        );
+        assert!(op.is_finished());
+    }
+
+    #[test]
+    fn live_operation_step_after_the_operation_finished_still_returns_a_stopped_result() {
+        let mut op = LiveOperation::deploy(
+            "function on_tick(observation) error('simulated controller malfunction') end",
+        )
+        .expect("script loads");
+        let _ = step_to_completion(&mut op);
+        assert!(op.is_finished());
+    }
+
+    #[test]
+    fn live_operation_bounds_a_runaway_on_tick_instead_of_hanging() {
+        let mut op = LiveOperation::deploy("function on_tick(observation) while true do end end")
+            .expect("script loads; the infinite loop is only inside on_tick");
+
+        let err = op.step().unwrap_err();
+        assert!(
+            matches!(err, ControllerError::ExecutionLimitExceeded),
+            "{err}"
+        );
+        assert!(op.is_finished());
+    }
+
+    #[test]
+    fn live_operation_bounds_a_runaway_on_tick_wrapped_in_pcall() {
+        // Same defense as `validate`'s pcall-wrapped instruction-hook test:
+        // the hook's error is an ordinary catchable Lua error, so a script
+        // could otherwise absorb it and return a normal-looking action.
+        let source = r#"
+            function on_tick(observation)
+                local ok = pcall(function()
+                    while true do end
+                end)
+                return "wait"
+            end
+        "#;
+        let mut op = LiveOperation::deploy(source).expect("script loads");
+
+        let err = op.step().unwrap_err();
+        assert!(
+            matches!(err, ControllerError::ExecutionLimitExceeded),
+            "{err}"
+        );
+        assert!(op.is_finished());
+    }
+
+    #[test]
+    fn live_operation_starting_budget_matches_the_fixed_scenario() {
+        let op = LiveOperation::deploy("function on_tick(observation) return 'wait' end")
+            .expect("valid controller");
+        assert_eq!(op.starting_budget(), 15);
     }
 }

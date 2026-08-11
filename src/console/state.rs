@@ -6,7 +6,7 @@
 
 use super::editor::{EditOp, Editor};
 use super::intel::authored_signals;
-use crate::lua_controller;
+use crate::lua_controller::{self, ControllerError, LiveOperation, TickRecord};
 
 /// An upper bound on how far Help can scroll. This exists only so
 /// `ScrollHelpDown` can never run away toward `u16::MAX` and leave the
@@ -50,6 +50,63 @@ pub enum WorkingSet {
     FirstContact,
 }
 
+/// A deployed controller and its accumulated live-run state.
+///
+/// `live` is `None` only when the deployment never started at all (the
+/// source failed to load); `error` then holds the deploy-time failure.
+/// Once `live` is `Some`, `error` stays `None` until a [`LiveOperation::step`]
+/// call itself fails, at which point the run is over and `error` holds that
+/// terminal failure instead. Both cases are "finished" from the player's
+/// perspective, which [`Operation::is_finished`] treats uniformly.
+#[derive(Debug)]
+struct Operation {
+    live: Option<LiveOperation>,
+    /// The exact source that was deployed, independent of whatever the
+    /// player has since typed into the editor (`docs/TUI_DESIGN.md`, "Run
+    /// records and source provenance").
+    deployed_source: String,
+    /// One entry per completed tick, oldest first, for telemetry and the
+    /// satellite feed's latest discovered state.
+    records: Vec<TickRecord>,
+    paused: bool,
+    error: Option<ControllerError>,
+}
+
+impl Operation {
+    fn is_finished(&self) -> bool {
+        self.error.is_some() || self.live.as_ref().is_some_and(LiveOperation::is_finished)
+    }
+}
+
+/// A read-only view of the current [`Operation`] for rendering, decoupled
+/// from its internal representation (`LiveOperation` isn't meant to be
+/// exposed directly outside this module).
+pub struct OperationView<'a> {
+    pub deployed_source: &'a str,
+    pub records: &'a [TickRecord],
+    pub paused: bool,
+    pub finished: bool,
+    pub error: Option<&'a ControllerError>,
+    pub starting_budget: u32,
+    /// The most recent state to render the satellite feed and telemetry
+    /// from: the last completed tick's, or (before any tick has run, or if
+    /// deploy itself failed) a starting snapshot.
+    pub current: OperationSnapshot,
+}
+
+/// A satellite-feed-safe snapshot of a deployment's current state — only
+/// ever built from [`crate::simulation::Simulation::observe`]'s already
+/// hidden-information-safe `Observation`, or the fixed scenario's public
+/// starting facts, never from raw scenario/map internals.
+pub struct OperationSnapshot {
+    pub drone_position: crate::simulation::Position,
+    pub map_width: i32,
+    pub map_height: i32,
+    pub discovered: Vec<crate::simulation::DiscoveredTile>,
+    pub tick: u32,
+    pub budget_remaining: u32,
+}
+
 /// A player intent, decoupled from whatever key produced it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Msg {
@@ -76,14 +133,29 @@ pub enum Msg {
     ConfirmResetController,
     CancelResetController,
     /// `Ctrl+Q`: quits, subject to confirmation if the controller is
-    /// modified.
+    /// modified or a run is active.
     RequestQuit,
     ConfirmQuit,
     CancelQuit,
+    /// `F6`: deploys the current controller source, subject to confirmation
+    /// if another run is already active.
+    RequestDeploy,
+    ConfirmDeploy,
+    CancelDeploy,
+    /// `Space` in Operation: pauses or resumes the active run.
+    TogglePauseOperation,
+    /// `Enter` in Operation while paused: advances exactly one tick and
+    /// remains paused.
+    StepOperationTick,
 }
 
 /// The console's full session state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Deliberately not `Clone`/`PartialEq`/`Eq` (unlike most other state in
+/// this module): `operation` can hold a live `mlua::Lua` deployment via
+/// [`Operation`]/[`LiveOperation`], which can't support either. Nothing
+/// outside this module ever clones or compares a whole `AppState`.
+#[derive(Debug)]
 pub struct AppState {
     current_view: View,
     help_return_view: Option<View>,
@@ -104,9 +176,17 @@ pub struct AppState {
     /// `F7` was pressed with a modified controller; the player must confirm
     /// before the starter controller replaces it.
     reset_confirmation_pending: bool,
-    /// `Ctrl+Q` was pressed with a modified controller; the player must
-    /// confirm before the session exits.
+    /// `Ctrl+Q` was pressed with a modified controller or an active run; the
+    /// player must confirm before the session exits.
     quit_confirmation_pending: bool,
+    /// The current deployment, if the player has deployed a controller at
+    /// least once this session. Persists (paused or finished) after the
+    /// player navigates away or the run ends, until replaced by another
+    /// deploy.
+    operation: Option<Operation>,
+    /// `F6` was pressed while another run is still active; the player must
+    /// confirm before it's replaced.
+    redeploy_confirmation_pending: bool,
     /// At 80-99 columns, whether the secondary (detail/provenance) pane is
     /// showing instead of the primary one.
     narrow_secondary_visible: bool,
@@ -126,6 +206,8 @@ impl Default for AppState {
             validation: Validation::Unchecked,
             reset_confirmation_pending: false,
             quit_confirmation_pending: false,
+            operation: None,
+            redeploy_confirmation_pending: false,
             narrow_secondary_visible: false,
             help_scroll: 0,
             should_quit: false,
@@ -188,6 +270,100 @@ impl AppState {
         self.quit_confirmation_pending
     }
 
+    pub fn redeploy_confirmation_pending(&self) -> bool {
+        self.redeploy_confirmation_pending
+    }
+
+    /// A read-only view of the current deployment, if the player has
+    /// deployed a controller at least once this session.
+    pub fn operation(&self) -> Option<OperationView<'_>> {
+        self.operation.as_ref().map(|op| {
+            let starting_budget = crate::simulation::Scenario::first_contact().starting_budget();
+            let current = match (op.records.last(), op.live.as_ref()) {
+                (Some(record), _) => OperationSnapshot {
+                    drone_position: record.drone_position,
+                    map_width: record.map_width,
+                    map_height: record.map_height,
+                    discovered: record.discovered.clone(),
+                    tick: record.tick,
+                    budget_remaining: record.budget_remaining,
+                },
+                (None, Some(live)) => {
+                    let observation = live.observe();
+                    OperationSnapshot {
+                        drone_position: observation.drone_position,
+                        map_width: live.map_width(),
+                        map_height: live.map_height(),
+                        discovered: observation.discovered,
+                        tick: observation.tick,
+                        budget_remaining: observation.budget_remaining,
+                    }
+                }
+                // Deploy itself failed: nothing was ever observed, so fall
+                // back to the fixed scenario's public starting facts rather
+                // than any raw map/scenario internals.
+                (None, None) => {
+                    let scenario = crate::simulation::Scenario::first_contact();
+                    OperationSnapshot {
+                        drone_position: scenario.drone_start(),
+                        map_width: scenario.map().width(),
+                        map_height: scenario.map().height(),
+                        discovered: Vec::new(),
+                        tick: 0,
+                        budget_remaining: starting_budget,
+                    }
+                }
+            };
+            OperationView {
+                deployed_source: &op.deployed_source,
+                records: &op.records,
+                paused: op.paused,
+                finished: op.is_finished(),
+                error: op.error.as_ref(),
+                starting_budget,
+                current,
+            }
+        })
+    }
+
+    /// Whether an operation exists and hasn't finished (succeeded, failed,
+    /// or errored) yet — i.e. there is something a redeploy or quit would
+    /// abandon.
+    fn operation_active(&self) -> bool {
+        self.operation.as_ref().is_some_and(|op| !op.is_finished())
+    }
+
+    /// Whether the current view should be advancing the active run one tick
+    /// per timer wakeup, independent of any player key: `View::Operation`
+    /// is showing, a deployment exists, and it's neither paused nor
+    /// finished. Navigating away (`F2`/`F3`/`F4`) sets `paused` so this
+    /// naturally stops; opening Help changes `current_view` away from
+    /// `Operation` without touching `paused`, so this also naturally stops
+    /// and then resumes on its own once Help is dismissed back to
+    /// `Operation` — see `docs/TUI_DESIGN.md`, "Navigation while a
+    /// deployment is active."
+    pub fn operation_auto_advancing(&self) -> bool {
+        self.current_view == View::Operation
+            && self
+                .operation
+                .as_ref()
+                .is_some_and(|op| !op.paused && !op.is_finished())
+    }
+
+    /// Advances the active run by exactly one tick if [`operation_auto_advancing`]
+    /// allows it right now, returning whether anything actually changed (and
+    /// so a redraw is needed). Driven by the terminal event loop's timer,
+    /// not a player key — see [`Msg::StepOperationTick`] for the
+    /// player-initiated equivalent while paused.
+    ///
+    /// [`operation_auto_advancing`]: AppState::operation_auto_advancing
+    pub fn advance_running_operation(&mut self) -> bool {
+        if !self.operation_auto_advancing() {
+            return false;
+        }
+        self.step_operation()
+    }
+
     pub fn narrow_secondary_visible(&self) -> bool {
         self.narrow_secondary_visible
     }
@@ -233,6 +409,18 @@ impl AppState {
         match msg {
             Msg::Navigate(view) => {
                 if self.view_available(view) {
+                    // "F2, F3, or F4 while a run is active first pauses the
+                    // run, then navigates" (`docs/TUI_DESIGN.md`, "Navigation
+                    // while a deployment is active"). Operation and
+                    // AfterAction are excluded: returning to Operation must
+                    // preserve whatever paused/running state the run was
+                    // already in, not force a pause.
+                    if matches!(view, View::Signals | View::Target | View::Controller)
+                        && let Some(op) = self.operation.as_mut()
+                        && !op.is_finished()
+                    {
+                        op.paused = true;
+                    }
                     self.current_view = view;
                     self.narrow_secondary_visible = false;
                 }
@@ -294,7 +482,7 @@ impl AppState {
                 self.reset_confirmation_pending = false;
             }
             Msg::RequestQuit => {
-                if self.controller_modified() {
+                if self.controller_modified() || self.operation_active() {
                     self.quit_confirmation_pending = true;
                 } else {
                     self.should_quit = true;
@@ -306,7 +494,92 @@ impl AppState {
             Msg::CancelQuit => {
                 self.quit_confirmation_pending = false;
             }
+            Msg::RequestDeploy => {
+                if self.controller_source().is_some() {
+                    if self.operation_active() {
+                        self.redeploy_confirmation_pending = true;
+                    } else {
+                        self.deploy();
+                    }
+                }
+            }
+            Msg::ConfirmDeploy => {
+                self.deploy();
+                self.redeploy_confirmation_pending = false;
+            }
+            Msg::CancelDeploy => {
+                self.redeploy_confirmation_pending = false;
+            }
+            Msg::TogglePauseOperation => {
+                if let Some(op) = self.operation.as_mut()
+                    && !op.is_finished()
+                {
+                    op.paused = !op.paused;
+                }
+            }
+            Msg::StepOperationTick => {
+                // "`Enter` advances exactly one tick while paused and
+                // remains paused afterward" (`docs/TUI_DESIGN.md`, "Pacing
+                // controls") — while running, ticks already advance on
+                // their own via `advance_running_operation`, so `Enter`
+                // manually stepping too would silently fast-forward past
+                // what the player is watching.
+                if self.operation.as_ref().is_some_and(|op| op.paused) {
+                    self.step_operation();
+                }
+            }
         }
+    }
+
+    /// Deploys the current controller source as a fresh [`Operation`],
+    /// replacing any prior one, and switches to Operation. A no-op if no
+    /// controller source is loaded (nothing to deploy). Called for both a
+    /// fresh `F6` (no active run to replace) and a confirmed redeploy.
+    fn deploy(&mut self) {
+        let Some(source) = self.controller_source() else {
+            return;
+        };
+        let source = source.to_string();
+
+        self.operation = Some(match LiveOperation::deploy(&source) {
+            Ok(live) => Operation {
+                live: Some(live),
+                deployed_source: source,
+                records: Vec::new(),
+                paused: false,
+                error: None,
+            },
+            Err(err) => Operation {
+                live: None,
+                deployed_source: source,
+                records: Vec::new(),
+                paused: false,
+                error: Some(err),
+            },
+        });
+        self.current_view = View::Operation;
+        self.narrow_secondary_visible = false;
+    }
+
+    /// Advances the active operation by exactly one tick, appending the
+    /// result or recording the terminal error. A no-op (returns `false`) if
+    /// there's no operation, it already finished, or it never successfully
+    /// deployed. Returns whether a tick actually advanced.
+    fn step_operation(&mut self) -> bool {
+        let Some(op) = self.operation.as_mut() else {
+            return false;
+        };
+        if op.is_finished() {
+            return false;
+        }
+        let Some(live) = op.live.as_mut() else {
+            return false;
+        };
+        match live.step() {
+            Ok(record) => op.records.push(record),
+            Err(err) => op.error = Some(err),
+        }
+        true
     }
 
     fn reset_controller(&mut self) {
@@ -777,5 +1050,279 @@ mod tests {
         assert!(!state.should_quit());
         assert!(!state.quit_confirmation_pending());
         assert!(state.controller_modified());
+    }
+
+    /// Commits to First Contact (seeding the starter controller) and
+    /// returns a ready-to-deploy state, matching every deploy-focused
+    /// test's shared setup.
+    fn working_state() -> AppState {
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state
+    }
+
+    const ALWAYS_ERRORS: &str = "function on_tick(observation) error('boom') end";
+    const ROUTE_TO_UPLINK: &str = r#"
+        local route = { "north", "east", "east", "east", "east", "north", "north", "north" }
+        local step = 0
+        function on_tick(observation)
+            step = step + 1
+            return route[step]
+        end
+    "#;
+
+    #[test]
+    fn deploying_the_starter_controller_navigates_to_operation_and_starts_running() {
+        let mut state = working_state();
+
+        state.apply(Msg::RequestDeploy);
+
+        assert_eq!(state.current_view(), View::Operation);
+        let op = state.operation().expect("a deploy just happened");
+        assert!(!op.paused);
+        assert!(!op.finished);
+        assert!(op.records.is_empty());
+        assert_eq!(op.deployed_source, super::super::intel::STARTER_CONTROLLER);
+    }
+
+    #[test]
+    fn deploying_a_script_with_a_load_error_surfaces_it_without_a_live_run() {
+        let mut state = working_state();
+        state.controller = Some(Editor::new("function on_tick("));
+
+        state.apply(Msg::RequestDeploy);
+
+        let op = state.operation().expect("deploy always records an outcome");
+        assert!(op.finished);
+        assert!(matches!(op.error, Some(ControllerError::ScriptInvalid(_))));
+        assert_eq!(state.current_view(), View::Operation);
+    }
+
+    #[test]
+    fn redeploying_a_finished_operation_needs_no_confirmation() {
+        let mut state = working_state();
+        state.controller = Some(Editor::new(ALWAYS_ERRORS));
+        state.apply(Msg::RequestDeploy);
+        state.advance_running_operation();
+        assert!(state.operation().unwrap().finished);
+
+        state.apply(Msg::RequestDeploy);
+
+        assert!(!state.redeploy_confirmation_pending());
+        // A fresh deploy replaces the finished operation's records.
+        assert!(state.operation().unwrap().records.is_empty());
+    }
+
+    #[test]
+    fn redeploying_an_active_operation_requires_confirmation() {
+        let mut state = working_state();
+        state.apply(Msg::RequestDeploy); // starter controller: running, unfinished
+
+        state.apply(Msg::RequestDeploy);
+
+        assert!(state.redeploy_confirmation_pending());
+        // The original run is untouched until confirmed.
+        assert!(state.operation().unwrap().records.is_empty());
+    }
+
+    #[test]
+    fn confirming_redeploy_replaces_the_active_operation() {
+        let mut state = working_state();
+        state.apply(Msg::RequestDeploy);
+        state.apply(Msg::RequestDeploy); // pending confirmation
+
+        state.apply(Msg::ConfirmDeploy);
+
+        assert!(!state.redeploy_confirmation_pending());
+        assert_eq!(state.current_view(), View::Operation);
+    }
+
+    #[test]
+    fn cancelling_redeploy_leaves_the_active_operation_running() {
+        let mut state = working_state();
+        state.apply(Msg::RequestDeploy);
+        state.advance_running_operation();
+        state.apply(Msg::RequestDeploy); // pending confirmation
+
+        state.apply(Msg::CancelDeploy);
+
+        assert!(!state.redeploy_confirmation_pending());
+        assert_eq!(state.operation().unwrap().records.len(), 1);
+    }
+
+    #[test]
+    fn step_operation_tick_advances_exactly_one_tick_and_stays_paused() {
+        let mut state = working_state();
+        state.controller = Some(Editor::new(ROUTE_TO_UPLINK));
+        state.apply(Msg::RequestDeploy);
+        state.apply(Msg::TogglePauseOperation);
+        assert!(state.operation().unwrap().paused);
+
+        state.apply(Msg::StepOperationTick);
+
+        let op = state.operation().unwrap();
+        assert_eq!(op.records.len(), 1);
+        assert!(op.paused, "stepping while paused must not resume the run");
+    }
+
+    #[test]
+    fn toggle_pause_flips_paused_and_is_a_no_op_once_finished() {
+        let mut state = working_state();
+        state.controller = Some(Editor::new(ALWAYS_ERRORS));
+        state.apply(Msg::RequestDeploy);
+        state.advance_running_operation();
+        assert!(state.operation().unwrap().finished);
+
+        state.apply(Msg::TogglePauseOperation);
+
+        assert!(
+            !state.operation().unwrap().paused,
+            "a finished operation can't be paused/resumed"
+        );
+    }
+
+    #[test]
+    fn navigating_away_from_an_active_operation_pauses_it() {
+        let mut state = working_state();
+        state.apply(Msg::RequestDeploy);
+        assert!(!state.operation().unwrap().paused);
+
+        state.apply(Msg::Navigate(View::Controller));
+
+        assert!(state.operation().unwrap().paused);
+        assert_eq!(state.current_view(), View::Controller);
+    }
+
+    #[test]
+    fn returning_to_operation_preserves_the_paused_state() {
+        let mut state = working_state();
+        state.apply(Msg::RequestDeploy);
+        state.apply(Msg::Navigate(View::Controller));
+
+        state.apply(Msg::Navigate(View::Operation));
+
+        assert!(
+            state.operation().unwrap().paused,
+            "F2/F3/F4 pauses; returning to Operation must not silently resume"
+        );
+    }
+
+    #[test]
+    fn opening_and_dismissing_help_does_not_change_the_paused_flag() {
+        let mut state = working_state();
+        state.apply(Msg::RequestDeploy);
+        assert!(!state.operation().unwrap().paused);
+
+        state.apply(Msg::OpenHelp);
+        assert!(
+            !state.operation().unwrap().paused,
+            "Help pauses presentation via operation_auto_advancing, not the paused flag itself"
+        );
+
+        state.apply(Msg::DismissHelp);
+        assert!(!state.operation().unwrap().paused);
+    }
+
+    #[test]
+    fn operation_auto_advancing_only_while_viewing_operation_unpaused_and_unfinished() {
+        let mut state = working_state();
+        assert!(!state.operation_auto_advancing(), "nothing deployed yet");
+
+        state.apply(Msg::RequestDeploy);
+        assert!(state.operation_auto_advancing());
+
+        state.apply(Msg::Navigate(View::Controller));
+        assert!(
+            !state.operation_auto_advancing(),
+            "left Operation and the run is now paused"
+        );
+
+        state.apply(Msg::Navigate(View::Operation));
+        assert!(
+            !state.operation_auto_advancing(),
+            "back on Operation, but still paused from leaving"
+        );
+
+        state.apply(Msg::TogglePauseOperation);
+        assert!(state.operation_auto_advancing());
+    }
+
+    #[test]
+    fn advance_running_operation_steps_once_when_auto_advancing_and_otherwise_is_a_no_op() {
+        let mut state = working_state();
+        assert!(!state.advance_running_operation());
+
+        state.apply(Msg::RequestDeploy);
+        let advanced = state.advance_running_operation();
+
+        assert!(advanced);
+        assert_eq!(state.operation().unwrap().records.len(), 1);
+
+        state.apply(Msg::TogglePauseOperation);
+        assert!(!state.advance_running_operation());
+        assert_eq!(state.operation().unwrap().records.len(), 1);
+    }
+
+    #[test]
+    fn a_callback_error_finishes_the_operation_and_is_recorded() {
+        let mut state = working_state();
+        state.controller = Some(Editor::new(ALWAYS_ERRORS));
+        state.apply(Msg::RequestDeploy);
+
+        state.advance_running_operation();
+
+        let op = state.operation().unwrap();
+        assert!(op.finished);
+        assert!(matches!(op.error, Some(ControllerError::CallbackFailed(_))));
+    }
+
+    #[test]
+    fn running_a_route_to_completion_reaches_an_unambiguous_success() {
+        let mut state = working_state();
+        state.controller = Some(Editor::new(ROUTE_TO_UPLINK));
+        state.apply(Msg::RequestDeploy);
+
+        for _ in 0..8 {
+            state.advance_running_operation();
+        }
+
+        let op = state.operation().unwrap();
+        assert!(op.finished);
+        assert!(op.error.is_none());
+        assert_eq!(
+            op.records.last().map(|record| record.outcome),
+            Some(crate::simulation::TickOutcome::Succeeded)
+        );
+    }
+
+    #[test]
+    fn quitting_with_an_active_operation_requires_confirmation() {
+        let mut state = working_state();
+        assert!(!state.controller_modified());
+        state.apply(Msg::RequestDeploy);
+
+        state.apply(Msg::RequestQuit);
+
+        assert!(!state.should_quit());
+        assert!(state.quit_confirmation_pending());
+    }
+
+    #[test]
+    fn quitting_after_the_operation_finished_needs_no_confirmation_for_it() {
+        let mut state = working_state();
+        state.controller = Some(Editor::new(ALWAYS_ERRORS));
+        state.apply(Msg::RequestDeploy);
+        state.advance_running_operation();
+        assert!(state.operation().unwrap().finished);
+        // Restore the controller to the unmodified starter so this test
+        // isolates the finished operation's own contribution to the quit
+        // gate from the (unrelated) modified-controller gate.
+        state.controller = Some(Editor::new(super::super::intel::STARTER_CONTROLLER));
+        assert!(!state.controller_modified());
+
+        state.apply(Msg::RequestQuit);
+
+        assert!(state.should_quit());
     }
 }
