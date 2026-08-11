@@ -124,11 +124,20 @@ fn sandboxed_lua() -> Lua {
 fn install_deterministic_string_format(lua: &Lua) -> mlua::Result<()> {
     let string_lib: Table = lua.globals().get("string")?;
     let real_format: Function = string_lib.get("format")?;
+    // Already the overridden version by this point (installed earlier in
+    // `sandboxed_lua`): reused so a `%s`/`%q` argument gets exactly the
+    // same address-hiding, custom-`__tostring`-respecting, binary-safe
+    // treatment `tostring(...)` itself gets, instead of duplicating that
+    // logic here.
+    let det_tostring: Function = lua.globals().get("tostring")?;
     let det_format = lua.create_function(
         move |_, args: MultiValue| -> mlua::Result<mlua::LuaString> {
-            let mut iter = args.iter();
-            if let Some(Value::String(fmt)) = iter.next()
-                && format_string_uses_pointer_specifier(&fmt.to_str()?)
+            let mut iter = args.into_iter();
+            let Some(fmt_value) = iter.next() else {
+                return real_format.call(MultiValue::new());
+            };
+            if let Value::String(fmt) = &fmt_value
+                && format_string_uses_pointer_specifier(&fmt.as_bytes())
             {
                 return Err(mlua::Error::RuntimeError(
                     "string.format: '%p' is not available (it would expose a process memory \
@@ -136,7 +145,34 @@ fn install_deterministic_string_format(lua: &Lua) -> mlua::Result<()> {
                         .to_string(),
                 ));
             }
-            real_format.call(args)
+            // `%s`/`%q` format a value via Lua's own C-level `tolstring`,
+            // which respects a value's `__tostring` metamethod but not
+            // our *overridden* global `tostring` — so a table or function
+            // argument without one would still get the real, nondeterministic
+            // "type: 0xADDRESS" text straight from `%s`, independent of the
+            // `%p` case above. Route any table/function/thread/userdata
+            // argument through the deterministic `tostring` first so
+            // `real_format` only ever sees an ordinary string for it,
+            // regardless of which conversion the format string uses it
+            // with — a specifier that expected a number would already have
+            // rejected the original table/function argument too, so this
+            // doesn't change any currently-succeeding case, only the ones
+            // that were leaking an address.
+            let mut rebuilt = MultiValue::new();
+            rebuilt.push_back(fmt_value);
+            for value in iter {
+                let value = match value {
+                    Value::Table(_)
+                    | Value::Function(_)
+                    | Value::Thread(_)
+                    | Value::UserData(_) => {
+                        Value::String(det_tostring.call::<mlua::LuaString>(value)?)
+                    }
+                    other => other,
+                };
+                rebuilt.push_back(value);
+            }
+            real_format.call(rebuilt)
         },
     )?;
     string_lib.set("format", det_format)?;
@@ -146,9 +182,11 @@ fn install_deterministic_string_format(lua: &Lua) -> mlua::Result<()> {
 /// Whether `fmt` contains a genuine `%p` conversion specifier (as opposed
 /// to a `%%p`, which is an escaped literal `%` followed by the letter
 /// `p`). Handles the usual printf-style flag/width/precision characters
-/// between `%` and the conversion letter (e.g. `%-10p`).
-fn format_string_uses_pointer_specifier(fmt: &str) -> bool {
-    let bytes = fmt.as_bytes();
+/// between `%` and the conversion letter (e.g. `%-10p`). Operates on raw
+/// bytes, not `&str`, since Lua strings (including format strings) are
+/// arbitrary byte sequences, not necessarily valid UTF-8.
+fn format_string_uses_pointer_specifier(fmt: &[u8]) -> bool {
+    let bytes = fmt;
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] != b'%' {
@@ -239,18 +277,27 @@ fn install_deterministic_tostring(lua: &Lua) -> mlua::Result<()> {
 /// silently leaving it in whatever order the randomized native iteration
 /// produced.
 fn install_deterministic_table_iteration(lua: &Lua) -> mlua::Result<()> {
+    // Finds the entry immediately after `key` in sorted order using the
+    // comparator directly, rather than searching for a `k == key` match
+    // and yielding whatever follows it. That distinction matters because
+    // real Lua's `next` explicitly supports clearing the *current* field
+    // during a manual traversal (`next(t, k)`, then `t[k] = nil`, then
+    // `next(t, k)` again with the same now-deleted `k`): comparing against
+    // `key`'s value still tells us where it *would* sort even once it's no
+    // longer a member of `table` at all, so a deleted key resumes
+    // iteration correctly instead of silently ending it.
     let det_next = lua.create_function(|_, (table, key): (Table, Value)| {
         let entries = sorted_table_entries(&table)?;
-        let mut yield_next = matches!(key, Value::Nil);
-        for (k, v) in entries {
-            if yield_next {
-                return Ok((k, v));
-            }
-            if k == key {
-                yield_next = true;
-            }
+        if matches!(key, Value::Nil) {
+            return Ok(entries
+                .into_iter()
+                .next()
+                .unwrap_or((Value::Nil, Value::Nil)));
         }
-        Ok((Value::Nil, Value::Nil))
+        Ok(entries
+            .into_iter()
+            .find(|(k, _)| compare_lua_keys(k, &key) == std::cmp::Ordering::Greater)
+            .unwrap_or((Value::Nil, Value::Nil)))
     })?;
 
     let det_pairs = lua.create_function(move |lua, table: Table| -> mlua::Result<MultiValue> {
@@ -265,26 +312,32 @@ fn install_deterministic_table_iteration(lua: &Lua) -> mlua::Result<()> {
         {
             return pairs_mm.call::<MultiValue>(table);
         }
-        // Snapshot the sorted entries once, here, and walk them by
-        // position rather than re-deriving "where we are" by searching a
-        // freshly recomputed entry list for the previous key on every
-        // step (what `next` above does, matching its stateless contract).
-        // That search-based approach breaks a table cleared mid-traversal
-        // — `for k in pairs(t) do t[k] = nil end` — since the deleted key
-        // is no longer present in the entries recomputed on the following
-        // call, so the search never finds it and iteration silently stops
-        // after one entry. A position-based snapshot is immune to that:
-        // it doesn't care what the table looks like on later calls at all.
-        let entries = sorted_table_entries(&table)?;
+        // Snapshot only the sorted *key order* once, here, and walk it by
+        // position — not `next`'s comparator-based search on every step,
+        // and not a snapshot of (key, value) pairs either. A pure-position
+        // walk survives a table cleared mid-traversal (`for k in pairs(t)
+        // do t[k] = nil end`), which a per-step search through the table's
+        // live contents can't (the deleted key is gone from what's being
+        // searched). Re-reading each value from the live table when its
+        // key is yielded — instead of a value cloned back when `pairs`
+        // was first called — keeps Lua's other supported mid-traversal
+        // edit, changing an existing field's value before it's visited,
+        // showing that current value rather than a stale one.
+        let keys: Vec<Value> = sorted_table_entries(&table)?
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
         let position = std::cell::Cell::new(0usize);
+        let live_table = table.clone();
         let iterator =
             lua.create_function(move |lua, _: MultiValue| -> mlua::Result<MultiValue> {
                 let i = position.get();
-                let Some((k, v)) = entries.get(i) else {
+                let Some(key) = keys.get(i) else {
                     return Ok(MultiValue::new());
                 };
                 position.set(i + 1);
-                (k.clone(), v.clone()).into_lua_multi(lua)
+                let value: Value = live_table.get(key.clone())?;
+                (key.clone(), value).into_lua_multi(lua)
             })?;
         (iterator, Value::Nil, Value::Nil).into_lua_multi(lua)
     })?;
@@ -832,6 +885,45 @@ mod tests {
     }
 
     #[test]
+    fn standalone_next_survives_clearing_the_current_field_during_manual_traversal() {
+        // Same idiom as above but driven by hand via `next` directly,
+        // rather than a `for ... in pairs(t)` loop (which now uses its own
+        // position-based iterator and wouldn't exercise `next`'s own fix).
+        let source = r#"
+            local t = {a = 1, b = 2, c = 3}
+            local seen = 0
+            local k = next(t)
+            while k ~= nil do
+                local current = k
+                k = next(t, k)
+                t[current] = nil
+                seen = seen + 1
+            end
+            assert(seen == 3, seen)
+            function on_tick(observation) return "wait" end
+        "#;
+        assert!(validate(source).is_ok());
+    }
+
+    #[test]
+    fn pairs_sees_a_live_update_to_a_not_yet_visited_field() {
+        let source = r#"
+            local t = {a = 1, b = 2}
+            local seen_b = nil
+            for k, v in pairs(t) do
+                if k == "a" then
+                    t.b = 99
+                elseif k == "b" then
+                    seen_b = v
+                end
+            end
+            assert(seen_b == 99, seen_b)
+            function on_tick(observation) return "wait" end
+        "#;
+        assert!(validate(source).is_ok());
+    }
+
+    #[test]
     fn a_table_with_pairs_metamethod_still_iterates_through_it() {
         // Real Lua 5.4 defers entirely to `__pairs` when a table has one;
         // the deterministic override must do the same, not silently
@@ -915,6 +1007,38 @@ mod tests {
         let source = r#"
             assert(string.format("%%p") == "%p")
             assert(string.format("%d", 42) == "42")
+            function on_tick(observation) return "wait" end
+        "#;
+        assert!(validate(source).is_ok());
+    }
+
+    #[test]
+    fn string_format_hides_the_process_address_of_a_table_via_percent_s() {
+        let source = r#"
+            local text = string.format("%s", {})
+            assert(text == "table: 0x0", text)
+            function on_tick(observation) return "wait" end
+        "#;
+        assert!(validate(source).is_ok());
+    }
+
+    #[test]
+    fn string_format_still_respects_a_custom_tostring_metamethod_via_percent_s() {
+        let source = r#"
+            local labeled = setmetatable({}, {__tostring = function(_) return "named" end})
+            assert(string.format("%s", labeled) == "named")
+            assert(string.format("%s and %d", "x", 3) == "x and 3")
+            function on_tick(observation) return "wait" end
+        "#;
+        assert!(validate(source).is_ok());
+    }
+
+    #[test]
+    fn string_format_accepts_a_non_utf8_format_string() {
+        let source = r#"
+            local fmt = string.char(255) .. "%d"
+            local text = string.format(fmt, 7)
+            assert(text == string.char(255) .. "7", text)
             function on_tick(observation) return "wait" end
         "#;
         assert!(validate(source).is_ok());
