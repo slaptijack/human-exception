@@ -497,7 +497,22 @@ impl AppState {
             Msg::RequestDeploy => {
                 if self.controller_source().is_some() {
                     if self.operation_active() {
+                        // The redeploy-confirmation prompt only ever
+                        // renders inside Operation (`ui::draw_operation`).
+                        // `F6` is a *global* binding (reachable from
+                        // Controller, Signals, etc. while a paused run sits
+                        // in the background), so setting the flag alone
+                        // would leave the player staring at whatever view
+                        // they were already on with most keys silently
+                        // swallowed by the pending-confirmation guard and
+                        // no visible explanation why. Surfacing the prompt
+                        // takes priority here over Operation's own
+                        // leaving-pauses-the-run rule — there's no running
+                        // presentation to interrupt yet, just a decision to
+                        // make before one exists.
                         self.redeploy_confirmation_pending = true;
+                        self.current_view = View::Operation;
+                        self.narrow_secondary_visible = false;
                     } else {
                         self.deploy();
                     }
@@ -1124,6 +1139,25 @@ mod tests {
         assert!(state.redeploy_confirmation_pending());
         // The original run is untouched until confirmed.
         assert!(state.operation().unwrap().records.is_empty());
+    }
+
+    #[test]
+    fn requesting_redeploy_from_elsewhere_navigates_to_operation_so_the_prompt_is_visible() {
+        // F6 is a global binding: a player can pause a run by leaving to
+        // Controller/Signals/Target and press F6 from there. The
+        // confirmation prompt only ever renders inside Operation, so the
+        // request must bring the player back to it — otherwise the pending
+        // flag silently swallows most other input on a screen that gives
+        // no indication anything is waiting on a response.
+        let mut state = working_state();
+        state.apply(Msg::RequestDeploy);
+        state.apply(Msg::Navigate(View::Controller)); // pauses the run
+        assert_eq!(state.current_view(), View::Controller);
+
+        state.apply(Msg::RequestDeploy);
+
+        assert!(state.redeploy_confirmation_pending());
+        assert_eq!(state.current_view(), View::Operation);
     }
 
     #[test]
