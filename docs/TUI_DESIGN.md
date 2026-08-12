@@ -404,10 +404,10 @@ The product requirement is observable, not architectural:
 - exceeding that bound ends the deployment with a controller execution-limit/cancelled failure rather than freezing the UI indefinitely;
 - the terminal event loop remains responsive enough for the player to reach Controller or quit;
 - the player's current editor source remains intact;
-- the failure is shown in Operation with a concise explanation that the controller exceeded its execution allowance and should be revised;
+- the failure is shown with a concise explanation that the controller exceeded its execution allowance and should be revised;
 - the exact instruction-count, hook, thread, process, or other implementation mechanism is left to implementation issues.
 
-Runtime/script failures remain in the Operation view, with the telemetry pane becoming an error explanation and **Controller** presented as the obvious recovery path.
+Runtime/script failures end the deployment the same as any other terminal outcome: the console transitions to After Action (§5) with a concise error explanation and **Controller** presented as the obvious recovery path. **Review Run** (`F5` from After Action) shows that same explanation alongside the finished run's frozen telemetry.
 
 ### Run records and source provenance
 

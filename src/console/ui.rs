@@ -800,20 +800,30 @@ fn draw_after_action(frame: &mut Frame, area: Rect, state: &AppState) {
             "AFTER-ACTION REPORT",
             after_action_report_lines(&op),
         );
-    } else if state.narrow_secondary_visible() {
-        draw_pane(
-            frame,
-            area,
-            "AFTER-ACTION REPORT",
-            after_action_report_lines(&op),
-        );
     } else {
-        draw_pane(
-            frame,
-            area,
-            "FINAL SATELLITE FRAME",
-            satellite_lines(&op.current),
-        );
+        // A deployment that never started a live run (a synchronous load
+        // failure) has no discovered tiles at all, so the satellite pane
+        // would just be an empty grid — default to the report pane instead
+        // so the compact failure explanation and recovery guidance are
+        // immediately visible without needing to already know `F8` swaps
+        // panes. `narrow_secondary_visible` still flips which pane is
+        // showing from there, same as every other narrow-layout view.
+        let defaults_to_report = op.error.is_some() && op.records.is_empty();
+        if state.narrow_secondary_visible() ^ defaults_to_report {
+            draw_pane(
+                frame,
+                area,
+                "AFTER-ACTION REPORT",
+                after_action_report_lines(&op),
+            );
+        } else {
+            draw_pane(
+                frame,
+                area,
+                "FINAL SATELLITE FRAME",
+                satellite_lines(&op.current),
+            );
+        }
     }
 }
 
@@ -824,6 +834,38 @@ fn draw_after_action(frame: &mut Frame, area: Rect, state: &AppState) {
 /// identifier, and an obvious next step. Failure explanations state the
 /// mechanical reason without prescribing the exact solution (`docs/
 /// TUI_DESIGN.md` §5).
+/// A cap on how many lines (and characters per line) diagnostic or source
+/// text can occupy in a report pane. Without a bound, a long player-
+/// controlled error message (`error(string.rep("x", 4000))`) or a large
+/// deployed script could push a pane's trailing summary stats and next-step
+/// guidance off the bottom of the console's supported minimum geometry.
+const MAX_DETAIL_LINES: usize = 8;
+const MAX_DETAIL_LINE_CHARS: usize = 120;
+
+/// Renders `text` capped to [`MAX_DETAIL_LINES`]/[`MAX_DETAIL_LINE_CHARS`],
+/// with a trailing `…` marker whenever something was cut off, so the rest
+/// of whatever pane called this always has room for its own content.
+fn bounded_detail_lines(text: &str) -> Vec<Line<'static>> {
+    let total_lines = text.lines().count();
+    let mut lines: Vec<Line<'static>> = text
+        .lines()
+        .take(MAX_DETAIL_LINES)
+        .map(|line| {
+            let char_count = line.chars().count();
+            if char_count > MAX_DETAIL_LINE_CHARS {
+                let truncated: String = line.chars().take(MAX_DETAIL_LINE_CHARS).collect();
+                Line::from(format!("{truncated}…"))
+            } else {
+                Line::from(line.to_string())
+            }
+        })
+        .collect();
+    if total_lines > MAX_DETAIL_LINES {
+        lines.push(Line::from("…"));
+    }
+    lines
+}
+
 fn after_action_report_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
     let succeeded = op.error.is_none()
         && op
@@ -831,14 +873,12 @@ fn after_action_report_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
             .last()
             .is_some_and(|record| record.outcome == TickOutcome::Succeeded);
 
-    let mut lines = vec![
-        Line::from(Span::styled(
-            after_action_headline(op),
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::from(after_action_detail(op)),
-        Line::from(""),
-    ];
+    let mut lines = vec![Line::from(Span::styled(
+        after_action_headline(op),
+        Style::default().add_modifier(Modifier::BOLD),
+    ))];
+    lines.extend(bounded_detail_lines(&after_action_detail(op)));
+    lines.push(Line::from(""));
 
     let ticks_executed = op.records.len();
     let tiles_discovered = op.current.discovered.len();
@@ -933,12 +973,29 @@ fn telemetry_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
         Line::from(""),
     ];
 
+    // Once the run is over, this pane is functioning as "Review Run"
+    // (reachable via `F5` from After Action) rather than a live view — show
+    // the immutable source and revision that produced this result, not
+    // whatever the editor currently holds (`docs/TUI_DESIGN.md` §5,
+    // "Review Run displays the immutable source revision and telemetry
+    // associated with that recorded run").
+    if op.finished {
+        lines.push(Line::from(format!("deployed rev  run-{:02}", op.run_id)));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "DEPLOYED SOURCE",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        lines.extend(bounded_detail_lines(op.deployed_source));
+        lines.push(Line::from(""));
+    }
+
     if let Some(error) = op.error {
         lines.push(Line::from(Span::styled(
             controller_error_headline(error),
             Style::default().add_modifier(Modifier::BOLD),
         )));
-        lines.push(Line::from(controller_error_detail(error)));
+        lines.extend(bounded_detail_lines(&controller_error_detail(error)));
         lines.push(Line::from(""));
         lines.push(Line::from("F4  revise the controller"));
         lines.push(Line::from("F6  redeploy"));
@@ -1030,6 +1087,15 @@ fn outcome_headline(outcome: TickOutcome) -> &'static str {
 }
 
 fn controller_error_headline(error: &ControllerError) -> &'static str {
+    // Checked first: a top-level load that ran out of its execution
+    // allowance is reported as `ScriptInvalid` (there's no simulation state
+    // yet to attach a distinct variant to — see `ControllerError::
+    // is_execution_limit`), but it's the same "runaway controller"
+    // diagnostic as a callback caught mid-tick, not an ordinary syntax
+    // error.
+    if error.is_execution_limit() {
+        return "OPERATION FAILED: controller execution limit";
+    }
     match error {
         ControllerError::ExecutionLimitExceeded => "OPERATION FAILED: controller execution limit",
         ControllerError::InvalidAction(_) => "OPERATION FAILED: invalid controller action",
@@ -2610,10 +2676,15 @@ mod tests {
         assert!(buffer_contains(&terminal, "F6 Redeploy"));
 
         // Review Run (`F5`/`Navigate(Operation)`) still shows the finished
-        // run's own telemetry pane, unchanged from before this view split.
+        // run's own telemetry pane, unchanged from before this view split —
+        // plus the frozen source and revision that produced this result, so
+        // the player can tell which code ran even after editing Controller
+        // (`docs/TUI_DESIGN.md` §5, "Review Run").
         state.apply(super::super::state::Msg::Navigate(View::Operation));
         let terminal = render(120, 40, &state);
         assert!(buffer_contains(&terminal, "F6  redeploy"));
+        assert!(buffer_contains(&terminal, "DEPLOYED SOURCE"));
+        assert!(buffer_contains(&terminal, "deployed rev  run-01"));
     }
 
     #[test]
@@ -2642,6 +2713,77 @@ mod tests {
             "OPERATION FAILED: controller script error"
         ));
         assert!(state.operation().unwrap().finished);
+    }
+
+    #[test]
+    fn a_synchronous_deploy_failure_defaults_to_the_report_pane_at_narrow_widths() {
+        use super::super::editor::EditOp;
+        use super::super::state::Msg;
+
+        let mut state = working_state();
+        for _ in 0..500 {
+            state.apply(Msg::EditController(EditOp::Backspace));
+        }
+        state.apply(Msg::EditController(EditOp::Insert('(')));
+        state.apply(Msg::RequestDeploy);
+        assert_eq!(state.current_view(), View::AfterAction);
+
+        // Below the two-pane threshold, with no `F8` toggle pressed yet, a
+        // deploy that never started a live run has nothing to show in the
+        // satellite pane — the compact failure report must be what's
+        // visible by default, not an empty grid the player has to know to
+        // toggle away from.
+        let terminal = render(90, 30, &state);
+        assert!(buffer_contains(&terminal, "AFTER-ACTION REPORT"));
+        assert!(buffer_contains(
+            &terminal,
+            "OPERATION FAILED: controller script error"
+        ));
+        assert!(!buffer_contains(&terminal, "FINAL SATELLITE FRAME"));
+    }
+
+    #[test]
+    fn bounded_detail_lines_truncates_long_text_with_a_marker() {
+        let long_line = "x".repeat(MAX_DETAIL_LINE_CHARS + 50);
+        let many_lines = std::iter::repeat_n("line", MAX_DETAIL_LINES + 5)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let truncated_line = bounded_detail_lines(&long_line);
+        assert_eq!(truncated_line.len(), 1);
+        let rendered = truncated_line[0].to_string();
+        assert!(rendered.ends_with('…'));
+        assert!(rendered.chars().count() <= MAX_DETAIL_LINE_CHARS + 1);
+
+        let truncated_lines = bounded_detail_lines(&many_lines);
+        assert_eq!(truncated_lines.len(), MAX_DETAIL_LINES + 1);
+    }
+
+    #[test]
+    fn a_top_level_execution_limit_reads_as_execution_limit_not_a_script_error() {
+        use super::super::editor::EditOp;
+        use super::super::state::Msg;
+
+        let mut state = working_state();
+        for _ in 0..500 {
+            state.apply(Msg::EditController(EditOp::Backspace));
+        }
+        for c in "while true do pcall(function() while true do end end) end\nfunction on_tick(observation) return \"wait\" end".chars() {
+            let op = if c == '\n' {
+                EditOp::Newline
+            } else {
+                EditOp::Insert(c)
+            };
+            state.apply(Msg::EditController(op));
+        }
+        state.apply(Msg::RequestDeploy);
+
+        assert_eq!(state.current_view(), View::AfterAction);
+        let terminal = render(120, 40, &state);
+        assert!(buffer_contains(
+            &terminal,
+            "OPERATION FAILED: controller execution limit"
+        ));
     }
 
     #[test]
