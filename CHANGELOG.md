@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/slaptijack/human-exception/compare/v0.1.1...v0.2.0) - 2026-08-12
+
+### Added
+
+- complete the edit-deploy-observe-retry gameplay loop ([#53](https://github.com/slaptijack/human-exception/pull/53))
+- run and observe reconnaissance live inside the resistance console ([#52](https://github.com/slaptijack/human-exception/pull/52))
+- add an in-console Lua editor for the operation controller ([#51](https://github.com/slaptijack/human-exception/pull/51))
+- surface resistance signals and target intelligence ([#50](https://github.com/slaptijack/human-exception/pull/50))
+- build the interactive resistance-console session shell ([#49](https://github.com/slaptijack/human-exception/pull/49))
+
+### Other
+
+- define resistance console TUI ([#48](https://github.com/slaptijack/human-exception/pull/48))
+- fix the v0.1.1 changelog entry and document the gap that caused it ([#39](https://github.com/slaptijack/human-exception/pull/39))
+
 ## [0.1.1](https://github.com/slaptijack/human-exception/compare/v0.1.0...v0.1.1) - 2026-08-07
 
 ### Added
