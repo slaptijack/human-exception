@@ -65,6 +65,11 @@ struct Operation {
     /// player has since typed into the editor (`docs/TUI_DESIGN.md`, "Run
     /// records and source provenance").
     deployed_source: String,
+    /// A compact, session-local identifier for this deployment, shown in
+    /// After Action / Review Run so the player can tell which run produced
+    /// a given result even after the working controller source has since
+    /// changed (`docs/TUI_DESIGN.md`, "Run records and source provenance").
+    run_id: u32,
     /// One entry per completed tick, oldest first, for telemetry and the
     /// satellite feed's latest discovered state.
     records: Vec<TickRecord>,
@@ -83,6 +88,7 @@ impl Operation {
 /// exposed directly outside this module).
 pub struct OperationView<'a> {
     pub deployed_source: &'a str,
+    pub run_id: u32,
     pub records: &'a [TickRecord],
     pub paused: bool,
     pub finished: bool,
@@ -184,6 +190,10 @@ pub struct AppState {
     /// player navigates away or the run ends, until replaced by another
     /// deploy.
     operation: Option<Operation>,
+    /// The `run_id` to assign to the next deployment, incremented every
+    /// time [`AppState::deploy`] runs so each run gets a distinct,
+    /// human-readable identifier.
+    next_run_id: u32,
     /// `F6` was pressed while another run is still active; the player must
     /// confirm before it's replaced.
     redeploy_confirmation_pending: bool,
@@ -207,6 +217,7 @@ impl Default for AppState {
             reset_confirmation_pending: false,
             quit_confirmation_pending: false,
             operation: None,
+            next_run_id: 1,
             redeploy_confirmation_pending: false,
             narrow_secondary_visible: false,
             help_scroll: 0,
@@ -316,6 +327,7 @@ impl AppState {
             };
             OperationView {
                 deployed_source: &op.deployed_source,
+                run_id: op.run_id,
                 records: &op.records,
                 paused: op.paused,
                 finished: op.is_finished(),
@@ -555,11 +567,14 @@ impl AppState {
             return;
         };
         let source = source.to_string();
+        let run_id = self.next_run_id;
+        self.next_run_id += 1;
 
-        self.operation = Some(match LiveOperation::deploy(&source) {
+        let operation = match LiveOperation::deploy(&source) {
             Ok(live) => Operation {
                 live: Some(live),
                 deployed_source: source,
+                run_id,
                 records: Vec::new(),
                 paused: false,
                 error: None,
@@ -567,12 +582,24 @@ impl AppState {
             Err(err) => Operation {
                 live: None,
                 deployed_source: source,
+                run_id,
                 records: Vec::new(),
                 paused: false,
                 error: Some(err),
             },
-        });
-        self.current_view = View::Operation;
+        };
+        // A deployment that fails to load (bad Lua syntax, no `on_tick`)
+        // finishes the instant it's created, with no live run to watch —
+        // send the player straight to After Action's compact report rather
+        // than parking them on an Operation view that has nothing to show
+        // yet (`docs/TUI_DESIGN.md`, "After Action is an operation state,
+        // not a disconnected popup").
+        self.current_view = if operation.is_finished() {
+            View::AfterAction
+        } else {
+            View::Operation
+        };
+        self.operation = Some(operation);
         self.narrow_secondary_visible = false;
     }
 
@@ -593,6 +620,15 @@ impl AppState {
         match live.step() {
             Ok(record) => op.records.push(record),
             Err(err) => op.error = Some(err),
+        }
+        // The run just reached a terminal outcome while the player was
+        // watching Operation (the only view this can be reached from — see
+        // `AppState::deploy` for the synchronous-failure case, which can
+        // happen from anywhere else). Hand off to After Action so the
+        // player moves from "watching it run" to "learning what happened."
+        if op.is_finished() {
+            self.current_view = View::AfterAction;
+            self.narrow_secondary_visible = false;
         }
         true
     }
@@ -1111,7 +1147,9 @@ mod tests {
         let op = state.operation().expect("deploy always records an outcome");
         assert!(op.finished);
         assert!(matches!(op.error, Some(ControllerError::ScriptInvalid(_))));
-        assert_eq!(state.current_view(), View::Operation);
+        // No live run was ever shown — go straight to the After Action
+        // report rather than parking on an empty Operation view.
+        assert_eq!(state.current_view(), View::AfterAction);
     }
 
     #[test]
@@ -1121,12 +1159,15 @@ mod tests {
         state.apply(Msg::RequestDeploy);
         state.advance_running_operation();
         assert!(state.operation().unwrap().finished);
+        assert_eq!(state.current_view(), View::AfterAction);
 
         state.apply(Msg::RequestDeploy);
 
         assert!(!state.redeploy_confirmation_pending());
-        // A fresh deploy replaces the finished operation's records.
+        // A fresh deploy replaces the finished operation's records and
+        // resumes on Operation since the starter controller loads fine.
         assert!(state.operation().unwrap().records.is_empty());
+        assert_eq!(state.current_view(), View::Operation);
     }
 
     #[test]
@@ -1309,6 +1350,7 @@ mod tests {
         let op = state.operation().unwrap();
         assert!(op.finished);
         assert!(matches!(op.error, Some(ControllerError::CallbackFailed(_))));
+        assert_eq!(state.current_view(), View::AfterAction);
     }
 
     #[test]
@@ -1328,6 +1370,39 @@ mod tests {
             op.records.last().map(|record| record.outcome),
             Some(crate::simulation::TickOutcome::Succeeded)
         );
+        assert_eq!(state.current_view(), View::AfterAction);
+    }
+
+    #[test]
+    fn reviewing_a_finished_run_returns_to_operation_with_the_frozen_telemetry() {
+        let mut state = working_state();
+        state.controller = Some(Editor::new(ROUTE_TO_UPLINK));
+        state.apply(Msg::RequestDeploy);
+        for _ in 0..8 {
+            state.advance_running_operation();
+        }
+        assert_eq!(state.current_view(), View::AfterAction);
+
+        state.apply(Msg::Navigate(View::Operation));
+
+        assert_eq!(state.current_view(), View::Operation);
+        let op = state.operation().unwrap();
+        assert_eq!(op.records.len(), 8);
+        assert!(op.finished);
+    }
+
+    #[test]
+    fn each_deploy_gets_a_distinct_run_id() {
+        let mut state = working_state();
+
+        state.apply(Msg::RequestDeploy); // starter controller: still running
+        let first_run_id = state.operation().unwrap().run_id;
+
+        state.apply(Msg::RequestDeploy); // active run: needs confirmation
+        state.apply(Msg::ConfirmDeploy);
+        let second_run_id = state.operation().unwrap().run_id;
+
+        assert_ne!(first_run_id, second_run_id);
     }
 
     #[test]

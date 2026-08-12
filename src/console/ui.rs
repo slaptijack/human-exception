@@ -255,34 +255,7 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
             candidates.push(format!("{target}   {working}"));
             candidates
         }
-        View::Operation => {
-            // A bare controller status ("starter"/"modified"/"invalid"),
-            // deliberately not `controller_field`'s own "STATUS: READY"
-            // suffix — that would collide visually with the operation's own
-            // `STATUS: RUNNING/PAUSED/...` field this view adds instead
-            // (`docs/TUI_DESIGN.md`'s "Persistent header" shows exactly one
-            // STATUS field per view).
-            let controller =
-                controller_status_only(state).map(|status| format!("CONTROLLER: {status}"));
-            let op_status = state
-                .operation()
-                .map(|op| format!("STATUS: {}", operation_status_label(&op).to_uppercase()));
-            let mut candidates = Vec::new();
-            if let (Some(controller), Some(op_status)) = (&controller, &op_status) {
-                candidates.push(format!(
-                    "MESH: DEGRADED   SATLINK: COMPROMISED   {controller}   {op_status}   {working}"
-                ));
-                candidates.push(format!(
-                    "SATLINK: COMPROMISED   {controller}   {op_status}   {working}"
-                ));
-                candidates.push(format!("{controller}   {op_status}   {working}"));
-            }
-            if let Some(op_status) = &op_status {
-                candidates.push(format!("{op_status}   {working}"));
-            }
-            candidates.push(working.clone());
-            candidates
-        }
+        View::Operation | View::AfterAction => operation_status_header_candidates(state, &working),
         _ => match &controller_field {
             Some(controller) => vec![
                 format!("MESH: DEGRADED   SATLINK: COMPROMISED   {controller}   {working}"),
@@ -310,6 +283,34 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
     frame.render_widget(Paragraph::new(Line::from(status)).block(block), area);
 }
 
+/// Header candidates shared by `Operation` and `AfterAction`: both show the
+/// deployment's `STATUS: RUNNING/PAUSED/SUCCEEDED/FAILED/...` alongside a
+/// bare controller status, deliberately not `controller_field`'s own
+/// "STATUS: READY" suffix — that would collide visually with the
+/// operation's own status field (`docs/TUI_DESIGN.md`'s "Persistent
+/// header" shows exactly one STATUS field per view).
+fn operation_status_header_candidates(state: &AppState, working: &str) -> Vec<String> {
+    let controller = controller_status_only(state).map(|status| format!("CONTROLLER: {status}"));
+    let op_status = state
+        .operation()
+        .map(|op| format!("STATUS: {}", operation_status_label(&op).to_uppercase()));
+    let mut candidates = Vec::new();
+    if let (Some(controller), Some(op_status)) = (&controller, &op_status) {
+        candidates.push(format!(
+            "MESH: DEGRADED   SATLINK: COMPROMISED   {controller}   {op_status}   {working}"
+        ));
+        candidates.push(format!(
+            "SATLINK: COMPROMISED   {controller}   {op_status}   {working}"
+        ));
+        candidates.push(format!("{controller}   {op_status}   {working}"));
+    }
+    if let Some(op_status) = &op_status {
+        candidates.push(format!("{op_status}   {working}"));
+    }
+    candidates.push(working.to_string());
+    candidates
+}
+
 fn draw_body(frame: &mut Frame, area: Rect, state: &AppState) {
     match state.current_view() {
         View::Signals => draw_signals(frame, area, state),
@@ -317,14 +318,7 @@ fn draw_body(frame: &mut Frame, area: Rect, state: &AppState) {
         View::Help => draw_help(frame, area, state),
         View::Controller => draw_controller(frame, area, state),
         View::Operation => draw_operation(frame, area, state),
-        view => {
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .title(view_title(view));
-            let inner = block.inner(area);
-            frame.render_widget(block, area);
-            frame.render_widget(Paragraph::new(view_body(view)), inner);
-        }
+        View::AfterAction => draw_after_action(frame, area, state),
     }
 }
 
@@ -771,6 +765,177 @@ fn draw_operation(frame: &mut Frame, area: Rect, state: &AppState) {
     }
 }
 
+/// The reflective, run-concluded view: the same final satellite frame
+/// Operation was last showing, alongside a concise mechanical outcome and
+/// summary stats (`docs/TUI_DESIGN.md` §5, "After Action is an operation
+/// state, not a disconnected popup"). Reuses `satellite_lines`/`draw_pane`
+/// and the same two-pane/narrow-layout structure as `draw_operation`.
+fn draw_after_action(frame: &mut Frame, area: Rect, state: &AppState) {
+    let Some(op) = state.operation() else {
+        draw_pane(
+            frame,
+            area,
+            "AFTER-ACTION REPORT",
+            vec![
+                Line::from("No operation has concluded yet."),
+                Line::from("F4 revises the controller, F6 deploys it."),
+            ],
+        );
+        return;
+    };
+
+    if area.width >= TWO_PANE_MIN_COLUMNS {
+        let [left, right] =
+            Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
+                .areas(area);
+        draw_pane(
+            frame,
+            left,
+            "FINAL SATELLITE FRAME",
+            satellite_lines(&op.current),
+        );
+        draw_pane(
+            frame,
+            right,
+            "AFTER-ACTION REPORT",
+            after_action_report_lines(&op),
+        );
+    } else {
+        // A deployment that never started a live run (a synchronous load
+        // failure) has no discovered tiles at all, so the satellite pane
+        // would just be an empty grid — default to the report pane instead
+        // so the compact failure explanation and recovery guidance are
+        // immediately visible without needing to already know `F8` swaps
+        // panes. `narrow_secondary_visible` still flips which pane is
+        // showing from there, same as every other narrow-layout view.
+        let defaults_to_report = op.error.is_some() && op.records.is_empty();
+        if state.narrow_secondary_visible() ^ defaults_to_report {
+            draw_pane(
+                frame,
+                area,
+                "AFTER-ACTION REPORT",
+                after_action_report_lines(&op),
+            );
+        } else {
+            draw_pane(
+                frame,
+                area,
+                "FINAL SATELLITE FRAME",
+                satellite_lines(&op.current),
+            );
+        }
+    }
+}
+
+/// The after-action report's content: a headline and one-line mechanical
+/// explanation (distinguishing success, budget exhaustion, an invalid
+/// controller action, and a Lua script/runtime failure from each other, per
+/// issue #46's acceptance criteria), summary stats, the deployed run's
+/// identifier, and an obvious next step. Failure explanations state the
+/// mechanical reason without prescribing the exact solution (`docs/
+/// TUI_DESIGN.md` §5).
+/// A cap on how many lines (and characters per line) diagnostic or source
+/// text can occupy in a report pane. Without a bound, a long player-
+/// controlled error message (`error(string.rep("x", 4000))`) or a large
+/// deployed script could push a pane's trailing summary stats and next-step
+/// guidance off the bottom of the console's supported minimum geometry.
+const MAX_DETAIL_LINES: usize = 8;
+const MAX_DETAIL_LINE_CHARS: usize = 120;
+
+/// Renders `text` capped to [`MAX_DETAIL_LINES`]/[`MAX_DETAIL_LINE_CHARS`],
+/// with a trailing `…` marker whenever something was cut off, so the rest
+/// of whatever pane called this always has room for its own content.
+fn bounded_detail_lines(text: &str) -> Vec<Line<'static>> {
+    let total_lines = text.lines().count();
+    let mut lines: Vec<Line<'static>> = text
+        .lines()
+        .take(MAX_DETAIL_LINES)
+        .map(|line| {
+            let char_count = line.chars().count();
+            if char_count > MAX_DETAIL_LINE_CHARS {
+                let truncated: String = line.chars().take(MAX_DETAIL_LINE_CHARS).collect();
+                Line::from(format!("{truncated}…"))
+            } else {
+                Line::from(line.to_string())
+            }
+        })
+        .collect();
+    if total_lines > MAX_DETAIL_LINES {
+        lines.push(Line::from("…"));
+    }
+    lines
+}
+
+fn after_action_report_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
+    let succeeded = op.error.is_none()
+        && op
+            .records
+            .last()
+            .is_some_and(|record| record.outcome == TickOutcome::Succeeded);
+
+    let mut lines = vec![Line::from(Span::styled(
+        after_action_headline(op),
+        Style::default().add_modifier(Modifier::BOLD),
+    ))];
+    lines.extend(bounded_detail_lines(&after_action_detail(op)));
+    lines.push(Line::from(""));
+
+    let ticks_executed = op.records.len();
+    let tiles_discovered = op.current.discovered.len();
+    let hazards_entered = op
+        .records
+        .iter()
+        .flat_map(|record| &record.events)
+        .filter(|event| matches!(event, SimEvent::HazardEntered { .. }))
+        .count();
+
+    lines.push(Line::from(format!(
+        "ticks executed     {ticks_executed:02}"
+    )));
+    lines.push(Line::from(format!(
+        "tiles discovered   {tiles_discovered:02}"
+    )));
+    lines.push(Line::from(format!(
+        "hazards entered    {hazards_entered:02}"
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(format!(
+        "deployed rev       run-{:02}",
+        op.run_id
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(if succeeded {
+        "Return to Signals for the next opportunity, or redeploy to try again."
+    } else {
+        "Revise the controller and try again, or return to Signals."
+    }));
+
+    lines
+}
+
+fn after_action_headline(op: &OperationView<'_>) -> &'static str {
+    if let Some(error) = op.error {
+        return controller_error_headline(error);
+    }
+    match op.records.last().map(|record| record.outcome) {
+        Some(outcome) => outcome_headline(outcome),
+        None => "OPERATION FAILED",
+    }
+}
+
+fn after_action_detail(op: &OperationView<'_>) -> String {
+    if let Some(error) = op.error {
+        return controller_error_detail(error);
+    }
+    match op.records.last().map(|record| record.outcome) {
+        Some(TickOutcome::Succeeded) => "Uplink reached.".to_string(),
+        Some(TickOutcome::Failed(FailureReason::BudgetExhausted)) => {
+            "Operational budget exhausted.".to_string()
+        }
+        Some(TickOutcome::Running) | None => String::new(),
+    }
+}
+
 /// The satellite feed's content lines: [`render_satellite_view`]'s grid and
 /// legend (already built strictly from `snapshot.discovered` — never raw
 /// scenario/map internals — so undiscovered terrain can't leak through
@@ -808,12 +973,29 @@ fn telemetry_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
         Line::from(""),
     ];
 
+    // Once the run is over, this pane is functioning as "Review Run"
+    // (reachable via `F5` from After Action) rather than a live view — show
+    // the immutable source and revision that produced this result, not
+    // whatever the editor currently holds (`docs/TUI_DESIGN.md` §5,
+    // "Review Run displays the immutable source revision and telemetry
+    // associated with that recorded run").
+    if op.finished {
+        lines.push(Line::from(format!("deployed rev  run-{:02}", op.run_id)));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "DEPLOYED SOURCE",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        lines.extend(bounded_detail_lines(op.deployed_source));
+        lines.push(Line::from(""));
+    }
+
     if let Some(error) = op.error {
         lines.push(Line::from(Span::styled(
             controller_error_headline(error),
             Style::default().add_modifier(Modifier::BOLD),
         )));
-        lines.push(Line::from(controller_error_detail(error)));
+        lines.extend(bounded_detail_lines(&controller_error_detail(error)));
         lines.push(Line::from(""));
         lines.push(Line::from("F4  revise the controller"));
         lines.push(Line::from("F6  redeploy"));
@@ -905,9 +1087,23 @@ fn outcome_headline(outcome: TickOutcome) -> &'static str {
 }
 
 fn controller_error_headline(error: &ControllerError) -> &'static str {
+    // Checked first: a top-level load that ran out of its execution
+    // allowance is reported as `ScriptInvalid` (there's no simulation state
+    // yet to attach a distinct variant to — see `ControllerError::
+    // is_execution_limit`), but it's the same "runaway controller"
+    // diagnostic as a callback caught mid-tick, not an ordinary syntax
+    // error.
+    if error.is_execution_limit() {
+        return "OPERATION FAILED: controller execution limit";
+    }
     match error {
         ControllerError::ExecutionLimitExceeded => "OPERATION FAILED: controller execution limit",
-        _ => "OPERATION FAILED: controller error",
+        ControllerError::InvalidAction(_) => "OPERATION FAILED: invalid controller action",
+        ControllerError::ScriptInvalid(_) | ControllerError::MissingCallback => {
+            "OPERATION FAILED: controller script error"
+        }
+        ControllerError::CallbackFailed(_) => "OPERATION FAILED: controller runtime error",
+        ControllerError::ScriptUnreadable { .. } => "OPERATION FAILED: controller error",
     }
 }
 
@@ -923,19 +1119,6 @@ fn view_title(view: View) -> &'static str {
         View::Operation => "OPERATION",
         View::AfterAction => "AFTER ACTION",
         View::Help => "HELP",
-    }
-}
-
-/// Placeholder body content for views this issue doesn't populate.
-fn view_body(view: View) -> Vec<Line<'static>> {
-    match view {
-        View::AfterAction => vec![
-            Line::from("No operation has concluded yet."),
-            Line::from("The after-action report will appear here (see #46)."),
-        ],
-        View::Signals | View::Target | View::Controller | View::Operation | View::Help => {
-            Vec::new()
-        }
     }
 }
 
@@ -1527,9 +1710,13 @@ fn view_specific_help(view: View) -> Vec<Line<'static>> {
             Line::from("F8     (80-99 columns) switch between satellite feed and telemetry"),
             Line::from("Leaving via F2/F3/F4 pauses the run; F5 returns to it as you left it."),
         ],
-        View::AfterAction => vec![Line::from(
-            "After-action reporting arrives in a later build (#46).",
-        )],
+        View::AfterAction => vec![
+            Line::from("F2     back to Signals"),
+            Line::from("F4     edit the controller (your edits are preserved)"),
+            Line::from("F5     review this run's frozen source and telemetry (Review Run)"),
+            Line::from("F6     redeploy from a clean scenario state"),
+            Line::from("F8     (80-99 columns) switch between satellite frame and report"),
+        ],
         View::Help => Vec::new(),
     }
 }
@@ -1538,6 +1725,22 @@ fn view_specific_help(view: View) -> Vec<Line<'static>> {
 /// form is used whenever the full labels would crowd out the `Ctrl+Q Quit`
 /// hint, which must always stay visible.
 fn footer_hint_items(state: &AppState, show_f8: bool) -> Vec<(&'static str, &'static str, bool)> {
+    // In After Action, F5 returns to Operation to inspect the finished
+    // run's frozen telemetry rather than "the" operation view in general,
+    // so it's relabeled "Review Run" there (`docs/TUI_DESIGN.md` §5).
+    let f5_item = if state.current_view() == View::AfterAction {
+        (
+            "F5 Review Run",
+            "F5 Rvw",
+            state.view_available(View::Operation),
+        )
+    } else {
+        (
+            "F5 Operation",
+            "F5 Op",
+            state.view_available(View::Operation),
+        )
+    };
     let mut items = vec![
         ("F1 Help", "F1 Help", true),
         ("F2 Signals", "F2 Sig", true),
@@ -1547,11 +1750,7 @@ fn footer_hint_items(state: &AppState, show_f8: bool) -> Vec<(&'static str, &'st
             "F4 Ctl",
             state.view_available(View::Controller),
         ),
-        (
-            "F5 Operation",
-            "F5 Op",
-            state.view_available(View::Operation),
-        ),
+        f5_item,
         deploy_footer_item(state),
     ];
     if state.current_view() == View::Controller {
@@ -1628,7 +1827,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &AppState, full_width: u16)
     let show_f8 = full_width < TWO_PANE_MIN_COLUMNS
         && matches!(
             state.current_view(),
-            View::Signals | View::Target | View::Controller | View::Operation
+            View::Signals | View::Target | View::Controller | View::Operation | View::AfterAction
         );
     let items = footer_hint_items(state, show_f8);
     let inner_width = area.width.saturating_sub(2) as usize;
@@ -2463,6 +2662,10 @@ mod tests {
             "should have finished well within 20 ticks"
         );
 
+        // Finishing hands the view off from Operation to After Action
+        // (`docs/TUI_DESIGN.md` §5) — the failure headline, status, and a
+        // redeploy hint all now live there.
+        assert_eq!(state.current_view(), View::AfterAction);
         let terminal = render(120, 40, &state);
 
         assert!(buffer_contains(
@@ -2470,7 +2673,18 @@ mod tests {
             "OPERATION FAILED: budget exhausted"
         ));
         assert!(buffer_contains(&terminal, "STATUS: FAILED"));
+        assert!(buffer_contains(&terminal, "F6 Redeploy"));
+
+        // Review Run (`F5`/`Navigate(Operation)`) still shows the finished
+        // run's own telemetry pane, unchanged from before this view split —
+        // plus the frozen source and revision that produced this result, so
+        // the player can tell which code ran even after editing Controller
+        // (`docs/TUI_DESIGN.md` §5, "Review Run").
+        state.apply(super::super::state::Msg::Navigate(View::Operation));
+        let terminal = render(120, 40, &state);
         assert!(buffer_contains(&terminal, "F6  redeploy"));
+        assert!(buffer_contains(&terminal, "DEPLOYED SOURCE"));
+        assert!(buffer_contains(&terminal, "deployed rev  run-01"));
     }
 
     #[test]
@@ -2489,13 +2703,87 @@ mod tests {
         state.apply(Msg::EditController(EditOp::Insert('(')));
         state.apply(Msg::RequestDeploy);
 
+        // A synchronous load failure has no live run to show, so it lands
+        // directly on After Action rather than an empty Operation view.
+        assert_eq!(state.current_view(), View::AfterAction);
         let terminal = render(120, 40, &state);
 
         assert!(buffer_contains(
             &terminal,
-            "OPERATION FAILED: controller error"
+            "OPERATION FAILED: controller script error"
         ));
         assert!(state.operation().unwrap().finished);
+    }
+
+    #[test]
+    fn a_synchronous_deploy_failure_defaults_to_the_report_pane_at_narrow_widths() {
+        use super::super::editor::EditOp;
+        use super::super::state::Msg;
+
+        let mut state = working_state();
+        for _ in 0..500 {
+            state.apply(Msg::EditController(EditOp::Backspace));
+        }
+        state.apply(Msg::EditController(EditOp::Insert('(')));
+        state.apply(Msg::RequestDeploy);
+        assert_eq!(state.current_view(), View::AfterAction);
+
+        // Below the two-pane threshold, with no `F8` toggle pressed yet, a
+        // deploy that never started a live run has nothing to show in the
+        // satellite pane — the compact failure report must be what's
+        // visible by default, not an empty grid the player has to know to
+        // toggle away from.
+        let terminal = render(90, 30, &state);
+        assert!(buffer_contains(&terminal, "AFTER-ACTION REPORT"));
+        assert!(buffer_contains(
+            &terminal,
+            "OPERATION FAILED: controller script error"
+        ));
+        assert!(!buffer_contains(&terminal, "FINAL SATELLITE FRAME"));
+    }
+
+    #[test]
+    fn bounded_detail_lines_truncates_long_text_with_a_marker() {
+        let long_line = "x".repeat(MAX_DETAIL_LINE_CHARS + 50);
+        let many_lines = std::iter::repeat_n("line", MAX_DETAIL_LINES + 5)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let truncated_line = bounded_detail_lines(&long_line);
+        assert_eq!(truncated_line.len(), 1);
+        let rendered = truncated_line[0].to_string();
+        assert!(rendered.ends_with('…'));
+        assert!(rendered.chars().count() <= MAX_DETAIL_LINE_CHARS + 1);
+
+        let truncated_lines = bounded_detail_lines(&many_lines);
+        assert_eq!(truncated_lines.len(), MAX_DETAIL_LINES + 1);
+    }
+
+    #[test]
+    fn a_top_level_execution_limit_reads_as_execution_limit_not_a_script_error() {
+        use super::super::editor::EditOp;
+        use super::super::state::Msg;
+
+        let mut state = working_state();
+        for _ in 0..500 {
+            state.apply(Msg::EditController(EditOp::Backspace));
+        }
+        for c in "while true do pcall(function() while true do end end) end\nfunction on_tick(observation) return \"wait\" end".chars() {
+            let op = if c == '\n' {
+                EditOp::Newline
+            } else {
+                EditOp::Insert(c)
+            };
+            state.apply(Msg::EditController(op));
+        }
+        state.apply(Msg::RequestDeploy);
+
+        assert_eq!(state.current_view(), View::AfterAction);
+        let terminal = render(120, 40, &state);
+        assert!(buffer_contains(
+            &terminal,
+            "OPERATION FAILED: controller execution limit"
+        ));
     }
 
     #[test]

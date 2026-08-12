@@ -813,6 +813,28 @@ impl Error for ControllerError {
     }
 }
 
+impl ControllerError {
+    /// Whether this failure represents the controller exceeding its
+    /// execution allowance, whether reported as
+    /// [`ControllerError::ExecutionLimitExceeded`] (a callback caught
+    /// mid-tick, which has simulation state to attach a distinct variant
+    /// to) or as a [`ControllerError::ScriptInvalid`] carrying
+    /// [`EXECUTION_ALLOWANCE_MESSAGE`] (the top-level load path, which has
+    /// no simulation state yet — see [`LiveOperation::deploy`] and
+    /// [`validate`]). Lets callers present both as the same "runaway
+    /// controller" diagnostic instead of the top-level case reading like an
+    /// ordinary syntax error.
+    pub fn is_execution_limit(&self) -> bool {
+        match self {
+            ControllerError::ExecutionLimitExceeded => true,
+            ControllerError::ScriptInvalid(err) => {
+                err.to_string().contains(EXECUTION_ALLOWANCE_MESSAGE)
+            }
+            _ => false,
+        }
+    }
+}
+
 /// A record of one completed tick, handed to the caller's observer so it
 /// can render telemetry without this module knowing anything about
 /// presentation.
@@ -1663,6 +1685,29 @@ mod tests {
     fn validate_rejects_a_syntax_error() {
         let err = validate_locked("function on_tick( ").unwrap_err();
         assert!(matches!(err, ControllerError::ScriptInvalid(_)));
+        // An ordinary syntax error is not an execution-limit failure, even
+        // though both are reported as `ScriptInvalid` — only the specific
+        // execution-allowance message should read as one.
+        assert!(!err.is_execution_limit());
+    }
+
+    #[test]
+    fn is_execution_limit_recognizes_the_top_level_execution_allowance_message() {
+        let err = ControllerError::ScriptInvalid(mlua::Error::RuntimeError(
+            EXECUTION_ALLOWANCE_MESSAGE.to_string(),
+        ));
+        assert!(err.is_execution_limit());
+    }
+
+    #[test]
+    fn is_execution_limit_recognizes_a_callback_execution_limit() {
+        assert!(ControllerError::ExecutionLimitExceeded.is_execution_limit());
+    }
+
+    #[test]
+    fn is_execution_limit_rejects_unrelated_failures() {
+        assert!(!ControllerError::MissingCallback.is_execution_limit());
+        assert!(!ControllerError::InvalidAction("bad".to_string()).is_execution_limit());
     }
 
     #[test]

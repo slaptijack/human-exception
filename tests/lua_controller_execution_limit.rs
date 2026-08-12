@@ -32,6 +32,11 @@ fn live_operation_deploy_bounds_a_top_level_loop_that_catches_the_instruction_ho
     let err = LiveOperation::deploy(source).unwrap_err();
     assert!(matches!(err, ControllerError::ScriptInvalid(_)));
     assert!(err.to_string().contains("execution allowance"));
+    // Reported as `ScriptInvalid` (there's no simulation state yet to
+    // attach `ExecutionLimitExceeded` to), but the console must still be
+    // able to recognize it as the same "runaway controller" diagnostic as
+    // a callback caught mid-tick, not an ordinary syntax error.
+    assert!(err.is_execution_limit());
 }
 
 #[test]
