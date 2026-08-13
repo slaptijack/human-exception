@@ -96,13 +96,14 @@ pub fn map(
         {
             Some(Msg::ToggleSecondaryPane)
         }
-        // `Ctrl+Enter` is the advertised binding, but plenty of terminals
-        // report it identically to plain `Enter` without the Kitty keyboard
-        // protocol (see `console::run`'s best-effort attempt to enable it).
-        // `Ctrl+V` is an ordinary control character every terminal can
-        // send, so it works everywhere as a guaranteed fallback — without
-        // it, players on those terminals would have no way to validate at
-        // all, since `Ctrl+Enter` would just insert a newline instead.
+        // `Ctrl+V` is the advertised binding — an ordinary control character
+        // every terminal sends correctly, so it works everywhere. `Ctrl+Enter`
+        // is still accepted here too, on terminals capable of reporting it
+        // distinctly from plain `Enter` via the Kitty keyboard protocol (see
+        // `console::run`'s best-effort attempt to enable it), but it is not
+        // required or advertised: without the Kitty protocol, most terminals
+        // report it identically to plain `Enter`, so relying on it would
+        // leave those players with no way to validate at all.
         KeyCode::Enter | KeyCode::Char('v') if ctrl && controller_is_open => {
             Some(Msg::ValidateController)
         }
