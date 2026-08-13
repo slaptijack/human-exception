@@ -21,6 +21,37 @@ Every code or repository change must begin with an open GitHub issue.
 - If you discover unrelated work, propose a separate issue.
 - Check parent, child, and blocked-by relationships before starting. Do not implement a blocked issue.
 
+## Delivery shape
+
+Prefer small, independently mergeable implementation issues and usually one PR per issue, over minimizing issue or PR count.
+
+Preferred delivery shape:
+
+**Epic → many small implementation issues → usually one PR per issue**
+
+rather than:
+
+**Epic → a few medium implementation issues → large multi-layer PRs**
+
+- Story points describe product scope; issue and PR boundaries also reflect review scope. A story-point size alone does not imply a change is appropriately sized for one PR.
+- 1–3 story points is the normal target for an implementation issue.
+- A 4–5 point implementation issue is a decomposition smell: explicitly consider splitting it before implementation begins.
+- An implementation issue should have one dominant implementation/review question.
+- Every implementation issue should be independently landable and leave `main` healthy.
+- Prefer creating additional small issues over planning multiple large PRs under one implementation issue. Multiple PRs for one implementation issue remain possible when circumstances require it, but should be an exception rather than the planned default.
+- Prefer prerequisite/seam/refactoring issues when they allow subsequent behavior to land safely and independently.
+- Keep tests with the behavior they validate. Avoid opportunistic cleanup or unrelated refactoring in feature PRs.
+- Do not use a hard LOC or changed-file limit as a proxy for reviewability. Size metrics may be useful signals, but architectural and behavioral review complexity is the real concern.
+
+If the assigned implementation issue appears too large to satisfy these delivery rules, do not simply implement it. Propose a smaller issue split before proceeding.
+
+Before requesting review, confirm the PR:
+
+- has one dominant review question;
+- was considered for further decomposition;
+- contains no unrelated cleanup;
+- leaves `main` healthy if merged independently.
+
 ## Git workflow
 
 All changes land through pull requests. Never commit or push directly to `main`.
