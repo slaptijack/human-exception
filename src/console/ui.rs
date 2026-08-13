@@ -1523,19 +1523,13 @@ fn help_lines(state: &AppState) -> Vec<Line<'static>> {
         "F7 Reset         (Controller, unavailable: work an opportunity first)"
     }));
     lines.push(Line::from(
-        "Ctrl+Enter       (Controller) load the source and check for on_tick,",
+        "Ctrl+V           (Controller) load the source and check for on_tick,",
     ));
     lines.push(Line::from(
         "                 without calling on_tick itself (top-level code",
     ));
     lines.push(Line::from(
         "                 outside on_tick does run, e.g. local state setup)",
-    ));
-    lines.push(Line::from(
-        "Ctrl+V           (Controller) same as Ctrl+Enter, for terminals that",
-    ));
-    lines.push(Line::from(
-        "                 can't tell Ctrl+Enter apart from plain Enter",
     ));
     lines.push(Line::from("Ctrl+Q Quit      exit and restore the terminal"));
     lines.push(Line::from(""));
@@ -1699,8 +1693,7 @@ fn view_specific_help(view: View) -> Vec<Line<'static>> {
         View::Controller => vec![
             Line::from("Type to edit; arrows/Home/End/PageUp/PageDown move the cursor"),
             Line::from("F7          reset to the starter controller (confirms if modified)"),
-            Line::from("Ctrl+Enter  load the source and check for on_tick, without calling it"),
-            Line::from("Ctrl+V      same as Ctrl+Enter (works on every terminal)"),
+            Line::from("Ctrl+V      load the source and check for on_tick, without calling it"),
             Line::from("F8          (80-99 columns) switch between source and reference"),
         ],
         View::Operation => vec![
@@ -1756,7 +1749,7 @@ fn footer_hint_items(state: &AppState, show_f8: bool) -> Vec<(&'static str, &'st
     if state.current_view() == View::Controller {
         let has_controller = state.controller_source().is_some();
         items.push(("F7 Reset", "F7 Rst", has_controller));
-        items.push(("Ctrl+Enter Validate", "^Ent Val", has_controller));
+        items.push(("Ctrl+V Validate", "^V Val", has_controller));
     }
     if state.current_view() == View::Operation
         && let Some(op) = state.operation()
@@ -2033,8 +2026,27 @@ mod tests {
 
         assert!(
             buffer_contains(&terminal, "Ctrl+Q Quit"),
-            "Controller's extra F7/Ctrl+Enter hints must not crowd out the global quit hint"
+            "Controller's extra F7/Ctrl+V hints must not crowd out the global quit hint"
         );
+    }
+
+    #[test]
+    fn controller_footer_and_help_advertise_ctrl_v_not_ctrl_enter() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        let terminal = render(200, MIN_ROWS, &state);
+
+        assert!(buffer_contains(&terminal, "Ctrl+V Validate"));
+        assert!(!buffer_contains(&terminal, "Ctrl+Enter"));
+
+        state.apply(Msg::OpenHelp);
+        let terminal = render(120, 40, &state);
+
+        assert!(buffer_contains(&terminal, "Ctrl+V"));
+        assert!(!buffer_contains(&terminal, "Ctrl+Enter"));
     }
 
     #[test]
