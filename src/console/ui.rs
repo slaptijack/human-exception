@@ -909,6 +909,10 @@ fn after_action_report_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
     } else {
         "Revise the controller and try again, or return to Signals."
     }));
+    if !succeeded {
+        lines.push(Line::from(""));
+        lines.push(Line::from("F4  revise the controller"));
+    }
 
     lines
 }
@@ -2686,6 +2690,7 @@ mod tests {
         ));
         assert!(buffer_contains(&terminal, "STATUS: FAILED"));
         assert!(buffer_contains(&terminal, "F6 Redeploy"));
+        assert!(buffer_contains(&terminal, "F4  revise the controller"));
 
         // Review Run (`F5`/`Navigate(Operation)`) still shows the finished
         // run's own telemetry pane, unchanged from before this view split —
