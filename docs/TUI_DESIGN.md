@@ -408,7 +408,7 @@ The product requirement is observable, not architectural:
 - the failure is shown with a concise explanation that the controller exceeded its execution allowance and should be revised;
 - the exact instruction-count, hook, thread, process, or other implementation mechanism is left to implementation issues.
 
-Runtime/script failures end the deployment the same as any other terminal outcome: the console transitions to After Action (§5) with a concise error explanation and **Controller** presented as the obvious recovery path. **Review Run** (`F5` from After Action) shows that same explanation alongside the finished run's frozen telemetry.
+Runtime/script failures end the deployment the same as any other terminal outcome: the console transitions to After Action (§5) with a concise error explanation and **Controller** presented as the obvious recovery path. **Review Run** (`F5` from After Action) shows that same explanation alongside the finished run's frozen telemetry. §5's outcome hierarchy and grammar apply to a controller failure exactly as they do to budget exhaustion or success.
 
 ### Run records and source provenance
 
@@ -429,6 +429,65 @@ After Action is an operation state, not a disconnected popup.
 
 The final discovered satellite frame remains visible so the player can connect the result to what the program actually did.
 
+### Outcome hierarchy
+
+Every terminal state — success, budget exhaustion, or controller error — presents these concepts in this order. Higher items must never be sacrificed for lower ones when space is constrained (see [Responsive behavior](#responsive-behavior)):
+
+1. **Outcome** — the headline result (`FOOTHOLD ESTABLISHED`, `OPERATION FAILED`, etc.).
+2. **Trigger** — the concrete mechanical event that produced it (the drone reached the uplink; the budget ran out; the controller failed to behave as programmed).
+3. **Meaning** — what the trigger means in the resistance's fiction, stated without overclaiming.
+4. **Completion** — whether First Contact is complete or incomplete, stated explicitly.
+5. **Evidence** — the final satellite frame and the supported run facts that explain the result (§ Evidence: After Action vs. Review Run, below).
+6. **Next actions** — Review Run, revise/redeploy the Controller, or return to Signals.
+7. **Availability** — a truthful statement that no additional playable operation is currently implemented.
+
+This hierarchy is a presentation contract, not a new state machine: it governs what a given After Action screen says and in what order, not new navigation, new bindings, or new mechanical outcomes.
+
+### Success
+
+A successful run leads with `FOOTHOLD ESTABLISHED` and states `FIRST CONTACT COMPLETE` as the explicit completion line. The meaning line echoes the language already used when the opportunity was first offered in Target (§2): reaching the uplink means resistance access to the facility network was established before the operational window closed. It does **not** mean the facility was captured, owned, brought under resistance control, or made persistently operable — the report must not claim or imply any of those.
+
+The availability line is stated plainly and in-fiction, not as an apologetic developer note: no further operation at this facility is currently available. Returning to Signals is worthwhile because Signals is the wider intelligence network, not because another operation at this target is waiting.
+
+```text
+┌ HUMAN EXCEPTION // RESISTANCE CONSOLE ────────────────────────────────────────────────────────────────────────┐
+│ WORKING SET: FIRST CONTACT   LINK: RECORDED   CONTROLLER: modified   STATUS: SUCCESS                          │
+├──────────────────────────────────────────────────────────────────────┬────────────────────────────────────────┤
+│ FINAL SATELLITE FRAME                                                │ AFTER-ACTION REPORT                    │
+│                                                                      │                                        │
+│              .   .   ?   ?   ?                                       │ FOOTHOLD ESTABLISHED                   │
+│              .   #   ?   ?   ?                                       │ The drone reached the facility uplink. │
+│              .   #   #   ?   ?                                       │ Resistance access to the facility      │
+│              .   .   .   #   ▲                                       │ network was established before the    │
+│              ·   #   ?   ?   ?                                       │ access window closed.                 │
+│                                                                      │                                        │
+│                        ▲ DRONE (AT UPLINK)                            │ FIRST CONTACT COMPLETE                 │
+│                                                                      │                                        │
+│                                                                      │ ticks executed     11                  │
+│                                                                      │ tiles discovered   14                  │
+│                                                                      │ hazards entered     0                  │
+│                                                                      │ deployed rev       run-08             │
+│                                                                      │                                        │
+│                                                                      │ No further operation is available at  │
+│                                                                      │ this facility. Review the run, redeploy│
+│                                                                      │ to try another approach, or return to │
+│                                                                      │ Signals for the wider network.        │
+├───────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ F2 Signals   F4 Edit Controller   F5 Review Run   F6 Redeploy                                      Ctrl+Q Quit│
+└───────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Failure and controller error
+
+Budget exhaustion and controller errors (an execution-limit breach, an invalid action, a script or runtime error) are all "operation failed" outcomes and follow the same result → cause → completion → evidence → recovery grammar as success, without expanding into a broader redesign of failure systems:
+
+- **Outcome:** `OPERATION FAILED`.
+- **Trigger:** a concise, mechanical explanation of what actually happened — budget exhaustion, or the controller failing to behave as programmed — stated without prescribing the exact fix. The explanation names the mechanical reason (e.g. "the controller exceeded its execution allowance") without walking through internal implementation detail.
+- **Meaning:** the operational window closed without the drone reaching the uplink, so no facility foothold was established on this attempt. This is the failure counterpart to the success meaning line, not a new mechanic — it states a consequence that already follows from the trigger.
+- **Completion:** First Contact is explicitly **incomplete**. This is the direct counterpart to `FIRST CONTACT COMPLETE` and must be no less clear.
+- **Evidence/next actions:** identical evidence set and next-action set as success (below), except the primary recovery path is revising the Controller rather than reviewing a clean success.
+- **Availability:** the same truthful statement as success — no additional playable operation is currently implemented at this facility, regardless of outcome.
+
 ```text
 ┌ HUMAN EXCEPTION // RESISTANCE CONSOLE ────────────────────────────────────────────────────────────────────────┐
 │ WORKING SET: FIRST CONTACT   LINK: RECORDED   CONTROLLER: modified   STATUS: FAILED                           │
@@ -438,27 +497,46 @@ The final discovered satellite frame remains visible so the player can connect t
 │              .   .   ?   ?   ?                                       │ OPERATION FAILED                       │
 │              .   #   ?   ?   ?                                       │ Operational budget exhausted.          │
 │              .   #   ?   ?   ?                                       │                                        │
-│              .   .   .   ▲   ~                                       │ ticks executed     15                  │
-│              ·   #   ?   ?   ?                                       │ tiles discovered   12                  │
+│              .   .   .   ▲   ~                                       │ FIRST CONTACT INCOMPLETE               │
+│              ·   #   ?   ?   ?                                       │                                        │
+│                                                                      │ ticks executed     15                  │
+│                   ▲ DRONE                                             │ tiles discovered   12                  │
 │                                                                      │ hazards entered     1                  │
-│                   ▲ DRONE                                             │                                        │
 │                                                                      │ deployed rev       run-07             │
-│                                                                      │ Revise the controller and try again,  │
-│                                                                      │ or return to Signals.                 │
+│                                                                      │                                        │
+│                                                                      │ No further operation is available at  │
+│                                                                      │ this facility either way. Revise the  │
+│                                                                      │ controller and try again, or return   │
+│                                                                      │ to Signals.                           │
 ├───────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │ F2 Signals   F4 Edit Controller   F5 Review Run   F6 Redeploy                                      Ctrl+Q Quit│
 └───────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Success uses the same structure with a clear `OPERATION SUCCESSFUL` result and relevant statistics.
+A controller error (e.g. an execution-limit breach) uses the same layout with a headline naming the mechanical failure, for example `OPERATION FAILED: controller execution limit`, followed by `FIRST CONTACT INCOMPLETE` and the same evidence/next-action shape. The exact set of controller-error headlines is an implementation detail; this document only guarantees that every such headline is a specific, mechanical `OPERATION FAILED: ...` variant rather than a generic message, and that it is followed by the same completion/evidence/recovery grammar shown above.
 
 Failure explanations should state the mechanical reason without prescribing the exact solution.
 
 The player's edited working source remains intact. Returning to Controller restores the same document state. Redeploy starts from a clean scenario state.
 
-**Review Run** displays the immutable source revision and telemetry associated with that recorded run, not whatever source currently happens to be in the editor.
-
 Returning to Signals does not imply abandoning or failing a formal assignment. It simply means the player has chosen to direct their attention elsewhere.
+
+### Evidence: After Action vs. Review Run
+
+The initial After Action screen carries only the evidence needed to understand the result: final budget/ticks executed, tiles discovered, hazards entered, the run identifier (e.g. `deployed rev run-07`), and — where space allows — the final satellite frame. This evidence set is the same regardless of outcome.
+
+Detailed tick-by-tick telemetry, full event chronology, and the exact deployed-source provenance are **Review Run**'s responsibility (`F5` from After Action), not After Action's. After Action answers "what happened and what does it mean"; Review Run answers "show me exactly what the code did." Neither view exposes hidden authoritative scenario state (§2, [Target information model](#target-information-model)) beyond what the run legitimately discovered.
+
+### Next actions
+
+From After Action, four next actions are available, using bindings already defined in [Overall navigation](#overall-navigation) — no new bindings are introduced for this contract:
+
+- `F2` — return to Signals.
+- `F4` — edit the Controller (current source, including edits from prior sessions this run, is preserved).
+- `F5` — Review Run: inspect this run's frozen telemetry and deployed source.
+- `F6` — redeploy from a clean scenario state.
+
+**Review Run** displays the immutable source revision and telemetry associated with that recorded run, not whatever source currently happens to be in the editor.
 
 ## 6. Help
 
@@ -492,6 +570,8 @@ Use one primary pane. Secondary information becomes a toggled subview:
 - final satellite frame ↔ after-action report.
 
 `F8` toggles the primary and secondary subview at 80–99 columns. This binding is global only in narrow-layout mode and is shown in the footer. It remains safe in Controller because it does not insert a normal text character into Lua source.
+
+For After Action specifically, the report subview defaults to primary: at 80–99 columns, including the 80×24 minimum, the player sees outcome, trigger, meaning, and completion (hierarchy items 1–4) immediately, without needing `F8` to discover whether they succeeded or what that meant. The `F8` toggle only trades which pane is primary; it never reorders the outcome hierarchy (§5) itself, so evidence, next actions, and availability keep the same relative priority within the report pane regardless of which pane is showing.
 
 ### Below 80 columns or 24 rows
 
