@@ -934,9 +934,7 @@ fn after_action_success_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
     // reflows the full approved sentence at the pane's actual width instead
     // of hard-truncating it at `MAX_DETAIL_LINE_CHARS`.
     lines.push(Line::from(FOOTHOLD_ESTABLISHED_MEANING));
-    lines.push(Line::from(""));
     lines.push(Line::from(FIRST_CONTACT_COMPLETE));
-    lines.push(Line::from(""));
 
     lines.push(Line::from(format!(
         "ticks executed     {:02}",
@@ -958,7 +956,6 @@ fn after_action_success_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
         "deployed rev       run-{:02}",
         conclusion.run_id
     )));
-    lines.push(Line::from(""));
     lines.push(Line::from(NO_FURTHER_OPERATION));
 
     lines
@@ -2965,6 +2962,39 @@ mod tests {
         assert!(buffer_contains(&terminal, "AFTER-ACTION REPORT"));
         assert!(buffer_contains(&terminal, "FOOTHOLD ESTABLISHED"));
         assert!(buffer_contains(&terminal, "FIRST CONTACT COMPLETE"));
+    }
+
+    #[test]
+    fn the_full_success_closure_fits_at_the_two_pane_minimum_geometry() {
+        let state = succeeded_state();
+
+        // `TWO_PANE_MIN_COLUMNS` x `MIN_ROWS` is the narrowest geometry that
+        // still takes the two-pane layout — the report pane's 40%-width,
+        // unscrollable inner area is the tightest fit the full success
+        // report has to survive. A wider two-pane width (120) leaves the
+        // same inner *height* but a wider pane, so it's checked too.
+        for width in [TWO_PANE_MIN_COLUMNS, 120] {
+            let terminal = render(width, MIN_ROWS, &state);
+            assert!(
+                buffer_contains(&terminal, "FOOTHOLD ESTABLISHED"),
+                "headline clipped at {width}x{MIN_ROWS}"
+            );
+            assert!(
+                buffer_contains(&terminal, "FIRST CONTACT COMPLETE"),
+                "completion line clipped at {width}x{MIN_ROWS}"
+            );
+            assert!(
+                buffer_contains(&terminal, "deployed rev"),
+                "evidence clipped at {width}x{MIN_ROWS}"
+            );
+            // The full closing paragraph, including its last word, must
+            // survive — `Paragraph` doesn't scroll, so content taller than
+            // the pane's inner height is silently clipped from the bottom.
+            assert!(
+                buffer_contains(&terminal, "network."),
+                "closing paragraph clipped at {width}x{MIN_ROWS}"
+            );
+        }
     }
 
     #[test]
