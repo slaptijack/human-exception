@@ -92,6 +92,8 @@ fn running_the_example_script_succeeds() {
 
     assert!(output.status.success());
     assert!(stdout.contains("FOOTHOLD ESTABLISHED"));
+    assert!(stdout.contains("FIRST CONTACT COMPLETE"));
+    assert!(!stdout.contains("OPERATION FAILED"));
     assert!(!stdout.contains("FIRST CONTACT INCOMPLETE"));
 }
 
@@ -201,8 +203,10 @@ fn a_wait_only_script_reports_mission_failure() {
 
     assert!(!output.status.success());
     assert_eq!(output.status.code(), Some(1));
+    assert!(stdout.contains("OPERATION FAILED"));
     assert!(stdout.contains("FIRST CONTACT INCOMPLETE"));
     assert!(!stdout.contains("FOOTHOLD ESTABLISHED"));
+    assert!(!stdout.contains("FIRST CONTACT COMPLETE"));
 }
 
 #[test]
