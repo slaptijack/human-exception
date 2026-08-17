@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/slaptijack/human-exception/compare/v0.2.0...v0.3.0) - 2026-08-17
+
+### Added
+
+- align CLI First Contact report with TUI outcome hierarchy ([#75](https://github.com/slaptijack/human-exception/pull/75))
+- apply the outcome hierarchy to unsuccessful First Contact runs ([#74](https://github.com/slaptijack/human-exception/pull/74))
+- give successful First Contact clear operation closure ([#73](https://github.com/slaptijack/human-exception/pull/73))
+- represent terminal operation conclusions as structured console state ([#72](https://github.com/slaptijack/human-exception/pull/72))
+- preserve multiline text pasted into the controller editor ([#64](https://github.com/slaptijack/human-exception/pull/64))
+- show F4 recovery hint on failed-operation screen ([#62](https://github.com/slaptijack/human-exception/pull/62))
+
+### Fixed
+
+- add blank-line spacing to the successful After Action report ([#79](https://github.com/slaptijack/human-exception/pull/79))
+- advertise Ctrl+V, not Ctrl+Enter, as the Validate shortcut ([#60](https://github.com/slaptijack/human-exception/pull/60))
+
+### Other
+
+- extract a view-keyed pane-scroll mechanism from Help ([#78](https://github.com/slaptijack/human-exception/pull/78))
+- define the First Contact outcome and closure contract ([#71](https://github.com/slaptijack/human-exception/pull/71))
+- codify small-issue, one-PR delivery guidance ([#55](https://github.com/slaptijack/human-exception/pull/55))
+
 ## [0.2.0](https://github.com/slaptijack/human-exception/compare/v0.1.1...v0.2.0) - 2026-08-12
 
 ### Added
