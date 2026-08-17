@@ -1952,11 +1952,12 @@ fn view_specific_help(view: View) -> Vec<Line<'static>> {
             Line::from("Leaving via F2/F3/F4 pauses the run; F5 returns to it as you left it."),
         ],
         View::AfterAction => vec![
-            Line::from("F2     back to Signals"),
-            Line::from("F4     edit the controller (your edits are preserved)"),
-            Line::from("F5     review this run's frozen source and telemetry (Review Run)"),
-            Line::from("F6     redeploy from a clean scenario state"),
-            Line::from("F8     (80-99 columns) switch between satellite frame and report"),
+            Line::from("Up/Down  scroll the report if it doesn't fully fit"),
+            Line::from("F2       back to Signals"),
+            Line::from("F4       edit the controller (your edits are preserved)"),
+            Line::from("F5       review this run's frozen source and telemetry (Review Run)"),
+            Line::from("F6       redeploy from a clean scenario state"),
+            Line::from("F8       (80-99 columns) switch between satellite frame and report"),
         ],
         View::Help => Vec::new(),
     }
