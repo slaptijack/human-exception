@@ -9,6 +9,11 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use super::editor::EditOp;
 use super::state::{Msg, View};
 
+/// Views whose content pane can scroll via `Msg::ScrollUp`/`Msg::ScrollDown`.
+fn view_is_scrollable(view: View) -> bool {
+    matches!(view, View::Help | View::AfterAction)
+}
+
 /// Maps a key event to a player intent, given the view currently showing
 /// (several keys are context-sensitive: `F1`/`Esc` need to know whether
 /// Help is open, `Esc`/arrows/`Enter` behave differently in Signals, Target,
@@ -120,8 +125,8 @@ pub fn map(
         KeyCode::Char(' ') if !ctrl && operation_is_open => Some(Msg::TogglePauseOperation),
         KeyCode::Up if current_view == View::Signals => Some(Msg::SelectPreviousSignal),
         KeyCode::Down if current_view == View::Signals => Some(Msg::SelectNextSignal),
-        KeyCode::Up if help_is_open => Some(Msg::ScrollHelpUp),
-        KeyCode::Down if help_is_open => Some(Msg::ScrollHelpDown),
+        KeyCode::Up if view_is_scrollable(current_view) => Some(Msg::ScrollUp),
+        KeyCode::Down if view_is_scrollable(current_view) => Some(Msg::ScrollDown),
         // While the reference pane is swapped in at 80-99 columns, the
         // source isn't on screen at all, so ordinary editing keys must not
         // silently mutate it — only F8 (handled above) can bring it back.
@@ -482,13 +487,10 @@ mod tests {
 
     #[test]
     fn arrows_scroll_help_when_help_is_open() {
-        assert_eq!(
-            map_in(key(KeyCode::Up), View::Help),
-            Some(Msg::ScrollHelpUp)
-        );
+        assert_eq!(map_in(key(KeyCode::Up), View::Help), Some(Msg::ScrollUp));
         assert_eq!(
             map_in(key(KeyCode::Down), View::Help),
-            Some(Msg::ScrollHelpDown)
+            Some(Msg::ScrollDown)
         );
     }
 

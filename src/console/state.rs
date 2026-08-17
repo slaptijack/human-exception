@@ -4,20 +4,23 @@
 //! library so it can be tested without a real terminal and so later issues
 //! can grow the state model without coupling it to widget code.
 
+use std::collections::HashMap;
+
 use super::editor::{EditOp, Editor};
 use super::intel::authored_signals;
 use crate::lua_controller::{self, ControllerError, LiveOperation, TickRecord};
 
-/// An upper bound on how far Help can scroll. This exists only so
-/// `ScrollHelpDown` can never run away toward `u16::MAX` and leave the
+/// An upper bound on how far any scrollable pane can scroll. This exists
+/// only so `ScrollDown` can never run away toward `u16::MAX` and leave the
 /// player pressing `Up` an impractical number of times to recover — the
-/// real, content- and frame-size-aware bound is `ui::help_max_scroll`,
-/// which `console::should_redraw` re-clamps `help_scroll` against after
-/// every scroll key, so this only needs to be comfortably above Help's
-/// actual line count (not tuned to match it), not an accurate ceiling in
-/// its own right. A ceiling tuned too close to that count silently caps
-/// scrolling below the real content height the next time Help grows.
-const MAX_HELP_SCROLL: u16 = 500;
+/// real, content- and frame-size-aware bound is a per-view `*_max_scroll`
+/// function (e.g. `ui::help_max_scroll`), which `console::should_redraw`
+/// re-clamps the stored offset against after every scroll key, so this only
+/// needs to be comfortably above any scrollable view's actual line count
+/// (not tuned to match it), not an accurate ceiling in its own right. A
+/// ceiling tuned too close to that count silently caps scrolling below the
+/// real content height the next time a scrollable view's content grows.
+const MAX_PANE_SCROLL: u16 = 500;
 
 /// The result of the most recent `Msg::ValidateController`, or the fact
 /// that the current source hasn't been checked (or was edited since the
@@ -154,8 +157,11 @@ pub enum Msg {
     /// or commits to working the current dossier's opportunity in Target.
     Activate,
     ToggleSecondaryPane,
-    ScrollHelpUp,
-    ScrollHelpDown,
+    /// Scrolls the current view's content pane up/down by one row, if it's
+    /// scrollable (see `event::view_is_scrollable`). Applies to whatever
+    /// view is current when the message is applied.
+    ScrollUp,
+    ScrollDown,
     /// An editing/cursor-movement key applied to the current controller
     /// source; a no-op if no controller is loaded.
     EditController(EditOp),
@@ -234,7 +240,10 @@ pub struct AppState {
     /// At 80-99 columns, whether the secondary (detail/provenance) pane is
     /// showing instead of the primary one.
     narrow_secondary_visible: bool,
-    help_scroll: u16,
+    /// Scroll offset for each view's content pane, keyed by [`View`]. A
+    /// missing entry means an offset of 0 — only views a player has
+    /// actually scrolled ever get an entry.
+    scroll_offsets: HashMap<View, u16>,
     should_quit: bool,
 }
 
@@ -254,7 +263,7 @@ impl Default for AppState {
             next_run_id: 1,
             redeploy_confirmation_pending: false,
             narrow_secondary_visible: false,
-            help_scroll: 0,
+            scroll_offsets: HashMap::new(),
             should_quit: false,
         }
     }
@@ -453,17 +462,21 @@ impl AppState {
         self.narrow_secondary_visible
     }
 
-    pub fn help_scroll(&self) -> u16 {
-        self.help_scroll
+    /// The current scroll offset for `view`'s content pane, or 0 if it's
+    /// never been scrolled.
+    pub fn scroll_offset(&self, view: View) -> u16 {
+        self.scroll_offsets.get(&view).copied().unwrap_or(0)
     }
 
-    /// Bounds the stored scroll offset itself against `max`, not just the
-    /// value used for a single render. Without this, repeated `Down`
-    /// presses can advance `help_scroll` toward `MAX_HELP_SCROLL` even once
+    /// Bounds `view`'s stored scroll offset itself against `max`, not just
+    /// the value used for a single render. Without this, repeated `Down`
+    /// presses can advance the offset toward `MAX_PANE_SCROLL` even once
     /// the content is fully visible, and `Up` then appears to do nothing
     /// until the stored offset drops back below the real maximum.
-    pub fn clamp_help_scroll(&mut self, max: u16) {
-        self.help_scroll = self.help_scroll.min(max);
+    pub fn clamp_scroll(&mut self, view: View, max: u16) {
+        if let Some(offset) = self.scroll_offsets.get_mut(&view) {
+            *offset = (*offset).min(max);
+        }
     }
 
     pub fn should_quit(&self) -> bool {
@@ -514,7 +527,7 @@ impl AppState {
                 if self.current_view != View::Help {
                     self.help_return_view = Some(self.current_view);
                     self.current_view = View::Help;
-                    self.help_scroll = 0;
+                    self.scroll_offsets.insert(View::Help, 0);
                 }
             }
             Msg::DismissHelp => {
@@ -533,9 +546,13 @@ impl AppState {
             Msg::ToggleSecondaryPane => {
                 self.narrow_secondary_visible = !self.narrow_secondary_visible;
             }
-            Msg::ScrollHelpUp => self.help_scroll = self.help_scroll.saturating_sub(1),
-            Msg::ScrollHelpDown => {
-                self.help_scroll = self.help_scroll.saturating_add(1).min(MAX_HELP_SCROLL);
+            Msg::ScrollUp => {
+                let offset = self.scroll_offsets.entry(self.current_view).or_insert(0);
+                *offset = offset.saturating_sub(1);
+            }
+            Msg::ScrollDown => {
+                let offset = self.scroll_offsets.entry(self.current_view).or_insert(0);
+                *offset = offset.saturating_add(1).min(MAX_PANE_SCROLL);
             }
             Msg::EditController(op) => {
                 if let Some(controller) = self.controller.as_mut()
@@ -681,6 +698,10 @@ impl AppState {
         };
         self.operation = Some(operation);
         self.narrow_secondary_visible = false;
+        // A fresh report may be shorter than whatever was last scrolled to,
+        // so start it at the top rather than carrying over an offset from a
+        // previous run's report — same reasoning as `OpenHelp`'s reset.
+        self.scroll_offsets.insert(View::AfterAction, 0);
     }
 
     /// Advances the active operation by exactly one tick, appending the
@@ -709,6 +730,7 @@ impl AppState {
         if op.is_finished() {
             self.current_view = View::AfterAction;
             self.narrow_secondary_visible = false;
+            self.scroll_offsets.insert(View::AfterAction, 0);
         }
         true
     }
@@ -1129,29 +1151,31 @@ mod tests {
     #[test]
     fn help_scroll_moves_up_and_down_and_saturates_at_zero() {
         let mut state = AppState::new();
-        state.apply(Msg::ScrollHelpDown);
-        state.apply(Msg::ScrollHelpDown);
-        assert_eq!(state.help_scroll(), 2);
+        state.apply(Msg::OpenHelp);
+        state.apply(Msg::ScrollDown);
+        state.apply(Msg::ScrollDown);
+        assert_eq!(state.scroll_offset(View::Help), 2);
 
-        state.apply(Msg::ScrollHelpUp);
-        state.apply(Msg::ScrollHelpUp);
-        state.apply(Msg::ScrollHelpUp);
-        assert_eq!(state.help_scroll(), 0);
+        state.apply(Msg::ScrollUp);
+        state.apply(Msg::ScrollUp);
+        state.apply(Msg::ScrollUp);
+        assert_eq!(state.scroll_offset(View::Help), 0);
     }
 
     #[test]
     fn help_scroll_is_capped_and_recoverable() {
         let mut state = AppState::new();
+        state.apply(Msg::OpenHelp);
         for _ in 0..1000 {
-            state.apply(Msg::ScrollHelpDown);
+            state.apply(Msg::ScrollDown);
         }
-        let capped = state.help_scroll();
+        let capped = state.scroll_offset(View::Help);
         assert!(capped < 1000);
 
         for _ in 0..capped {
-            state.apply(Msg::ScrollHelpUp);
+            state.apply(Msg::ScrollUp);
         }
-        assert_eq!(state.help_scroll(), 0);
+        assert_eq!(state.scroll_offset(View::Help), 0);
     }
 
     #[test]
