@@ -455,11 +455,11 @@ The availability line is stated plainly and in-fiction, not as an apologetic dev
 ├──────────────────────────────────────────────────────────────────────┬────────────────────────────────────────┤
 │ FINAL SATELLITE FRAME                                                │ AFTER-ACTION REPORT                    │
 │                                                                      │                                        │
-│              .   .   #   #   #                                       │ FOOTHOLD ESTABLISHED                   │
-│              .   #   #   #   #                                       │ The drone reached the facility uplink. │
-│              .   #   #   #   #                                       │ Resistance access to the facility      │
+│              .   .   ?   ?   ?                                       │ FOOTHOLD ESTABLISHED                   │
+│              .   #   ?   ?   ?                                       │ The drone reached the facility uplink. │
+│              .   #   #   ?   ?                                       │ Resistance access to the facility      │
 │              .   .   .   #   ▲                                       │ network was established before the    │
-│              ·   #   #   #   #                                       │ access window closed.                 │
+│              ·   #   ?   ?   ?                                       │ access window closed.                 │
 │                                                                      │                                        │
 │                        ▲ DRONE (AT UPLINK)                            │ FIRST CONTACT COMPLETE                 │
 │                                                                      │                                        │
@@ -482,9 +482,11 @@ The availability line is stated plainly and in-fiction, not as an apologetic dev
 Budget exhaustion and controller errors (an execution-limit breach, an invalid action, a script or runtime error) are all "operation failed" outcomes and follow the same result → cause → completion → evidence → recovery grammar as success, without expanding into a broader redesign of failure systems:
 
 - **Outcome:** `OPERATION FAILED`.
-- **Trigger/meaning:** a concise, mechanical explanation of what actually happened — budget exhaustion, or the controller failing to behave as programmed — stated without prescribing the exact fix. The explanation names the mechanical reason (e.g. "the controller exceeded its execution allowance") without walking through internal implementation detail.
+- **Trigger:** a concise, mechanical explanation of what actually happened — budget exhaustion, or the controller failing to behave as programmed — stated without prescribing the exact fix. The explanation names the mechanical reason (e.g. "the controller exceeded its execution allowance") without walking through internal implementation detail.
+- **Meaning:** the operational window closed without the drone reaching the uplink, so no facility foothold was established on this attempt. This is the failure counterpart to the success meaning line, not a new mechanic — it states a consequence that already follows from the trigger.
 - **Completion:** First Contact is explicitly **incomplete**. This is the direct counterpart to `FIRST CONTACT COMPLETE` and must be no less clear.
 - **Evidence/next actions:** identical evidence set and next-action set as success (below), except the primary recovery path is revising the Controller rather than reviewing a clean success.
+- **Availability:** the same truthful statement as success — no additional playable operation is currently implemented at this facility, regardless of outcome.
 
 ```text
 ┌ HUMAN EXCEPTION // RESISTANCE CONSOLE ────────────────────────────────────────────────────────────────────────┐
@@ -501,8 +503,11 @@ Budget exhaustion and controller errors (an execution-limit breach, an invalid a
 │                   ▲ DRONE                                             │ tiles discovered   12                  │
 │                                                                      │ hazards entered     1                  │
 │                                                                      │ deployed rev       run-07             │
-│                                                                      │ Revise the controller and try again,  │
-│                                                                      │ or return to Signals.                 │
+│                                                                      │                                        │
+│                                                                      │ No further operation is available at  │
+│                                                                      │ this facility either way. Revise the  │
+│                                                                      │ controller and try again, or return   │
+│                                                                      │ to Signals.                           │
 ├───────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │ F2 Signals   F4 Edit Controller   F5 Review Run   F6 Redeploy                                      Ctrl+Q Quit│
 └───────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
@@ -566,7 +571,7 @@ Use one primary pane. Secondary information becomes a toggled subview:
 
 `F8` toggles the primary and secondary subview at 80–99 columns. This binding is global only in narrow-layout mode and is shown in the footer. It remains safe in Controller because it does not insert a normal text character into Lua source.
 
-For After Action specifically, the report subview defaults to primary: at 80–99 columns, including the 80×24 minimum, the player sees outcome, meaning, completion, and next actions immediately, without needing `F8` to discover whether they succeeded or what that meant. The `F8` toggle only trades which pane is primary; it never reorders the outcome hierarchy (§5) within the report pane itself, so result/meaning/completion/next actions remain above evidence regardless of which pane is showing.
+For After Action specifically, the report subview defaults to primary: at 80–99 columns, including the 80×24 minimum, the player sees outcome, trigger, meaning, and completion (hierarchy items 1–4) immediately, without needing `F8` to discover whether they succeeded or what that meant. The `F8` toggle only trades which pane is primary; it never reorders the outcome hierarchy (§5) itself, so evidence, next actions, and availability keep the same relative priority within the report pane regardless of which pane is showing.
 
 ### Below 80 columns or 24 rows
 
