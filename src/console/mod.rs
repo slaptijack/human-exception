@@ -32,7 +32,7 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
-use state::{AppState, Msg};
+use state::{AppState, Msg, View};
 
 type PanicHook = dyn Fn(&PanicHookInfo<'_>) + Sync + Send + 'static;
 
@@ -263,8 +263,9 @@ fn is_repeat_untrustworthy(code: KeyCode) -> bool {
 /// needs to be redrawn as a result. `frame_size` is the frame's size as of
 /// the most recent draw — slightly stale for the resize event that changes
 /// it, but accurate again by the time the next key event arrives — and is
-/// used both to bound `help_scroll` against the viewport it will actually
-/// render into, and to tell whether only the geometry warning is showing.
+/// used both to bound the current view's scroll offset against the viewport
+/// it will actually render into, and to tell whether only the geometry
+/// warning is showing.
 ///
 /// A resize always needs a redraw, since the geometry warning (or the shell
 /// it replaces) depends on the frame size, not on any key event. It also
@@ -408,11 +409,15 @@ fn should_redraw(
             if undersized && !is_quit_related {
                 return false;
             }
-            let is_help_scroll = matches!(msg, Msg::ScrollHelpUp | Msg::ScrollHelpDown);
+            let is_pane_scroll = matches!(msg, Msg::ScrollUp | Msg::ScrollDown);
             state.apply(msg);
-            if is_help_scroll {
-                let max = ui::help_max_scroll(state, frame_size.0, frame_size.1);
-                state.clamp_help_scroll(max);
+            if is_pane_scroll {
+                let view = state.current_view();
+                let max = match view {
+                    View::Help => ui::help_max_scroll(state, frame_size.0, frame_size.1),
+                    _ => 0,
+                };
+                state.clamp_scroll(view, max);
             }
             true
         }
@@ -425,7 +430,6 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::backend::TestBackend;
-    use state::View;
 
     fn press(code: KeyCode) -> Event {
         Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
@@ -963,11 +967,11 @@ mod tests {
                 &mut last_transition_press,
             );
         }
-        let bound = state.help_scroll();
+        let bound = state.scroll_offset(View::Help);
         assert!(
             bound < 100,
             "offset should be clamped to the real content at this viewport, \
-             not just the coarse MAX_HELP_SCROLL constant"
+             not just the coarse MAX_PANE_SCROLL constant"
         );
 
         should_redraw(
@@ -978,7 +982,7 @@ mod tests {
         );
 
         assert_eq!(
-            state.help_scroll(),
+            state.scroll_offset(View::Help),
             bound - 1,
             "Up should immediately move the stored offset, not appear stuck"
         );
@@ -988,7 +992,7 @@ mod tests {
     fn help_can_scroll_all_the_way_to_its_final_content_at_eighty_columns() {
         // At the supported 80x24 minimum, Help's full contextual + Lua
         // reference content needs more scroll than the coarse internal
-        // MAX_HELP_SCROLL cap once alone allowed — that cap must stay
+        // MAX_PANE_SCROLL cap once alone allowed — that cap must stay
         // comfortably above the real content height, not below it.
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).expect("test backend should initialize");

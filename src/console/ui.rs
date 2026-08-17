@@ -1532,7 +1532,7 @@ fn draw_help(frame: &mut Frame, area: Rect, state: &AppState) {
     // or a caller that renders without going through that event loop).
     let content_rows = wrapped_row_count(&lines, inner.width);
     let max_scroll = content_rows.saturating_sub(inner.height as usize) as u16;
-    let scroll = state.help_scroll().min(max_scroll);
+    let scroll = state.scroll_offset(View::Help).min(max_scroll);
 
     let paragraph = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
@@ -2318,12 +2318,12 @@ mod tests {
         use super::super::state::Msg;
 
         // At this height the full Help document already fits without
-        // scrolling; MAX_HELP_SCROLL alone would still let repeated Down
+        // scrolling; MAX_PANE_SCROLL alone would still let repeated Down
         // presses blank the pane, so the render-time clamp must catch it.
         let mut state = AppState::new();
         state.apply(Msg::OpenHelp);
         for _ in 0..60 {
-            state.apply(Msg::ScrollHelpDown);
+            state.apply(Msg::ScrollDown);
         }
         let terminal = render(120, 60, &state);
 
