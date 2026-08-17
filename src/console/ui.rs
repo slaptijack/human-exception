@@ -794,12 +794,7 @@ fn draw_after_action(frame: &mut Frame, area: Rect, state: &AppState) {
             "FINAL SATELLITE FRAME",
             satellite_lines(&op.current),
         );
-        draw_pane(
-            frame,
-            right,
-            "AFTER-ACTION REPORT",
-            after_action_report_lines(&op),
-        );
+        draw_after_action_report_pane(frame, right, &op);
     } else {
         // A deployment that never started a live run (a synchronous load
         // failure) has no discovered tiles at all, so the satellite pane
@@ -810,12 +805,7 @@ fn draw_after_action(frame: &mut Frame, area: Rect, state: &AppState) {
         // showing from there, same as every other narrow-layout view.
         let defaults_to_report = op.error.is_some() && op.records.is_empty();
         if state.narrow_secondary_visible() ^ defaults_to_report {
-            draw_pane(
-                frame,
-                area,
-                "AFTER-ACTION REPORT",
-                after_action_report_lines(&op),
-            );
+            draw_after_action_report_pane(frame, area, &op);
         } else {
             draw_pane(
                 frame,
@@ -824,6 +814,25 @@ fn draw_after_action(frame: &mut Frame, area: Rect, state: &AppState) {
                 satellite_lines(&op.current),
             );
         }
+    }
+}
+
+/// Draws the AFTER-ACTION REPORT pane, pinning the `F4` recovery hint to a
+/// fixed last row on failure so a long diagnostic or deployed-source excerpt
+/// filling [`MAX_DETAIL_LINES`] can never push it off the bottom of the
+/// pane at the console's supported minimum geometry (`draw_pane_with_pinned_action`).
+fn draw_after_action_report_pane(frame: &mut Frame, area: Rect, op: &OperationView<'_>) {
+    let lines = after_action_report_lines(op);
+    if after_action_succeeded(op) {
+        draw_pane(frame, area, "AFTER-ACTION REPORT", lines);
+    } else {
+        draw_pane_with_pinned_action(
+            frame,
+            area,
+            "AFTER-ACTION REPORT",
+            lines,
+            "F4  revise the controller",
+        );
     }
 }
 
@@ -866,12 +875,20 @@ fn bounded_detail_lines(text: &str) -> Vec<Line<'static>> {
     lines
 }
 
-fn after_action_report_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
-    let succeeded = op.error.is_none()
+/// Whether an operation's After Action report reflects a successful run —
+/// shared by [`after_action_report_lines`] (guidance wording) and
+/// [`draw_after_action_report_pane`] (whether to pin the `F4` recovery
+/// hint).
+fn after_action_succeeded(op: &OperationView<'_>) -> bool {
+    op.error.is_none()
         && op
             .records
             .last()
-            .is_some_and(|record| record.outcome == TickOutcome::Succeeded);
+            .is_some_and(|record| record.outcome == TickOutcome::Succeeded)
+}
+
+fn after_action_report_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
+    let succeeded = after_action_succeeded(op);
 
     let mut lines = vec![Line::from(Span::styled(
         after_action_headline(op),
@@ -2686,6 +2703,7 @@ mod tests {
         ));
         assert!(buffer_contains(&terminal, "STATUS: FAILED"));
         assert!(buffer_contains(&terminal, "F6 Redeploy"));
+        assert!(buffer_contains(&terminal, "F4  revise the controller"));
 
         // Review Run (`F5`/`Navigate(Operation)`) still shows the finished
         // run's own telemetry pane, unchanged from before this view split —
@@ -2752,6 +2770,36 @@ mod tests {
             "OPERATION FAILED: controller script error"
         ));
         assert!(!buffer_contains(&terminal, "FINAL SATELLITE FRAME"));
+    }
+
+    #[test]
+    fn the_recovery_hint_stays_visible_at_the_two_pane_minimum_geometry() {
+        use super::super::editor::EditOp;
+        use super::super::state::Msg;
+
+        let mut state = working_state();
+        for _ in 0..500 {
+            state.apply(Msg::EditController(EditOp::Backspace));
+        }
+        state.apply(Msg::EditController(EditOp::Insert('(')));
+        state.apply(Msg::RequestDeploy);
+        assert_eq!(state.current_view(), View::AfterAction);
+
+        // The two-pane report pane is only 40% wide at the narrowest
+        // two-pane geometry the console supports (`TWO_PANE_MIN_COLUMNS` x
+        // `MIN_ROWS`) — narrow enough that both the headline and the
+        // diagnostic detail wrap across several lines. Before the recovery
+        // hint was pinned to a fixed last row (`draw_pane_with_pinned_action`
+        // via `draw_after_action_report_pane`), that wrapped content could
+        // push it below the pane's visible rows.
+        let terminal = render(TWO_PANE_MIN_COLUMNS, MIN_ROWS, &state);
+        assert!(buffer_contains(&terminal, "AFTER-ACTION REPORT"));
+        // The full headline text wraps across rows at this width, and a
+        // wrapped line is no longer contiguous once the buffer is flattened
+        // row-major across both panes — assert on a short substring known
+        // to land intact on a single row instead.
+        assert!(buffer_contains(&terminal, "OPERATION FAILED"));
+        assert!(buffer_contains(&terminal, "F4  revise the controller"));
     }
 
     #[test]
