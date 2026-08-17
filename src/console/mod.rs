@@ -415,6 +415,9 @@ fn should_redraw(
                 let view = state.current_view();
                 let max = match view {
                     View::Help => ui::help_max_scroll(state, frame_size.0, frame_size.1),
+                    View::AfterAction => {
+                        ui::after_action_max_scroll(state, frame_size.0, frame_size.1)
+                    }
                     _ => 0,
                 };
                 state.clamp_scroll(view, max);

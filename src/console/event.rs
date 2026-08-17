@@ -10,10 +10,8 @@ use super::editor::EditOp;
 use super::state::{Msg, View};
 
 /// Views whose content pane can scroll via `Msg::ScrollUp`/`Msg::ScrollDown`.
-/// Extend this match as more views adopt the pane-scroll mechanism (e.g.
-/// After Action, #76).
 fn view_is_scrollable(view: View) -> bool {
-    matches!(view, View::Help)
+    matches!(view, View::Help | View::AfterAction)
 }
 
 /// Maps a key event to a player intent, given the view currently showing

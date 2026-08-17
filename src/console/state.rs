@@ -698,6 +698,10 @@ impl AppState {
         };
         self.operation = Some(operation);
         self.narrow_secondary_visible = false;
+        // A fresh report may be shorter than whatever was last scrolled to,
+        // so start it at the top rather than carrying over an offset from a
+        // previous run's report — same reasoning as `OpenHelp`'s reset.
+        self.scroll_offsets.insert(View::AfterAction, 0);
     }
 
     /// Advances the active operation by exactly one tick, appending the
@@ -726,6 +730,7 @@ impl AppState {
         if op.is_finished() {
             self.current_view = View::AfterAction;
             self.narrow_secondary_visible = false;
+            self.scroll_offsets.insert(View::AfterAction, 0);
         }
         true
     }
