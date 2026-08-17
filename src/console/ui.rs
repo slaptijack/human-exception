@@ -5,7 +5,9 @@
 //! without a real terminal.
 
 use super::intel::{Signal, TargetDossier, authored_signals, first_contact_dossier};
-use super::state::{AppState, OperationSnapshot, OperationView, Validation, View, WorkingSet};
+use super::state::{
+    AppState, ConclusionKind, OperationSnapshot, OperationView, Validation, View, WorkingSet,
+};
 use crate::lua_controller::{ControllerError, TickRecord};
 use crate::render::render_satellite_view;
 use crate::simulation::{Action, FailureReason, SimEvent, TickOutcome};
@@ -796,14 +798,14 @@ fn draw_after_action(frame: &mut Frame, area: Rect, state: &AppState) {
         );
         draw_after_action_report_pane(frame, right, &op);
     } else {
-        // A deployment that never started a live run (a synchronous load
-        // failure) has no discovered tiles at all, so the satellite pane
-        // would just be an empty grid — default to the report pane instead
-        // so the compact failure explanation and recovery guidance are
-        // immediately visible without needing to already know `F8` swaps
-        // panes. `narrow_secondary_visible` still flips which pane is
-        // showing from there, same as every other narrow-layout view.
-        let defaults_to_report = op.error.is_some() && op.records.is_empty();
+        // The report pane carries hierarchy items 1-4 (outcome, trigger,
+        // meaning, completion) that the player must see before anything
+        // else, for every finished operation — not just a synchronous load
+        // failure with no discovered tiles (`docs/TUI_DESIGN.md` §5,
+        // "Responsive behavior": "the report subview defaults to primary").
+        // `narrow_secondary_visible` still flips which pane is showing from
+        // there, same as every other narrow-layout view.
+        let defaults_to_report = op.finished;
         if state.narrow_secondary_visible() ^ defaults_to_report {
             draw_after_action_report_pane(frame, area, &op);
         } else {
@@ -880,16 +882,89 @@ fn bounded_detail_lines(text: &str) -> Vec<Line<'static>> {
 /// [`draw_after_action_report_pane`] (whether to pin the `F4` recovery
 /// hint).
 fn after_action_succeeded(op: &OperationView<'_>) -> bool {
-    op.error.is_none()
-        && op
-            .records
-            .last()
-            .is_some_and(|record| record.outcome == TickOutcome::Succeeded)
+    matches!(
+        op.conclusion.map(|conclusion| conclusion.kind),
+        Some(ConclusionKind::Success)
+    )
 }
 
-fn after_action_report_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
-    let succeeded = after_action_succeeded(op);
+/// The success report's headline, per `docs/TUI_DESIGN.md` §5: a resistance
+/// network foothold, not generic victory language. Shared with Review Run's
+/// `telemetry_lines` via [`outcome_headline`] so the two views describe the
+/// same recorded run consistently.
+const FOOTHOLD_ESTABLISHED_HEADLINE: &str = "FOOTHOLD ESTABLISHED";
 
+/// The success report's trigger + fictional meaning, echoing Target's
+/// original framing (`docs/TUI_DESIGN.md` §5 "Success"). Deliberately does
+/// not claim the facility was captured, owned, or made persistently
+/// operable — only that a foothold/access point was established.
+const FOOTHOLD_ESTABLISHED_MEANING: &str = "The drone reached the facility uplink. Resistance access to the facility network was established before the access window closed.";
+
+const FIRST_CONTACT_COMPLETE: &str = "FIRST CONTACT COMPLETE";
+
+/// The success report's truthful availability statement and next actions
+/// (`docs/TUI_DESIGN.md` §5 "Success"): no further operation exists at this
+/// facility, and Signals is worthwhile as the wider network, not because
+/// another operation here is waiting.
+const NO_FURTHER_OPERATION: &str = "No further operation is available at this facility. Review the run, redeploy to try another approach, or return to Signals for the wider network.";
+
+fn after_action_report_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
+    if after_action_succeeded(op) {
+        after_action_success_lines(op)
+    } else {
+        after_action_failure_lines(op)
+    }
+}
+
+/// The successful After Action report's content, in the outcome hierarchy
+/// order `docs/TUI_DESIGN.md` §5 requires: outcome, trigger/meaning,
+/// completion, evidence, then next actions/availability.
+fn after_action_success_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
+    let conclusion = op
+        .conclusion
+        .expect("after_action_succeeded confirmed a Success conclusion");
+
+    let mut lines = vec![Line::from(Span::styled(
+        FOOTHOLD_ESTABLISHED_HEADLINE,
+        Style::default().add_modifier(Modifier::BOLD),
+    ))];
+    // Fixed, trusted copy — pushed directly rather than through
+    // `bounded_detail_lines` (which exists to cap unbounded *player*-
+    // controlled text like Lua error messages) so the pane's `Wrap` widget
+    // reflows the full approved sentence at the pane's actual width instead
+    // of hard-truncating it at `MAX_DETAIL_LINE_CHARS`.
+    lines.push(Line::from(FOOTHOLD_ESTABLISHED_MEANING));
+    lines.push(Line::from(FIRST_CONTACT_COMPLETE));
+
+    lines.push(Line::from(format!(
+        "ticks executed     {:02}",
+        conclusion.ticks_executed
+    )));
+    lines.push(Line::from(format!(
+        "tiles discovered   {:02}",
+        conclusion.tiles_discovered
+    )));
+    lines.push(Line::from(format!(
+        "hazards entered    {:02}",
+        conclusion.hazards_entered
+    )));
+    lines.push(Line::from(format!(
+        "remaining budget   {:02}",
+        conclusion.final_budget
+    )));
+    lines.push(Line::from(format!(
+        "deployed rev       run-{:02}",
+        conclusion.run_id
+    )));
+    lines.push(Line::from(NO_FURTHER_OPERATION));
+
+    lines
+}
+
+/// The failure/controller-error After Action report's content. Unchanged
+/// from prior behavior — issue #68 explicitly excludes failure/
+/// controller-error presentation changes (tracked separately in #69).
+fn after_action_failure_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(Span::styled(
         after_action_headline(op),
         Style::default().add_modifier(Modifier::BOLD),
@@ -921,31 +996,40 @@ fn after_action_report_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
         op.run_id
     )));
     lines.push(Line::from(""));
-    lines.push(Line::from(if succeeded {
-        "Return to Signals for the next opportunity, or redeploy to try again."
-    } else {
-        "Revise the controller and try again, or return to Signals."
-    }));
+    lines.push(Line::from(
+        "Revise the controller and try again, or return to Signals.",
+    ));
 
     lines
 }
 
+/// The failure-path headline. Only called from [`after_action_failure_lines`],
+/// which [`after_action_report_lines`] only reaches once
+/// [`after_action_succeeded`] is `false` — so a successful outcome can't
+/// reach this function's `Succeeded` arm in practice.
 fn after_action_headline(op: &OperationView<'_>) -> &'static str {
     if let Some(error) = op.error {
         return controller_error_headline(error);
     }
     match op.records.last().map(|record| record.outcome) {
+        Some(TickOutcome::Succeeded) => {
+            unreachable!("after_action_failure_lines only runs on a non-success outcome")
+        }
         Some(outcome) => outcome_headline(outcome),
         None => "OPERATION FAILED",
     }
 }
 
+/// The failure-path detail line. See [`after_action_headline`] for why the
+/// `Succeeded` arm can't be reached here.
 fn after_action_detail(op: &OperationView<'_>) -> String {
     if let Some(error) = op.error {
         return controller_error_detail(error);
     }
     match op.records.last().map(|record| record.outcome) {
-        Some(TickOutcome::Succeeded) => "Uplink reached.".to_string(),
+        Some(TickOutcome::Succeeded) => {
+            unreachable!("after_action_failure_lines only runs on a non-success outcome")
+        }
         Some(TickOutcome::Failed(FailureReason::BudgetExhausted)) => {
             "Operational budget exhausted.".to_string()
         }
@@ -1097,7 +1181,7 @@ fn operation_status_label(op: &OperationView<'_>) -> &'static str {
 
 fn outcome_headline(outcome: TickOutcome) -> &'static str {
     match outcome {
-        TickOutcome::Succeeded => "OPERATION SUCCESSFUL",
+        TickOutcome::Succeeded => FOOTHOLD_ESTABLISHED_HEADLINE,
         TickOutcome::Failed(FailureReason::BudgetExhausted) => "OPERATION FAILED: budget exhausted",
         TickOutcome::Running => "",
     }
@@ -2800,6 +2884,131 @@ mod tests {
         // to land intact on a single row instead.
         assert!(buffer_contains(&terminal, "OPERATION FAILED"));
         assert!(buffer_contains(&terminal, "F4  revise the controller"));
+    }
+
+    const ROUTE_TO_UPLINK: &str = r#"
+        local route = { "north", "east", "east", "east", "east", "north", "north", "north" }
+        local step = 0
+        function on_tick(observation)
+            step = step + 1
+            return route[step]
+        end
+    "#;
+
+    /// Types [`ROUTE_TO_UPLINK`] into a working, undeployed state, deploys
+    /// it, and steps every tick to a deterministic successful conclusion —
+    /// the UI-level analog of `console::state`'s own success fixture, built
+    /// through the same `EditController`/`RequestDeploy` events the other
+    /// `ui.rs` tests already use rather than reaching into private fields.
+    fn succeeded_state() -> AppState {
+        use super::super::editor::EditOp;
+        use super::super::state::Msg;
+
+        let mut state = working_state();
+        for _ in 0..500 {
+            state.apply(Msg::EditController(EditOp::Backspace));
+        }
+        state.apply(Msg::PasteController(ROUTE_TO_UPLINK.to_string()));
+        state.apply(Msg::RequestDeploy);
+
+        for _ in 0..20 {
+            if state.operation().is_some_and(|op| op.finished) {
+                break;
+            }
+            state.advance_running_operation();
+        }
+        assert!(
+            state.operation().unwrap().finished,
+            "should have reached the uplink well within 20 ticks"
+        );
+        state
+    }
+
+    #[test]
+    fn a_successful_operation_shows_the_foothold_report() {
+        let state = succeeded_state();
+        assert_eq!(state.current_view(), View::AfterAction);
+        let terminal = render(120, 40, &state);
+
+        assert!(buffer_contains(&terminal, "FOOTHOLD ESTABLISHED"));
+        assert!(buffer_contains(&terminal, "reached the facility uplink"));
+        // The meaning sentence must reach its actual end ("closed.") rather
+        // than being hard-truncated with an ellipsis by
+        // `bounded_detail_lines`'s `MAX_DETAIL_LINE_CHARS` cap, which this
+        // fixed, trusted copy must not be routed through.
+        assert!(buffer_contains(&terminal, "closed."));
+        assert!(!buffer_contains(&terminal, "…"));
+        assert!(buffer_contains(&terminal, "FIRST CONTACT COMPLETE"));
+        assert!(buffer_contains(&terminal, "ticks executed"));
+        assert!(buffer_contains(&terminal, "tiles discovered"));
+        assert!(buffer_contains(&terminal, "hazards entered"));
+        assert!(buffer_contains(&terminal, "remaining budget"));
+        assert!(buffer_contains(&terminal, "deployed rev"));
+        assert!(buffer_contains(
+            &terminal,
+            "No further operation is available"
+        ));
+        assert!(buffer_contains(&terminal, "FINAL SATELLITE FRAME"));
+    }
+
+    #[test]
+    fn a_successful_operation_defaults_to_the_report_pane_at_the_minimum_geometry() {
+        let state = succeeded_state();
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+
+        // At the console's supported minimum geometry, the outcome must be
+        // visible without pressing `F8` to swap panes (`docs/TUI_DESIGN.md`
+        // §5, "Responsive behavior").
+        assert!(buffer_contains(&terminal, "AFTER-ACTION REPORT"));
+        assert!(buffer_contains(&terminal, "FOOTHOLD ESTABLISHED"));
+        assert!(buffer_contains(&terminal, "FIRST CONTACT COMPLETE"));
+    }
+
+    #[test]
+    fn the_full_success_closure_fits_at_the_two_pane_minimum_geometry() {
+        let state = succeeded_state();
+
+        // `TWO_PANE_MIN_COLUMNS` x `MIN_ROWS` is the narrowest geometry that
+        // still takes the two-pane layout — the report pane's 40%-width,
+        // unscrollable inner area is the tightest fit the full success
+        // report has to survive. A wider two-pane width (120) leaves the
+        // same inner *height* but a wider pane, so it's checked too.
+        for width in [TWO_PANE_MIN_COLUMNS, 120] {
+            let terminal = render(width, MIN_ROWS, &state);
+            assert!(
+                buffer_contains(&terminal, "FOOTHOLD ESTABLISHED"),
+                "headline clipped at {width}x{MIN_ROWS}"
+            );
+            assert!(
+                buffer_contains(&terminal, "FIRST CONTACT COMPLETE"),
+                "completion line clipped at {width}x{MIN_ROWS}"
+            );
+            assert!(
+                buffer_contains(&terminal, "deployed rev"),
+                "evidence clipped at {width}x{MIN_ROWS}"
+            );
+            // The full closing paragraph, including its last word, must
+            // survive — `Paragraph` doesn't scroll, so content taller than
+            // the pane's inner height is silently clipped from the bottom.
+            assert!(
+                buffer_contains(&terminal, "network."),
+                "closing paragraph clipped at {width}x{MIN_ROWS}"
+            );
+        }
+    }
+
+    #[test]
+    fn reviewing_a_successful_run_shows_the_same_foothold_headline() {
+        let mut state = succeeded_state();
+        state.apply(super::super::state::Msg::Navigate(View::Operation));
+        let terminal = render(120, 40, &state);
+
+        // Review Run must describe the same recorded run consistently with
+        // After Action, while still carrying its own frozen provenance
+        // (`docs/TUI_DESIGN.md` §5, "Review Run").
+        assert!(buffer_contains(&terminal, "FOOTHOLD ESTABLISHED"));
+        assert!(buffer_contains(&terminal, "DEPLOYED SOURCE"));
+        assert!(buffer_contains(&terminal, "deployed rev  run-01"));
     }
 
     #[test]

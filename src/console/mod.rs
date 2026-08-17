@@ -1133,7 +1133,7 @@ mod tests {
         assert_eq!(state.current_view(), View::AfterAction);
         assert!(state.operation().unwrap().finished);
         assert!(buffer_contains(&terminal, "AFTER-ACTION REPORT"));
-        assert!(buffer_contains(&terminal, "OPERATION SUCCESSFUL"));
+        assert!(buffer_contains(&terminal, "FOOTHOLD ESTABLISHED"));
     }
 
     #[test]
