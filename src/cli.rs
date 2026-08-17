@@ -133,15 +133,26 @@ fn run_operation(script: &Path) -> i32 {
         println!();
     });
 
+    // Wording mirrors the interactive console's After Action outcome
+    // hierarchy (`docs/TUI_DESIGN.md` §5, `src/console/ui.rs`
+    // FOOTHOLD_ESTABLISHED_*/FIRST_CONTACT_*/NO_FURTHER_OPERATION*
+    // constants): reaching the uplink establishes a resistance foothold in
+    // the facility network, not capture/ownership/control, and no
+    // follow-on operation exists at this facility either way.
     match result {
         Ok(TickOutcome::Succeeded) => {
             println!();
-            println!("UPLINK ESTABLISHED. Operation successful after {tick_count} tick(s).");
+            println!(
+                "FOOTHOLD ESTABLISHED after {tick_count} tick(s). Resistance access to the facility network was established; no further operation is available at this facility."
+            );
             0
         }
         Ok(TickOutcome::Failed(reason)) => {
             println!();
-            println!("OPERATION FAILED: {}", format_failure(reason));
+            println!(
+                "FIRST CONTACT INCOMPLETE: {}. No facility foothold was established.",
+                format_failure(reason)
+            );
             1
         }
         Ok(TickOutcome::Running) => {
