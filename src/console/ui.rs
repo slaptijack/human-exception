@@ -928,7 +928,12 @@ fn after_action_success_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
         FOOTHOLD_ESTABLISHED_HEADLINE,
         Style::default().add_modifier(Modifier::BOLD),
     ))];
-    lines.extend(bounded_detail_lines(FOOTHOLD_ESTABLISHED_MEANING));
+    // Fixed, trusted copy — pushed directly rather than through
+    // `bounded_detail_lines` (which exists to cap unbounded *player*-
+    // controlled text like Lua error messages) so the pane's `Wrap` widget
+    // reflows the full approved sentence at the pane's actual width instead
+    // of hard-truncating it at `MAX_DETAIL_LINE_CHARS`.
+    lines.push(Line::from(FOOTHOLD_ESTABLISHED_MEANING));
     lines.push(Line::from(""));
     lines.push(Line::from(FIRST_CONTACT_COMPLETE));
     lines.push(Line::from(""));
@@ -2930,6 +2935,12 @@ mod tests {
 
         assert!(buffer_contains(&terminal, "FOOTHOLD ESTABLISHED"));
         assert!(buffer_contains(&terminal, "reached the facility uplink"));
+        // The meaning sentence must reach its actual end ("closed.") rather
+        // than being hard-truncated with an ellipsis by
+        // `bounded_detail_lines`'s `MAX_DETAIL_LINE_CHARS` cap, which this
+        // fixed, trusted copy must not be routed through.
+        assert!(buffer_contains(&terminal, "closed."));
+        assert!(!buffer_contains(&terminal, "…"));
         assert!(buffer_contains(&terminal, "FIRST CONTACT COMPLETE"));
         assert!(buffer_contains(&terminal, "ticks executed"));
         assert!(buffer_contains(&terminal, "tiles discovered"));
