@@ -99,13 +99,21 @@ fn restore_panic_hook(previous: Arc<PanicHook>) {
     panic::set_hook(Box::new(move |info| previous(info)));
 }
 
+/// Restores every terminal mode this session enables, attempting each step
+/// even if an earlier one fails — a terminal mode like bracketed paste is
+/// owned by the terminal emulator, not this process, so it must not be
+/// left enabled just because e.g. `disable_raw_mode` errored first. Any
+/// error from `disable_raw_mode` or leaving the alternate screen is still
+/// surfaced, favoring the first one.
 fn restore_terminal() -> io::Result<()> {
-    disable_raw_mode()?;
+    let raw_mode_result = disable_raw_mode();
     if KEYBOARD_ENHANCEMENT_PUSHED.swap(false, Ordering::SeqCst) {
         let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
     }
     let _ = execute!(io::stdout(), DisableBracketedPaste);
-    execute!(io::stdout(), LeaveAlternateScreen, Show)?;
+    let leave_screen_result = execute!(io::stdout(), LeaveAlternateScreen, Show);
+    raw_mode_result?;
+    leave_screen_result?;
     Ok(())
 }
 
