@@ -1005,18 +1005,19 @@ fn after_action_failure_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
         return lines;
     };
 
-    match conclusion.kind {
+    let diagnostic = match conclusion.kind {
         ConclusionKind::BudgetExhausted => {
             lines.push(Line::from(BUDGET_EXHAUSTED_MEANING));
+            None
         }
         ConclusionKind::ControllerError(error) => {
             lines.push(Line::from(CONTROLLER_EXECUTION_STOPPED));
-            lines.extend(bounded_detail_lines(&controller_error_detail(error)));
+            Some(controller_error_detail(error))
         }
         ConclusionKind::Success => {
             unreachable!("after_action_failure_lines only runs on a non-success conclusion")
         }
-    }
+    };
     // A blank line separates outcome/trigger/meaning from completion,
     // matching `docs/TUI_DESIGN.md` §5's failure mockup, without adding
     // enough height to push evidence/recovery out of the pane at the
@@ -1025,6 +1026,17 @@ fn after_action_failure_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
     // this pane's remaining budget is tighter here than on the success path.
     lines.push(Line::from(""));
     lines.push(Line::from(FIRST_CONTACT_INCOMPLETE));
+
+    // The player-controlled diagnostic text is rendered *after* completion,
+    // not before it: `bounded_detail_lines` caps logical lines/characters,
+    // but not the rows a long line occupies once `Wrap` reflows it at this
+    // narrow (~40%-width) pane — an adversarial multi-line error could
+    // otherwise push `FIRST CONTACT INCOMPLETE` off the unscrollable pane
+    // at the console's minimum supported geometry, which the outcome
+    // hierarchy (`docs/TUI_DESIGN.md` §5) never allows.
+    if let Some(diagnostic) = diagnostic {
+        lines.extend(bounded_detail_lines(&diagnostic));
+    }
 
     lines.push(Line::from(format!(
         "ticks executed     {:02}",
@@ -3193,6 +3205,46 @@ mod tests {
             &terminal,
             "OPERATION FAILED: controller execution limit"
         ));
+    }
+
+    #[test]
+    fn a_long_multiline_controller_error_does_not_clip_completion_at_minimum_geometry() {
+        use super::super::editor::EditOp;
+        use super::super::state::Msg;
+
+        let mut state = working_state();
+        for _ in 0..500 {
+            state.apply(Msg::EditController(EditOp::Backspace));
+        }
+        // A worst-case runtime error: several long lines, each well past
+        // `MAX_DETAIL_LINE_CHARS`, that `bounded_detail_lines` caps by
+        // logical line/character count but not by the rows `Wrap` needs to
+        // reflow them at the report pane's narrow (~40%) width. Before
+        // `FIRST CONTACT INCOMPLETE` was moved ahead of the diagnostic
+        // detail, this could push it off the unscrollable pane entirely.
+        state.apply(Msg::PasteController(
+            r#"
+                function on_tick(observation)
+                    local segment = string.rep("x", 130)
+                    local message = segment
+                    for i = 1, 9 do
+                        message = message .. "\n" .. segment
+                    end
+                    error(message, 0)
+                end
+            "#
+            .to_string(),
+        ));
+        state.apply(Msg::RequestDeploy);
+        state.advance_running_operation();
+
+        assert_eq!(state.current_view(), View::AfterAction);
+        assert!(state.operation().unwrap().finished);
+
+        let terminal = render(TWO_PANE_MIN_COLUMNS, MIN_ROWS, &state);
+        assert!(buffer_contains(&terminal, "OPERATION FAILED"));
+        assert!(buffer_contains(&terminal, "FIRST CONTACT INCOMPLETE"));
+        assert!(buffer_contains(&terminal, "F4  revise the controller"));
     }
 
     #[test]
