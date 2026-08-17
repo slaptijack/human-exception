@@ -908,6 +908,31 @@ const FIRST_CONTACT_COMPLETE: &str = "FIRST CONTACT COMPLETE";
 /// another operation here is waiting.
 const NO_FURTHER_OPERATION: &str = "No further operation is available at this facility. Review the run, redeploy to try another approach, or return to Signals for the wider network.";
 
+/// The failure report's combined trigger + meaning line for budget
+/// exhaustion (`docs/TUI_DESIGN.md` §5 "Failure and controller error"):
+/// names the mechanical reason without prescribing the fix, then states the
+/// consequence — the failure counterpart to [`FOOTHOLD_ESTABLISHED_MEANING`],
+/// pushed the same way (directly, not through `bounded_detail_lines`, since
+/// it's trusted fixed copy meant to reflow via `Wrap`).
+const BUDGET_EXHAUSTED_MEANING: &str = "The operational budget was exhausted before the drone reached the uplink. No facility foothold was established.";
+
+/// The failure report's combined trigger + meaning line for a controller
+/// error, stated before the preserved diagnostic detail
+/// (`bounded_detail_lines(&controller_error_detail(..))`) so the mechanical
+/// "execution stopped" fact and its consequence read before the specific
+/// error text.
+const CONTROLLER_EXECUTION_STOPPED: &str = "Controller execution stopped before reaching the uplink. No facility foothold was established.";
+
+/// The failure report's completion line — the direct counterpart to
+/// [`FIRST_CONTACT_COMPLETE`], "no less clear" per `docs/TUI_DESIGN.md` §5.
+const FIRST_CONTACT_INCOMPLETE: &str = "FIRST CONTACT INCOMPLETE";
+
+/// The failure report's truthful availability statement and next actions
+/// (`docs/TUI_DESIGN.md` §5 "Failure and controller error" mockup): the same
+/// availability truth as success, but the primary recovery path is revising
+/// the Controller.
+const NO_FURTHER_OPERATION_FAILURE: &str = "No further operation is available at this facility either way. Revise the controller and try again, or return to Signals.";
+
 fn after_action_report_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
     if after_action_succeeded(op) {
         after_action_success_lines(op)
@@ -961,44 +986,68 @@ fn after_action_success_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
     lines
 }
 
-/// The failure/controller-error After Action report's content. Unchanged
-/// from prior behavior — issue #68 explicitly excludes failure/
-/// controller-error presentation changes (tracked separately in #69).
+/// The failure/controller-error After Action report's content, in the
+/// outcome hierarchy order `docs/TUI_DESIGN.md` §5 requires: outcome,
+/// trigger, meaning, completion, evidence, then next actions/availability —
+/// the failure counterpart to [`after_action_success_lines`].
 fn after_action_failure_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(Span::styled(
         after_action_headline(op),
         Style::default().add_modifier(Modifier::BOLD),
     ))];
-    lines.extend(bounded_detail_lines(&after_action_detail(op)));
-    lines.push(Line::from(""));
 
-    let ticks_executed = op.records.len();
-    let tiles_discovered = op.current.discovered.len();
-    let hazards_entered = op
-        .records
-        .iter()
-        .flat_map(|record| &record.events)
-        .filter(|event| matches!(event, SimEvent::HazardEntered { .. }))
-        .count();
+    // `conclusion` is `None` only for an operation that hasn't finished yet
+    // (see `OperationView::conclusion`); After Action shouldn't normally be
+    // reached in that state, but fall back to the prior, minimal content
+    // rather than panic if it is.
+    let Some(conclusion) = op.conclusion else {
+        lines.extend(bounded_detail_lines(&after_action_detail(op)));
+        return lines;
+    };
+
+    match conclusion.kind {
+        ConclusionKind::BudgetExhausted => {
+            lines.push(Line::from(BUDGET_EXHAUSTED_MEANING));
+        }
+        ConclusionKind::ControllerError(error) => {
+            lines.push(Line::from(CONTROLLER_EXECUTION_STOPPED));
+            lines.extend(bounded_detail_lines(&controller_error_detail(error)));
+        }
+        ConclusionKind::Success => {
+            unreachable!("after_action_failure_lines only runs on a non-success conclusion")
+        }
+    }
+    // A blank line separates outcome/trigger/meaning from completion,
+    // matching `docs/TUI_DESIGN.md` §5's failure mockup, without adding
+    // enough height to push evidence/recovery out of the pane at the
+    // console's minimum supported geometry — the `F4` recovery hint already
+    // has its own dedicated pinned row (`draw_pane_with_pinned_action`), so
+    // this pane's remaining budget is tighter here than on the success path.
+    lines.push(Line::from(""));
+    lines.push(Line::from(FIRST_CONTACT_INCOMPLETE));
 
     lines.push(Line::from(format!(
-        "ticks executed     {ticks_executed:02}"
+        "ticks executed     {:02}",
+        conclusion.ticks_executed
     )));
     lines.push(Line::from(format!(
-        "tiles discovered   {tiles_discovered:02}"
+        "tiles discovered   {:02}",
+        conclusion.tiles_discovered
     )));
     lines.push(Line::from(format!(
-        "hazards entered    {hazards_entered:02}"
+        "hazards entered    {:02}",
+        conclusion.hazards_entered
     )));
-    lines.push(Line::from(""));
+    lines.push(Line::from(format!(
+        "remaining budget   {:02}",
+        conclusion.final_budget
+    )));
     lines.push(Line::from(format!(
         "deployed rev       run-{:02}",
-        op.run_id
+        conclusion.run_id
     )));
     lines.push(Line::from(""));
-    lines.push(Line::from(
-        "Revise the controller and try again, or return to Signals.",
-    ));
+    lines.push(Line::from(NO_FURTHER_OPERATION_FAILURE));
 
     lines
 }
@@ -2785,6 +2834,20 @@ mod tests {
             &terminal,
             "OPERATION FAILED: budget exhausted"
         ));
+        // The outcome hierarchy's trigger/meaning and completion lines
+        // (`docs/TUI_DESIGN.md` §5 "Failure and controller error") — the
+        // failure counterpart to the success closure in issue #68. The full
+        // sentence wraps across several rows at this pane width, so — like
+        // the success test above — assert on short substrings known to
+        // land intact on a single row.
+        assert!(buffer_contains(&terminal, "reached the uplink"));
+        assert!(buffer_contains(&terminal, "foothold"));
+        assert!(buffer_contains(&terminal, "FIRST CONTACT INCOMPLETE"));
+        assert!(buffer_contains(&terminal, "ticks executed"));
+        assert!(buffer_contains(&terminal, "tiles discovered"));
+        assert!(buffer_contains(&terminal, "hazards entered"));
+        assert!(buffer_contains(&terminal, "remaining budget"));
+        assert!(buffer_contains(&terminal, "deployed rev"));
         assert!(buffer_contains(&terminal, "STATUS: FAILED"));
         assert!(buffer_contains(&terminal, "F6 Redeploy"));
         assert!(buffer_contains(&terminal, "F4  revise the controller"));
@@ -2826,6 +2889,11 @@ mod tests {
             &terminal,
             "OPERATION FAILED: controller script error"
         ));
+        // Controller/script failures state that execution stopped and First
+        // Contact remains incomplete, while preserving the existing
+        // diagnostic detail (`docs/TUI_DESIGN.md` §5).
+        assert!(buffer_contains(&terminal, "execution stopped"));
+        assert!(buffer_contains(&terminal, "FIRST CONTACT INCOMPLETE"));
         assert!(state.operation().unwrap().finished);
     }
 
@@ -2883,6 +2951,78 @@ mod tests {
         // row-major across both panes — assert on a short substring known
         // to land intact on a single row instead.
         assert!(buffer_contains(&terminal, "OPERATION FAILED"));
+        assert!(buffer_contains(&terminal, "F4  revise the controller"));
+    }
+
+    /// Deploys the seeded starter controller and steps it to its
+    /// deterministic budget-exhaustion conclusion (it scans once, then
+    /// waits forever, on the fixed 15-budget scenario) — the failure
+    /// counterpart to [`succeeded_state`].
+    fn budget_exhausted_state() -> AppState {
+        let mut state = working_state();
+        state.apply(super::super::state::Msg::RequestDeploy);
+
+        for _ in 0..20 {
+            if state.operation().is_some_and(|op| op.finished) {
+                break;
+            }
+            state.advance_running_operation();
+        }
+        assert!(
+            state.operation().unwrap().finished,
+            "should have exhausted its budget well within 20 ticks"
+        );
+        state
+    }
+
+    #[test]
+    fn a_budget_exhaustion_failure_defaults_to_the_report_pane_at_the_minimum_geometry() {
+        let state = budget_exhausted_state();
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+
+        // At the console's supported minimum geometry, the outcome and
+        // incompletion must be visible without pressing `F8` to swap panes
+        // (`docs/TUI_DESIGN.md` §5, "Responsive behavior").
+        assert!(buffer_contains(&terminal, "AFTER-ACTION REPORT"));
+        assert!(buffer_contains(
+            &terminal,
+            "OPERATION FAILED: budget exhausted"
+        ));
+        assert!(buffer_contains(&terminal, "FIRST CONTACT INCOMPLETE"));
+    }
+
+    #[test]
+    fn the_full_failure_closure_fits_at_the_two_pane_minimum_geometry() {
+        let state = budget_exhausted_state();
+
+        // At `TWO_PANE_MIN_COLUMNS` x `MIN_ROWS` — a 40%-wide, unscrollable
+        // report pane — the outcome hierarchy's higher-priority items
+        // (outcome, completion) and the separately-pinned `F4` recovery hint
+        // must survive even if lower-priority evidence/closing-paragraph
+        // body text is clipped from the bottom of the unscrollable
+        // `Paragraph` (`docs/TUI_DESIGN.md` §5: "Higher items must never be
+        // sacrificed for lower ones when space is constrained"). At a wider
+        // two-pane width (120), there's room for the full closure —
+        // evidence and the closing paragraph too — same as success.
+        let terminal = render(TWO_PANE_MIN_COLUMNS, MIN_ROWS, &state);
+        assert!(buffer_contains(
+            &terminal,
+            "OPERATION FAILED: budget exhausted"
+        ));
+        assert!(buffer_contains(&terminal, "FIRST CONTACT INCOMPLETE"));
+        assert!(buffer_contains(&terminal, "F4  revise the controller"));
+
+        let terminal = render(120, MIN_ROWS, &state);
+        assert!(buffer_contains(
+            &terminal,
+            "OPERATION FAILED: budget exhausted"
+        ));
+        assert!(buffer_contains(&terminal, "FIRST CONTACT INCOMPLETE"));
+        assert!(buffer_contains(&terminal, "deployed rev"));
+        // The full closing paragraph, including its last word, must
+        // survive — `Paragraph` doesn't scroll, so content taller than the
+        // pane's inner height is silently clipped from the bottom.
+        assert!(buffer_contains(&terminal, "Signals."));
         assert!(buffer_contains(&terminal, "F4  revise the controller"));
     }
 
