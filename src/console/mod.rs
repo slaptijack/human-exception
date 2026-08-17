@@ -20,8 +20,9 @@ use std::time::{Duration, Instant};
 
 use crossterm::cursor::Show;
 use crossterm::event::{
-    self as term_event, Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    self as term_event, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind,
+    KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -52,6 +53,11 @@ static KEYBOARD_ENHANCEMENT_PUSHED: AtomicBool = AtomicBool::new(false);
 pub fn run() -> io::Result<()> {
     enable_raw_mode()?;
     if let Err(err) = execute!(io::stdout(), EnterAlternateScreen) {
+        let _ = disable_raw_mode();
+        return Err(err);
+    }
+    if let Err(err) = execute!(io::stdout(), EnableBracketedPaste) {
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
         let _ = disable_raw_mode();
         return Err(err);
     }
@@ -93,12 +99,21 @@ fn restore_panic_hook(previous: Arc<PanicHook>) {
     panic::set_hook(Box::new(move |info| previous(info)));
 }
 
+/// Restores every terminal mode this session enables, attempting each step
+/// even if an earlier one fails — a terminal mode like bracketed paste is
+/// owned by the terminal emulator, not this process, so it must not be
+/// left enabled just because e.g. `disable_raw_mode` errored first. Any
+/// error from `disable_raw_mode` or leaving the alternate screen is still
+/// surfaced, favoring the first one.
 fn restore_terminal() -> io::Result<()> {
-    disable_raw_mode()?;
+    let raw_mode_result = disable_raw_mode();
     if KEYBOARD_ENHANCEMENT_PUSHED.swap(false, Ordering::SeqCst) {
         let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
     }
-    execute!(io::stdout(), LeaveAlternateScreen, Show)?;
+    let _ = execute!(io::stdout(), DisableBracketedPaste);
+    let leave_screen_result = execute!(io::stdout(), LeaveAlternateScreen, Show);
+    raw_mode_result?;
+    leave_screen_result?;
     Ok(())
 }
 
@@ -266,6 +281,27 @@ fn should_redraw(
         return true;
     }
 
+    // Below the supported minimum, only the geometry warning and `Ctrl+Q`
+    // are shown; every other intent must stay inert instead of silently
+    // mutating state (e.g. committing an opportunity) the player can't see.
+    let undersized = frame_size.0 < ui::MIN_COLUMNS || frame_size.1 < ui::MIN_ROWS;
+
+    if let Event::Paste(text) = event {
+        let dialog_pending = state.reset_confirmation_pending()
+            || state.quit_confirmation_pending()
+            || state.redeploy_confirmation_pending();
+        let accepted = !undersized
+            && !dialog_pending
+            && state.current_view() == state::View::Controller
+            && ui::controller_source_visible(state, frame_size.0);
+        if !accepted || text.is_empty() {
+            return false;
+        }
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        state.apply(Msg::PasteController(normalized));
+        return true;
+    }
+
     let Event::Key(key) = event else {
         return false;
     };
@@ -358,11 +394,6 @@ fn should_redraw(
         }
     }
 
-    // Below the supported minimum, only the geometry warning and `Ctrl+Q`
-    // are shown; every other intent must stay inert instead of silently
-    // mutating state (e.g. committing an opportunity) the player can't see.
-    let undersized = frame_size.0 < ui::MIN_COLUMNS || frame_size.1 < ui::MIN_ROWS;
-
     match event::map(
         key,
         state.current_view(),
@@ -377,8 +408,9 @@ fn should_redraw(
             if undersized && !is_quit_related {
                 return false;
             }
+            let is_help_scroll = matches!(msg, Msg::ScrollHelpUp | Msg::ScrollHelpDown);
             state.apply(msg);
-            if matches!(msg, Msg::ScrollHelpUp | Msg::ScrollHelpDown) {
+            if is_help_scroll {
                 let max = ui::help_max_scroll(state, frame_size.0, frame_size.1);
                 state.clamp_help_scroll(max);
             }
@@ -419,6 +451,10 @@ mod tests {
         let mut key = KeyEvent::new(code, KeyModifiers::NONE);
         key.kind = KeyEventKind::Release;
         Event::Key(key)
+    }
+
+    fn paste(text: &str) -> Event {
+        Event::Paste(text.to_string())
     }
 
     fn render(width: u16, height: u16, events: &[Event]) -> (AppState, Terminal<TestBackend>) {
@@ -632,6 +668,129 @@ mod tests {
             Some(format!("{}xx", intel::STARTER_CONTROLLER).as_str()),
             "held-key Repeat events should insert just like Press, not be ignored"
         );
+    }
+
+    #[test]
+    fn pasting_multiline_text_inserts_it_verbatim_into_the_controller() {
+        let (state, _) = render(
+            120,
+            40,
+            &[
+                press(KeyCode::Enter),
+                press(KeyCode::Enter),
+                paste("function on_tick()\n  return 1\nend\n"),
+            ],
+        );
+
+        assert_eq!(
+            state.controller_source(),
+            Some(
+                format!(
+                    "{}function on_tick()\n  return 1\nend\n",
+                    intel::STARTER_CONTROLLER
+                )
+                .as_str()
+            )
+        );
+    }
+
+    #[test]
+    fn pasted_crlf_and_cr_line_endings_are_normalized_to_lf() {
+        let (state, _) = render(
+            120,
+            40,
+            &[
+                press(KeyCode::Enter),
+                press(KeyCode::Enter),
+                paste("a\r\nb\rc\n"),
+            ],
+        );
+
+        let source = state.controller_source().expect("controller loaded");
+        assert!(source.ends_with("a\nb\nc\n"));
+        assert!(!source.contains('\r'));
+    }
+
+    #[test]
+    fn paste_cursor_lands_immediately_after_inserted_text() {
+        let (state, _) = render(
+            120,
+            40,
+            &[
+                press(KeyCode::Enter),
+                press(KeyCode::Enter),
+                paste("abc"),
+                press(KeyCode::Char('Z')),
+            ],
+        );
+
+        assert_eq!(
+            state.controller_source(),
+            Some(format!("{}abcZ", intel::STARTER_CONTROLLER).as_str())
+        );
+    }
+
+    #[test]
+    fn empty_paste_does_not_modify_controller_source() {
+        let (state, _) = render(
+            120,
+            40,
+            &[press(KeyCode::Enter), press(KeyCode::Enter), paste("")],
+        );
+
+        assert_eq!(state.controller_source(), Some(intel::STARTER_CONTROLLER));
+    }
+
+    #[test]
+    fn paste_outside_controller_view_is_ignored() {
+        let (state, _) = render(120, 40, &[paste("stolen text")]);
+
+        assert_eq!(state.current_view(), View::Signals);
+        assert!(state.controller_source().is_none());
+    }
+
+    #[test]
+    fn paste_while_a_confirmation_dialog_is_open_is_ignored() {
+        let (state, _) = render(
+            120,
+            40,
+            &[
+                press(KeyCode::Enter),
+                press(KeyCode::Enter),
+                press(KeyCode::Char('x')),
+                press(KeyCode::F(7)), // open the reset-controller confirmation
+                paste("sneaked in"),
+            ],
+        );
+
+        assert!(state.reset_confirmation_pending());
+        assert_eq!(
+            state.controller_source(),
+            Some(format!("{}x", intel::STARTER_CONTROLLER).as_str())
+        );
+    }
+
+    #[test]
+    fn paste_while_reference_pane_visible_in_narrow_layout_is_ignored() {
+        let (state, _) = render(
+            90,
+            40,
+            &[
+                press(KeyCode::Enter),
+                press(KeyCode::Enter),
+                press(KeyCode::F(8)), // swap the narrow secondary pane to the Lua reference
+                paste("sneaked in"),
+            ],
+        );
+
+        assert_eq!(state.controller_source(), Some(intel::STARTER_CONTROLLER));
+    }
+
+    #[test]
+    fn paste_below_minimum_geometry_is_ignored() {
+        let (state, _) = render(60, 20, &[paste("sneaked in")]);
+
+        assert!(state.controller_source().is_none());
     }
 
     #[test]

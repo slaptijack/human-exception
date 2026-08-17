@@ -134,6 +134,24 @@ impl Editor {
         self.insert_char('\n');
     }
 
+    /// Inserts `text` verbatim at the cursor as a single operation, used
+    /// for pasted content: embedded newlines and whitespace are preserved
+    /// exactly, and the whole insertion counts as one edit rather than a
+    /// sequence of `insert_char` calls. Returns whether `source` actually
+    /// changed (`false` for empty `text`), matching `apply`'s convention.
+    ///
+    /// Callers are responsible for normalizing line endings (CRLF/CR ->
+    /// LF) before calling this; `Editor` stores whatever bytes it's given.
+    pub fn insert_text(&mut self, text: &str) -> bool {
+        if text.is_empty() {
+            return false;
+        }
+        self.source.insert_str(self.cursor, text);
+        self.cursor += text.len();
+        self.sync_preferred_col();
+        true
+    }
+
     /// Deletes the character before the cursor, returning `false` (a
     /// no-op) at the start of the document.
     pub fn backspace(&mut self) -> bool {
@@ -310,6 +328,47 @@ mod tests {
         editor.move_left();
         editor.insert_newline();
         assert_eq!(editor.source(), "a\nb");
+        assert_eq!(editor.cursor_line_col(), (1, 0));
+    }
+
+    #[test]
+    fn insert_text_preserves_embedded_newlines_and_whitespace() {
+        let mut editor = Editor::new("");
+        editor.insert_text("line one\n  line two\n");
+        assert_eq!(editor.source(), "line one\n  line two\n");
+    }
+
+    #[test]
+    fn insert_text_places_cursor_immediately_after_inserted_content() {
+        let mut editor = Editor::new("");
+        editor.insert_text("a\nb");
+        assert_eq!(editor.cursor_line_col(), (1, 1));
+        editor.insert_char('Z');
+        assert_eq!(editor.source(), "a\nbZ");
+    }
+
+    #[test]
+    fn insert_text_splices_in_at_the_cursor_rather_than_appending() {
+        let mut editor = Editor::new("ac");
+        editor.move_left();
+        editor.insert_text("XY\n");
+        assert_eq!(editor.source(), "aXY\nc");
+    }
+
+    #[test]
+    fn insert_text_with_empty_string_is_a_noop_and_returns_false() {
+        let mut editor = Editor::new("abc");
+        let cursor_before = editor.cursor;
+        assert!(!editor.insert_text(""));
+        assert_eq!(editor.source(), "abc");
+        assert_eq!(editor.cursor, cursor_before);
+    }
+
+    #[test]
+    fn insert_text_is_utf8_safe_at_multibyte_boundaries() {
+        let mut editor = Editor::new("café");
+        editor.insert_text("🎉\n");
+        assert_eq!(editor.source(), "café🎉\n");
         assert_eq!(editor.cursor_line_col(), (1, 0));
     }
 

@@ -302,6 +302,7 @@ Product requirements:
 - line numbers are visible but not part of the source;
 - source survives navigation between views;
 - modified state is visible in the persistent header;
+- a terminal paste (the terminal's own paste action, not a bound key) inserts the pasted text at the cursor in one operation, preserving embedded newlines and whitespace;
 - `F7` restores the starter controller, with confirmation if edits would be lost;
 - Lua syntax/load validation errors appear adjacent to the source with useful line information where available;
 - the sidebar is a cheat sheet, not a complete manual;
