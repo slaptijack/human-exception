@@ -98,6 +98,35 @@ pub struct OperationView<'a> {
     /// from: the last completed tick's, or (before any tick has run, or if
     /// deploy itself failed) a starting snapshot.
     pub current: OperationSnapshot,
+    /// How the run ended, if it has, so rendering doesn't need to
+    /// re-infer meaning from `records`/`error` itself. `None` until the
+    /// operation is finished.
+    pub conclusion: Option<OperationConclusion<'a>>,
+}
+
+/// How a finished deployment ended, derived once from the authoritative
+/// `TickOutcome`/`ControllerError` rather than left for rendering to
+/// re-infer from raw records or drone position.
+#[derive(Debug, Clone, Copy)]
+pub enum ConclusionKind<'a> {
+    Success,
+    BudgetExhausted,
+    ControllerError(&'a ControllerError),
+}
+
+/// A structured, read-only account of how a finished deployment ended,
+/// with the evidence `docs/TUI_DESIGN.md` §5 requires on the initial
+/// After Action screen (final budget, ticks executed, tiles discovered,
+/// hazards entered, run identifier) precomputed so rendering doesn't
+/// recalculate gameplay rules.
+#[derive(Debug, Clone, Copy)]
+pub struct OperationConclusion<'a> {
+    pub kind: ConclusionKind<'a>,
+    pub ticks_executed: u32,
+    pub tiles_discovered: u32,
+    pub hazards_entered: u32,
+    pub final_budget: u32,
+    pub run_id: u32,
 }
 
 /// A satellite-feed-safe snapshot of a deployment's current state — only
@@ -330,15 +359,54 @@ impl AppState {
                     }
                 }
             };
+            let finished = op.is_finished();
+            let kind = if !finished {
+                None
+            } else if let Some(err) = &op.error {
+                Some(ConclusionKind::ControllerError(err))
+            } else {
+                match op.records.last().map(|record| record.outcome) {
+                    Some(crate::simulation::TickOutcome::Succeeded) => {
+                        Some(ConclusionKind::Success)
+                    }
+                    Some(crate::simulation::TickOutcome::Failed(
+                        crate::simulation::FailureReason::BudgetExhausted,
+                    )) => Some(ConclusionKind::BudgetExhausted),
+                    // A run only finishes via an error or a terminal
+                    // `TickOutcome`, so this shouldn't happen in practice;
+                    // treat it as "no conclusion yet" rather than
+                    // asserting.
+                    Some(crate::simulation::TickOutcome::Running) | None => None,
+                }
+            };
+            let conclusion = kind.map(|kind| {
+                let hazards_entered = op
+                    .records
+                    .iter()
+                    .flat_map(|record| &record.events)
+                    .filter(|event| {
+                        matches!(event, crate::simulation::SimEvent::HazardEntered { .. })
+                    })
+                    .count() as u32;
+                OperationConclusion {
+                    kind,
+                    ticks_executed: op.records.len() as u32,
+                    tiles_discovered: current.discovered.len() as u32,
+                    hazards_entered,
+                    final_budget: current.budget_remaining,
+                    run_id: op.run_id,
+                }
+            });
             OperationView {
                 deployed_source: &op.deployed_source,
                 run_id: op.run_id,
                 records: &op.records,
                 paused: op.paused,
-                finished: op.is_finished(),
+                finished,
                 error: op.error.as_ref(),
                 starting_budget,
                 current,
+                conclusion,
             }
         })
     }
@@ -1426,6 +1494,104 @@ mod tests {
             Some(crate::simulation::TickOutcome::Succeeded)
         );
         assert_eq!(state.current_view(), View::AfterAction);
+    }
+
+    #[test]
+    fn an_unfinished_operation_has_no_conclusion_yet() {
+        let mut state = working_state();
+        state.apply(Msg::RequestDeploy);
+
+        let op = state.operation().unwrap();
+
+        assert!(!op.finished);
+        assert!(op.conclusion.is_none());
+    }
+
+    #[test]
+    fn a_successful_run_reaches_a_success_conclusion_with_matching_evidence() {
+        let mut state = working_state();
+        state.controller = Some(Editor::new(ROUTE_TO_UPLINK));
+        state.apply(Msg::RequestDeploy);
+
+        for _ in 0..8 {
+            state.advance_running_operation();
+        }
+
+        let op = state.operation().unwrap();
+        let conclusion = op.conclusion.expect("a finished run has a conclusion");
+        assert!(matches!(conclusion.kind, ConclusionKind::Success));
+        assert_eq!(conclusion.ticks_executed as usize, op.records.len());
+        assert_eq!(
+            conclusion.tiles_discovered as usize,
+            op.current.discovered.len()
+        );
+        assert_eq!(conclusion.final_budget, op.current.budget_remaining);
+        assert_eq!(conclusion.run_id, op.run_id);
+    }
+
+    const ALWAYS_WAITS: &str = "function on_tick(observation) return \"wait\" end";
+
+    #[test]
+    fn exhausting_the_budget_reaches_a_budget_exhausted_conclusion() {
+        let mut state = working_state();
+        state.controller = Some(Editor::new(ALWAYS_WAITS));
+        state.apply(Msg::RequestDeploy);
+
+        for _ in 0..15 {
+            state.advance_running_operation();
+        }
+
+        let op = state.operation().unwrap();
+        assert!(op.finished);
+        let conclusion = op.conclusion.expect("a finished run has a conclusion");
+        assert!(matches!(conclusion.kind, ConclusionKind::BudgetExhausted));
+        assert_eq!(conclusion.final_budget, 0);
+    }
+
+    #[test]
+    fn a_deploy_time_load_failure_reaches_a_controller_error_conclusion() {
+        let mut state = working_state();
+        state.controller = Some(Editor::new("function on_tick("));
+
+        state.apply(Msg::RequestDeploy);
+
+        let op = state.operation().unwrap();
+        let conclusion = op.conclusion.expect("a finished run has a conclusion");
+        assert!(matches!(
+            conclusion.kind,
+            ConclusionKind::ControllerError(ControllerError::ScriptInvalid(_))
+        ));
+    }
+
+    #[test]
+    fn a_callback_error_reaches_a_controller_error_conclusion() {
+        let mut state = working_state();
+        state.controller = Some(Editor::new(ALWAYS_ERRORS));
+        state.apply(Msg::RequestDeploy);
+
+        state.advance_running_operation();
+
+        let op = state.operation().unwrap();
+        let conclusion = op.conclusion.expect("a finished run has a conclusion");
+        assert!(matches!(
+            conclusion.kind,
+            ConclusionKind::ControllerError(ControllerError::CallbackFailed(_))
+        ));
+    }
+
+    #[test]
+    fn a_missing_callback_reaches_a_controller_error_conclusion() {
+        let mut state = working_state();
+        state.controller = Some(Editor::new("local x = 1"));
+
+        state.apply(Msg::RequestDeploy);
+
+        let op = state.operation().unwrap();
+        let conclusion = op.conclusion.expect("a finished run has a conclusion");
+        assert!(matches!(
+            conclusion.kind,
+            ConclusionKind::ControllerError(ControllerError::MissingCallback)
+        ));
     }
 
     #[test]
