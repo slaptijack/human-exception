@@ -114,7 +114,7 @@ pub struct OperationSnapshot {
 }
 
 /// A player intent, decoupled from whatever key produced it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Msg {
     Navigate(View),
     OpenHelp,
@@ -130,6 +130,11 @@ pub enum Msg {
     /// An editing/cursor-movement key applied to the current controller
     /// source; a no-op if no controller is loaded.
     EditController(EditOp),
+    /// Bracketed-paste text inserted at the current controller cursor as a
+    /// single operation. Already newline-normalized (CRLF/CR -> LF) by the
+    /// caller in `console::mod`; empty text must not touch `source` or
+    /// `validation`.
+    PasteController(String),
     /// Checks whether the current controller source is loadable Lua that
     /// defines `on_tick`, without running anything.
     ValidateController,
@@ -467,6 +472,13 @@ impl AppState {
             Msg::EditController(op) => {
                 if let Some(controller) = self.controller.as_mut()
                     && controller.apply(op)
+                {
+                    self.validation = Validation::Unchecked;
+                }
+            }
+            Msg::PasteController(text) => {
+                if let Some(controller) = self.controller.as_mut()
+                    && controller.insert_text(&text)
                 {
                     self.validation = Validation::Unchecked;
                 }
@@ -852,6 +864,49 @@ mod tests {
 
         assert!(state.controller_modified());
         assert_eq!(state.validation(), &Validation::Unchecked);
+    }
+
+    #[test]
+    fn paste_controller_inserts_multiline_text_and_invalidates_validation() {
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.apply(Msg::ValidateController);
+        assert_eq!(state.validation(), &Validation::Valid);
+
+        state.apply(Msg::PasteController("-- a\n-- b\n".to_string()));
+
+        assert!(
+            state
+                .controller_source()
+                .is_some_and(|source| source.ends_with("-- a\n-- b\n"))
+        );
+        assert_eq!(state.validation(), &Validation::Unchecked);
+    }
+
+    #[test]
+    fn paste_controller_with_empty_string_does_not_change_source_or_validation() {
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.apply(Msg::ValidateController);
+        assert_eq!(state.validation(), &Validation::Valid);
+        let source_before = state.controller_source().unwrap().to_string();
+
+        state.apply(Msg::PasteController(String::new()));
+
+        assert_eq!(state.controller_source(), Some(source_before.as_str()));
+        assert_eq!(state.validation(), &Validation::Valid);
+    }
+
+    #[test]
+    fn paste_controller_with_no_loaded_controller_is_a_noop() {
+        let mut state = AppState::new();
+        assert_eq!(state.controller_source(), None);
+
+        state.apply(Msg::PasteController("x".to_string()));
+
+        assert_eq!(state.controller_source(), None);
     }
 
     #[test]
