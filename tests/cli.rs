@@ -91,8 +91,10 @@ fn running_the_example_script_succeeds() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(output.status.success());
-    assert!(stdout.contains("UPLINK ESTABLISHED"));
+    assert!(stdout.contains("FOOTHOLD ESTABLISHED"));
+    assert!(stdout.contains("FIRST CONTACT COMPLETE"));
     assert!(!stdout.contains("OPERATION FAILED"));
+    assert!(!stdout.contains("FIRST CONTACT INCOMPLETE"));
 }
 
 #[test]
@@ -186,7 +188,7 @@ fn a_hazard_route_script_reports_the_hazard_telemetry_line_and_lower_final_budge
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(output.status.success());
-    assert!(stdout.contains("UPLINK ESTABLISHED"));
+    assert!(stdout.contains("FOOTHOLD ESTABLISHED"));
     assert!(stdout.contains("tick  6 | drone (4, 2) | action: north | budget remaining: 4"));
     assert!(stdout.contains("hazard triggered at (4, 2): -5 budget"));
 }
@@ -202,7 +204,9 @@ fn a_wait_only_script_reports_mission_failure() {
     assert!(!output.status.success());
     assert_eq!(output.status.code(), Some(1));
     assert!(stdout.contains("OPERATION FAILED"));
-    assert!(!stdout.contains("UPLINK ESTABLISHED"));
+    assert!(stdout.contains("FIRST CONTACT INCOMPLETE"));
+    assert!(!stdout.contains("FOOTHOLD ESTABLISHED"));
+    assert!(!stdout.contains("FIRST CONTACT COMPLETE"));
 }
 
 #[test]
