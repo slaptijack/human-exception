@@ -786,6 +786,8 @@ fn draw_after_action(frame: &mut Frame, area: Rect, state: &AppState) {
         return;
     };
 
+    let scroll = state.scroll_offset(View::AfterAction);
+
     if area.width >= TWO_PANE_MIN_COLUMNS {
         let [left, right] =
             Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
@@ -796,7 +798,7 @@ fn draw_after_action(frame: &mut Frame, area: Rect, state: &AppState) {
             "FINAL SATELLITE FRAME",
             satellite_lines(&op.current),
         );
-        draw_after_action_report_pane(frame, right, &op);
+        draw_after_action_report_pane(frame, right, &op, scroll);
     } else {
         // The report pane carries hierarchy items 1-4 (outcome, trigger,
         // meaning, completion) that the player must see before anything
@@ -807,7 +809,7 @@ fn draw_after_action(frame: &mut Frame, area: Rect, state: &AppState) {
         // there, same as every other narrow-layout view.
         let defaults_to_report = op.finished;
         if state.narrow_secondary_visible() ^ defaults_to_report {
-            draw_after_action_report_pane(frame, area, &op);
+            draw_after_action_report_pane(frame, area, &op, scroll);
         } else {
             draw_pane(
                 frame,
@@ -822,20 +824,44 @@ fn draw_after_action(frame: &mut Frame, area: Rect, state: &AppState) {
 /// Draws the AFTER-ACTION REPORT pane, pinning the `F4` recovery hint to a
 /// fixed last row on failure so a long diagnostic or deployed-source excerpt
 /// filling [`MAX_DETAIL_LINES`] can never push it off the bottom of the
-/// pane at the console's supported minimum geometry (`draw_pane_with_pinned_action`).
-fn draw_after_action_report_pane(frame: &mut Frame, area: Rect, op: &OperationView<'_>) {
+/// pane at the console's supported minimum geometry, and scrolling its
+/// content by `scroll` rows (`View::AfterAction`'s entry in
+/// `event::view_is_scrollable`, #76/#77) so the success report's outcome
+/// hierarchy spacing can't be clipped there either. Built inline rather
+/// than through `draw_pane`/`draw_pane_with_pinned_action`, matching
+/// `draw_help`'s own scroll-aware rendering, since neither shared helper
+/// takes a scroll offset (most of their callers have unscrollable content).
+fn draw_after_action_report_pane(
+    frame: &mut Frame,
+    area: Rect,
+    op: &OperationView<'_>,
+    scroll: u16,
+) {
     let lines = after_action_report_lines(op);
-    if after_action_succeeded(op) {
-        draw_pane(frame, area, "AFTER-ACTION REPORT", lines);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("AFTER-ACTION REPORT");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // As in `draw_help`: the event loop already clamps the stored offset
+    // via `after_action_max_scroll` as each scroll key arrives; this
+    // recomputes against the exact rendered area as a second, render-time
+    // backstop.
+    let content_area = if after_action_succeeded(op) {
+        inner
     } else {
-        draw_pane_with_pinned_action(
-            frame,
-            area,
-            "AFTER-ACTION REPORT",
-            lines,
-            "F4  revise the controller",
-        );
-    }
+        let [content, action_area] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
+        frame.render_widget(Paragraph::new("F4  revise the controller"), action_area);
+        content
+    };
+    let content_rows = wrapped_row_count(&lines, content_area.width);
+    let max_scroll = content_rows.saturating_sub(content_area.height as usize) as u16;
+    let paragraph = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((scroll.min(max_scroll), 0));
+    frame.render_widget(paragraph, content_area);
 }
 
 /// The after-action report's content: a headline and one-line mechanical
@@ -959,6 +985,13 @@ fn after_action_success_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
     // reflows the full approved sentence at the pane's actual width instead
     // of hard-truncating it at `MAX_DETAIL_LINE_CHARS`.
     lines.push(Line::from(FOOTHOLD_ESTABLISHED_MEANING));
+    // A blank line separates outcome/trigger/meaning from completion, and
+    // another separates evidence from availability, matching
+    // `after_action_failure_lines`'s spacing and `docs/TUI_DESIGN.md` §5's
+    // shared outcome-hierarchy sectioning — without either blank line this
+    // report reads as one dense block instead of the failure path's clearly
+    // separated sections.
+    lines.push(Line::from(""));
     lines.push(Line::from(FIRST_CONTACT_COMPLETE));
 
     lines.push(Line::from(format!(
@@ -981,6 +1014,7 @@ fn after_action_success_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
         "deployed rev       run-{:02}",
         conclusion.run_id
     )));
+    lines.push(Line::from(""));
     lines.push(Line::from(NO_FURTHER_OPERATION));
 
     lines
@@ -1516,6 +1550,58 @@ pub(crate) fn help_max_scroll(state: &AppState, frame_width: u16, frame_height: 
     let (content_width, content_height) = help_inner_dimensions(frame_width, frame_height);
     let content_rows = wrapped_row_count(&help_lines(state), content_width);
     content_rows.saturating_sub(content_height as usize) as u16
+}
+
+/// The AFTER-ACTION REPORT pane's inner (content) dimensions for a given
+/// full frame size, matching the header/footer/border/two-pane-split
+/// geometry [`draw`] and [`draw_after_action`] actually use — the same role
+/// [`help_inner_dimensions`] plays for Help. Reuses the exact `Layout` split
+/// `draw_after_action` renders with, rather than reimplementing the
+/// percentage math, so this can't drift from the real render.
+pub(crate) fn after_action_report_inner_dimensions(
+    frame_width: u16,
+    frame_height: u16,
+) -> (u16, u16) {
+    if frame_width < MIN_COLUMNS || frame_height < MIN_ROWS {
+        return (0, 0);
+    }
+    const HEADER_AND_FOOTER_HEIGHT: u16 = 6; // draw()'s two Length(3) rows
+    const BORDER_INSET: u16 = 2; // the report pane's own Block::borders(ALL)
+    let body_height = frame_height.saturating_sub(HEADER_AND_FOOTER_HEIGHT);
+
+    let pane_width = if frame_width >= TWO_PANE_MIN_COLUMNS {
+        let [_, right] =
+            Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
+                .areas(Rect::new(0, 0, frame_width, body_height));
+        right.width
+    } else {
+        frame_width
+    };
+
+    (
+        pane_width.saturating_sub(BORDER_INSET),
+        body_height.saturating_sub(BORDER_INSET),
+    )
+}
+
+/// How far the After Action report's scroll offset can advance before it
+/// would scroll past the last rendered row of its content at this frame
+/// size, accounting for the failure report's pinned `F4` recovery row
+/// (`draw_after_action_report_pane`). `0` once no operation has concluded,
+/// since there's nothing to scroll.
+pub(crate) fn after_action_max_scroll(
+    state: &AppState,
+    frame_width: u16,
+    frame_height: u16,
+) -> u16 {
+    let Some(op) = state.operation() else {
+        return 0;
+    };
+    let (content_width, content_height) =
+        after_action_report_inner_dimensions(frame_width, frame_height);
+    let pinned_action_row = u16::from(!after_action_succeeded(&op));
+    let content_rows = wrapped_row_count(&after_action_report_lines(&op), content_width);
+    content_rows.saturating_sub(content_height.saturating_sub(pinned_action_row) as usize) as u16
 }
 
 fn draw_help(frame: &mut Frame, area: Rect, state: &AppState) {
@@ -3104,6 +3190,42 @@ mod tests {
     }
 
     #[test]
+    fn the_success_report_blank_line_spacing_matches_the_failure_report() {
+        let state = succeeded_state();
+        let op = state.operation().unwrap();
+        let lines: Vec<String> = after_action_report_lines(&op)
+            .into_iter()
+            .map(String::from)
+            .collect();
+
+        // Same two separator positions `after_action_failure_lines` uses: a
+        // blank line before the completion line, and another before the
+        // availability line — without these the success report renders as
+        // one dense block instead of matching the failure report's spacing.
+        let completion_index = lines
+            .iter()
+            .position(|line| line == FIRST_CONTACT_COMPLETE)
+            .expect("completion line should be present");
+        assert_eq!(
+            lines[completion_index - 1],
+            "",
+            "expected a blank line before {FIRST_CONTACT_COMPLETE:?}, got {:?}",
+            lines
+        );
+
+        let availability_index = lines
+            .iter()
+            .position(|line| line == NO_FURTHER_OPERATION)
+            .expect("availability line should be present");
+        assert_eq!(
+            lines[availability_index - 1],
+            "",
+            "expected a blank line before the availability line, got {:?}",
+            lines
+        );
+    }
+
+    #[test]
     fn a_successful_operation_defaults_to_the_report_pane_at_the_minimum_geometry() {
         let state = succeeded_state();
         let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
@@ -3117,14 +3239,16 @@ mod tests {
     }
 
     #[test]
-    fn the_full_success_closure_fits_at_the_two_pane_minimum_geometry() {
-        let state = succeeded_state();
+    fn the_full_success_closure_reaches_the_bottom_at_the_two_pane_minimum_geometry() {
+        use super::super::state::Msg;
+
+        let mut state = succeeded_state();
 
         // `TWO_PANE_MIN_COLUMNS` x `MIN_ROWS` is the narrowest geometry that
-        // still takes the two-pane layout — the report pane's 40%-width,
-        // unscrollable inner area is the tightest fit the full success
-        // report has to survive. A wider two-pane width (120) leaves the
-        // same inner *height* but a wider pane, so it's checked too.
+        // still takes the two-pane layout — the report pane's 40%-width
+        // inner area is the tightest fit the full success report has to
+        // survive. A wider two-pane width (120) leaves the same inner
+        // *height* but a wider pane, so it's checked too.
         for width in [TWO_PANE_MIN_COLUMNS, 120] {
             let terminal = render(width, MIN_ROWS, &state);
             assert!(
@@ -3139,13 +3263,23 @@ mod tests {
                 buffer_contains(&terminal, "deployed rev"),
                 "evidence clipped at {width}x{MIN_ROWS}"
             );
-            // The full closing paragraph, including its last word, must
-            // survive — `Paragraph` doesn't scroll, so content taller than
-            // the pane's inner height is silently clipped from the bottom.
+            // The blank-line-separated report (#76) no longer has to fit
+            // without scrolling at this geometry — but the closing
+            // paragraph, including its last word, must still be reachable
+            // by scrolling all the way down (#77's pane-scroll mechanism),
+            // rather than being unrecoverably cut off.
+            let max_scroll = after_action_max_scroll(&state, width, MIN_ROWS);
+            for _ in 0..max_scroll {
+                state.apply(Msg::ScrollDown);
+            }
+            let scrolled = render(width, MIN_ROWS, &state);
             assert!(
-                buffer_contains(&terminal, "network."),
-                "closing paragraph clipped at {width}x{MIN_ROWS}"
+                buffer_contains(&scrolled, "network."),
+                "closing paragraph unreachable even scrolled to the bottom at {width}x{MIN_ROWS}"
             );
+            for _ in 0..max_scroll {
+                state.apply(Msg::ScrollUp);
+            }
         }
     }
 
