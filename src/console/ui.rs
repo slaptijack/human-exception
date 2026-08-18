@@ -328,14 +328,15 @@ fn draw_body(frame: &mut Frame, area: Rect, state: &AppState) {
 
 fn draw_controller(frame: &mut Frame, area: Rect, state: &AppState) {
     if area.width >= TWO_PANE_MIN_COLUMNS {
+        let focused = state.focused_pane(View::Controller);
         let [left, right] =
             Layout::horizontal([Constraint::Percentage(70), Constraint::Percentage(30)])
                 .areas(area);
-        draw_controller_source(frame, left, state);
+        draw_controller_source(frame, left, state, focused == PaneId::ControllerSource);
         draw_pane(
             frame,
             right,
-            "LUA FIELD REFERENCE",
+            pane_title("LUA FIELD REFERENCE", focused == PaneId::LuaFieldReference),
             lua_field_reference_lines(),
         );
     } else if state.focused_pane(View::Controller) == PaneId::LuaFieldReference
@@ -353,18 +354,19 @@ fn draw_controller(frame: &mut Frame, area: Rect, state: &AppState) {
         // ever renders inside the source pane, so showing the reference
         // pane instead while it's pending would leave the prompt (and the
         // `Enter`/`Esc` it's waiting on) invisible.
-        draw_controller_source(frame, area, state);
+        draw_controller_source(frame, area, state, true);
     }
 }
 
 /// The narrow-layout (80-99 column) stand-in for the source pane when `F8`
 /// has swapped the Lua reference in instead. Renders the same validation
 /// banner `draw_controller_source` would, since that pane isn't on screen
-/// to show it.
+/// to show it. Only ever shown as the sole visible pane, so it is always
+/// focused.
 fn draw_controller_reference(frame: &mut Frame, area: Rect, state: &AppState) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .title("LUA FIELD REFERENCE");
+        .title(pane_title("LUA FIELD REFERENCE", true));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -403,10 +405,10 @@ fn banner_height(banner: &Line<'static>, width: u16) -> u16 {
     (wrapped_row_count(std::slice::from_ref(banner), width) as u16).clamp(1, MAX_BANNER_ROWS)
 }
 
-fn draw_controller_source(frame: &mut Frame, area: Rect, state: &AppState) {
+fn draw_controller_source(frame: &mut Frame, area: Rect, state: &AppState, focused: bool) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .title("CAPTURED CONTROLLER // controller.lua");
+        .title(pane_title("CAPTURED CONTROLLER // controller.lua", focused));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -710,7 +712,7 @@ fn draw_operation(frame: &mut Frame, area: Rect, state: &AppState) {
         draw_pane(
             frame,
             area,
-            "REDEPLOY?",
+            "REDEPLOY?".to_string(),
             vec![
                 Line::from(Span::styled(
                     "A run is already active. Redeploying replaces it from a clean start.",
@@ -728,7 +730,7 @@ fn draw_operation(frame: &mut Frame, area: Rect, state: &AppState) {
         draw_pane(
             frame,
             area,
-            "OPERATION",
+            "OPERATION".to_string(),
             vec![
                 Line::from("No operation is deployed yet."),
                 Line::from("F6 deploys the current controller."),
@@ -737,6 +739,8 @@ fn draw_operation(frame: &mut Frame, area: Rect, state: &AppState) {
         return;
     };
 
+    let focused = state.focused_pane(View::Operation);
+
     if area.width >= TWO_PANE_MIN_COLUMNS {
         let [left, right] =
             Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
@@ -744,17 +748,27 @@ fn draw_operation(frame: &mut Frame, area: Rect, state: &AppState) {
         draw_pane(
             frame,
             left,
-            "COMPROMISED SATELLITE FEED",
+            pane_title("COMPROMISED SATELLITE FEED", focused == PaneId::Satellite),
             satellite_lines(&op.current),
         );
-        draw_pane(frame, right, "OPERATION TELEMETRY", telemetry_lines(&op));
-    } else if state.focused_pane(View::Operation) == PaneId::OperationTelemetry {
-        draw_pane(frame, area, "OPERATION TELEMETRY", telemetry_lines(&op));
+        draw_pane(
+            frame,
+            right,
+            pane_title("OPERATION TELEMETRY", focused == PaneId::OperationTelemetry),
+            telemetry_lines(&op),
+        );
+    } else if focused == PaneId::OperationTelemetry {
+        draw_pane(
+            frame,
+            area,
+            pane_title("OPERATION TELEMETRY", true),
+            telemetry_lines(&op),
+        );
     } else {
         draw_pane(
             frame,
             area,
-            "COMPROMISED SATELLITE FEED",
+            pane_title("COMPROMISED SATELLITE FEED", true),
             satellite_lines(&op.current),
         );
     }
@@ -770,7 +784,7 @@ fn draw_after_action(frame: &mut Frame, area: Rect, state: &AppState) {
         draw_pane(
             frame,
             area,
-            "AFTER-ACTION REPORT",
+            "AFTER-ACTION REPORT".to_string(),
             vec![
                 Line::from("No operation has concluded yet."),
                 Line::from("F4 revises the controller, F6 deploys it."),
@@ -780,6 +794,7 @@ fn draw_after_action(frame: &mut Frame, area: Rect, state: &AppState) {
     };
 
     let scroll = state.scroll_offset(PaneId::Report);
+    let focused = state.focused_pane(View::AfterAction);
 
     if area.width >= TWO_PANE_MIN_COLUMNS {
         let [left, right] =
@@ -788,11 +803,11 @@ fn draw_after_action(frame: &mut Frame, area: Rect, state: &AppState) {
         draw_pane(
             frame,
             left,
-            "FINAL SATELLITE FRAME",
+            pane_title("FINAL SATELLITE FRAME", focused == PaneId::FinalFrame),
             satellite_lines(&op.current),
         );
-        draw_after_action_report_pane(frame, right, &op, scroll);
-    } else if state.focused_pane(View::AfterAction) == PaneId::Report {
+        draw_after_action_report_pane(frame, right, &op, scroll, focused == PaneId::Report);
+    } else if focused == PaneId::Report {
         // The report pane carries hierarchy items 1-4 (outcome, trigger,
         // meaning, completion) that the player must see before anything
         // else, for every finished operation — not just a synchronous load
@@ -802,12 +817,12 @@ fn draw_after_action(frame: &mut Frame, area: Rect, state: &AppState) {
         // fresh terminal outcome, so this direct comparison is sufficient
         // to keep the report primary without any extra "defaults to report"
         // bookkeeping here.
-        draw_after_action_report_pane(frame, area, &op, scroll);
+        draw_after_action_report_pane(frame, area, &op, scroll, true);
     } else {
         draw_pane(
             frame,
             area,
-            "FINAL SATELLITE FRAME",
+            pane_title("FINAL SATELLITE FRAME", true),
             satellite_lines(&op.current),
         );
     }
@@ -828,11 +843,12 @@ fn draw_after_action_report_pane(
     area: Rect,
     op: &OperationView<'_>,
     scroll: u16,
+    focused: bool,
 ) {
     let lines = after_action_report_lines(op);
     let block = Block::default()
         .borders(Borders::ALL)
-        .title("AFTER-ACTION REPORT");
+        .title(pane_title("AFTER-ACTION REPORT", focused));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -1310,7 +1326,18 @@ fn view_title(view: View) -> &'static str {
     }
 }
 
-fn draw_pane(frame: &mut Frame, area: Rect, title: &'static str, lines: Vec<Line<'static>>) {
+/// Prefixes `base` with the non-color focus marker when `focused` is true,
+/// so the focused pane's title is identifiable without relying on color
+/// (`docs/TUI_DESIGN.md`, "Non-color focus cue").
+fn pane_title(base: &str, focused: bool) -> String {
+    if focused {
+        format!("> {base}")
+    } else {
+        base.to_string()
+    }
+}
+
+fn draw_pane(frame: &mut Frame, area: Rect, title: String, lines: Vec<Line<'static>>) {
     let block = Block::default().borders(Borders::ALL).title(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1326,7 +1353,7 @@ fn draw_pane(frame: &mut Frame, area: Rect, title: &'static str, lines: Vec<Line
 fn draw_pane_with_pinned_action(
     frame: &mut Frame,
     area: Rect,
-    title: &'static str,
+    title: String,
     lines: Vec<Line<'static>>,
     action: &'static str,
 ) {
@@ -1342,31 +1369,43 @@ fn draw_pane_with_pinned_action(
 
 fn draw_signals(frame: &mut Frame, area: Rect, state: &AppState) {
     let signal = &authored_signals()[state.selected_signal()];
+    let focused = state.focused_pane(View::Signals);
 
     if area.width >= TWO_PANE_MIN_COLUMNS {
         let [left, right] =
             Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
                 .areas(area);
-        draw_pane(frame, left, "SIGNALS", signal_list_lines(state));
-        draw_signal_detail_pane(frame, right, signal);
-    } else if state.focused_pane(View::Signals) == PaneId::SelectedSignal {
-        draw_signal_detail_pane(frame, area, signal);
+        draw_pane(
+            frame,
+            left,
+            pane_title("SIGNALS", focused == PaneId::SignalsList),
+            signal_list_lines(state),
+        );
+        draw_signal_detail_pane(frame, right, signal, focused == PaneId::SelectedSignal);
+    } else if focused == PaneId::SelectedSignal {
+        draw_signal_detail_pane(frame, area, signal, true);
     } else {
-        draw_pane(frame, area, "SIGNALS", signal_list_lines(state));
+        draw_pane(
+            frame,
+            area,
+            pane_title("SIGNALS", true),
+            signal_list_lines(state),
+        );
     }
 }
 
-fn draw_signal_detail_pane(frame: &mut Frame, area: Rect, signal: &Signal) {
+fn draw_signal_detail_pane(frame: &mut Frame, area: Rect, signal: &Signal, focused: bool) {
+    let title = pane_title("SELECTED SIGNAL", focused);
     if signal.is_actionable() {
         draw_pane_with_pinned_action(
             frame,
             area,
-            "SELECTED SIGNAL",
+            title,
             signal_detail_lines(signal),
             "Enter  inspect opportunity",
         );
     } else {
-        draw_pane(frame, area, "SELECTED SIGNAL", signal_detail_lines(signal));
+        draw_pane(frame, area, title, signal_detail_lines(signal));
     }
 }
 
@@ -1423,6 +1462,7 @@ fn signal_detail_lines(signal: &Signal) -> Vec<Line<'static>> {
 
 fn draw_target(frame: &mut Frame, area: Rect, state: &AppState) {
     let dossier = first_contact_dossier();
+    let focused = state.focused_pane(View::Target);
 
     if area.width >= TWO_PANE_MIN_COLUMNS {
         let [left, right] =
@@ -1431,22 +1471,22 @@ fn draw_target(frame: &mut Frame, area: Rect, state: &AppState) {
         draw_pane_with_pinned_action(
             frame,
             left,
-            "TARGET INTELLIGENCE",
+            pane_title("TARGET INTELLIGENCE", focused == PaneId::TargetIntelligence),
             target_intel_lines(&dossier),
             "Enter  work this opportunity",
         );
         draw_pane_with_pinned_action(
             frame,
             right,
-            "PROVENANCE / ACCESS",
+            pane_title("PROVENANCE / ACCESS", focused == PaneId::Provenance),
             target_provenance_lines(&dossier),
             "Esc  back to signals",
         );
-    } else if state.focused_pane(View::Target) == PaneId::Provenance {
+    } else if focused == PaneId::Provenance {
         draw_pane_with_pinned_action(
             frame,
             area,
-            "PROVENANCE / ACCESS",
+            pane_title("PROVENANCE / ACCESS", true),
             target_provenance_lines(&dossier),
             "Esc  back to signals",
         );
@@ -1454,7 +1494,7 @@ fn draw_target(frame: &mut Frame, area: Rect, state: &AppState) {
         draw_pane_with_pinned_action(
             frame,
             area,
-            "TARGET INTELLIGENCE",
+            pane_title("TARGET INTELLIGENCE", true),
             target_intel_lines(&dossier),
             "Enter  work this opportunity",
         );
@@ -2204,12 +2244,32 @@ mod tests {
     }
 
     #[test]
+    fn help_title_never_carries_the_focus_marker() {
+        use super::super::state::Msg;
+
+        // Help has exactly one `PaneId` and `F8` is a no-op there
+        // (`AppState::focus_next_pane` skips single-pane views), so
+        // marking its title would imply a movable focus that doesn't
+        // exist.
+        let mut state = AppState::new();
+        state.apply(Msg::OpenHelp);
+        state.apply(Msg::FocusNextPane);
+
+        for (width, height) in [(MIN_COLUMNS, MIN_ROWS), (120, 40)] {
+            let terminal = render(width, height, &state);
+            assert!(buffer_contains(&terminal, "HELP"));
+            assert!(!buffer_contains(&terminal, "> HELP"));
+        }
+    }
+
+    #[test]
     fn narrow_signals_view_shows_one_pane_until_f8_moves_focus() {
         let state = AppState::new();
         let terminal = render(90, 30, &state);
 
         assert!(buffer_contains(&terminal, "SIGNALS"));
         assert!(!buffer_contains(&terminal, "SELECTED SIGNAL"));
+        assert!(buffer_contains(&terminal, "> SIGNALS"));
     }
 
     #[test]
@@ -2221,6 +2281,7 @@ mod tests {
         let terminal = render(90, 30, &state);
 
         assert!(buffer_contains(&terminal, "SELECTED SIGNAL"));
+        assert!(buffer_contains(&terminal, "> SELECTED SIGNAL"));
     }
 
     #[test]
@@ -2239,9 +2300,12 @@ mod tests {
         let wide = render(120, 40, &state);
         assert!(buffer_contains(&wide, "SIGNALS"));
         assert!(buffer_contains(&wide, "SELECTED SIGNAL"));
+        assert!(buffer_contains(&wide, "> SELECTED SIGNAL"));
+        assert!(!buffer_contains(&wide, "> SIGNALS"));
 
         let narrow = render(90, 30, &state);
         assert!(buffer_contains(&narrow, "SELECTED SIGNAL"));
+        assert!(buffer_contains(&narrow, "> SELECTED SIGNAL"));
         assert!(!buffer_contains(&narrow, "> 11:42"));
 
         let wide_again = render(120, 40, &state);
@@ -2275,6 +2339,35 @@ mod tests {
 
         assert!(buffer_contains(&terminal, "work this opportunity"));
         assert!(buffer_contains(&terminal, "back to signals"));
+    }
+
+    #[test]
+    fn target_focus_marker_moves_between_panes_and_survives_a_resize() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        assert_eq!(state.focused_pane(View::Target), PaneId::TargetIntelligence);
+
+        let wide = render(120, 40, &state);
+        assert!(buffer_contains(&wide, "> TARGET INTELLIGENCE"));
+        assert!(!buffer_contains(&wide, "> PROVENANCE / ACCESS"));
+
+        state.apply(Msg::FocusNextPane);
+        assert_eq!(state.focused_pane(View::Target), PaneId::Provenance);
+
+        let wide = render(120, 40, &state);
+        assert!(buffer_contains(&wide, "> PROVENANCE / ACCESS"));
+        assert!(!buffer_contains(&wide, "> TARGET INTELLIGENCE"));
+
+        let narrow = render(90, 30, &state);
+        assert!(buffer_contains(&narrow, "PROVENANCE / ACCESS"));
+        assert!(buffer_contains(&narrow, "> PROVENANCE / ACCESS"));
+        assert!(!buffer_contains(&narrow, "TARGET INTELLIGENCE"));
+
+        let wide_again = render(120, 40, &state);
+        assert!(buffer_contains(&wide_again, "> PROVENANCE / ACCESS"));
+        assert_eq!(state.focused_pane(View::Target), PaneId::Provenance);
     }
 
     #[test]
@@ -2662,9 +2755,12 @@ mod tests {
         let wide = render(120, 40, &state);
         assert!(buffer_contains(&wide, "CAPTURED CONTROLLER"));
         assert!(buffer_contains(&wide, "LUA FIELD REFERENCE"));
+        assert!(buffer_contains(&wide, "> LUA FIELD REFERENCE"));
+        assert!(!buffer_contains(&wide, "> CAPTURED CONTROLLER"));
 
         let narrow = render(90, 30, &state);
         assert!(buffer_contains(&narrow, "LUA FIELD REFERENCE"));
+        assert!(buffer_contains(&narrow, "> LUA FIELD REFERENCE"));
         assert!(!buffer_contains(&narrow, "CAPTURED CONTROLLER"));
 
         let wide_again = render(120, 40, &state);
@@ -2674,6 +2770,68 @@ mod tests {
             state.focused_pane(View::Controller),
             PaneId::LuaFieldReference
         );
+    }
+
+    #[test]
+    fn typed_input_only_reaches_the_pane_the_visible_marker_identifies() {
+        use super::super::event;
+        use super::super::state::Msg;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let key = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE);
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.apply(Msg::FocusNextPane); // move focus to the Lua reference pane
+        assert_eq!(
+            state.focused_pane(View::Controller),
+            PaneId::LuaFieldReference
+        );
+
+        // The narrow render shows exactly the reference pane, marked
+        // focused — and typing must not reach the (currently hidden)
+        // source, matching `event::map`'s pane-local routing.
+        let narrow = render(90, 30, &state);
+        assert!(buffer_contains(&narrow, "> LUA FIELD REFERENCE"));
+
+        let msg = event::map(
+            key,
+            state.current_view(),
+            state.reset_confirmation_pending(),
+            state.quit_confirmation_pending(),
+            state.redeploy_confirmation_pending(),
+            state.focused_pane(View::Controller),
+        );
+        assert_eq!(msg, None);
+
+        // Once focus (and so the visible marker) moves back to the source
+        // pane, the same key is routed there.
+        state.apply(Msg::FocusNextPane);
+        assert_eq!(
+            state.focused_pane(View::Controller),
+            PaneId::ControllerSource
+        );
+        let narrow = render(90, 30, &state);
+        assert!(buffer_contains(&narrow, "> CAPTURED CONTROLLER"));
+
+        let msg = event::map(
+            key,
+            state.current_view(),
+            state.reset_confirmation_pending(),
+            state.quit_confirmation_pending(),
+            state.redeploy_confirmation_pending(),
+            state.focused_pane(View::Controller),
+        );
+        assert_eq!(
+            msg,
+            Some(Msg::EditController(super::super::editor::EditOp::Insert(
+                'z'
+            )))
+        );
+        state.apply(msg.unwrap());
+        let narrow = render(90, 30, &state);
+        assert!(buffer_contains(&narrow, "z"));
     }
 
     #[test]
@@ -3096,9 +3254,12 @@ mod tests {
         let wide = render(120, 40, &state);
         assert!(buffer_contains(&wide, "AFTER-ACTION REPORT"));
         assert!(buffer_contains(&wide, "FINAL SATELLITE FRAME"));
+        assert!(buffer_contains(&wide, "> FINAL SATELLITE FRAME"));
+        assert!(!buffer_contains(&wide, "> AFTER-ACTION REPORT"));
 
         let narrow = render(90, 30, &state);
         assert!(buffer_contains(&narrow, "FINAL SATELLITE FRAME"));
+        assert!(buffer_contains(&narrow, "> FINAL SATELLITE FRAME"));
         assert!(!buffer_contains(&narrow, "AFTER-ACTION REPORT"));
 
         let wide_again = render(120, 40, &state);
@@ -3492,11 +3653,13 @@ mod tests {
         let terminal = render(90, 30, &state);
         assert!(buffer_contains(&terminal, "COMPROMISED SATELLITE FEED"));
         assert!(!buffer_contains(&terminal, "OPERATION TELEMETRY"));
+        assert!(buffer_contains(&terminal, "> COMPROMISED SATELLITE FEED"));
 
         state.apply(Msg::FocusNextPane);
         let terminal = render(90, 30, &state);
         assert!(buffer_contains(&terminal, "OPERATION TELEMETRY"));
         assert!(!buffer_contains(&terminal, "COMPROMISED SATELLITE FEED"));
+        assert!(buffer_contains(&terminal, "> OPERATION TELEMETRY"));
     }
 
     #[test]
@@ -3510,9 +3673,12 @@ mod tests {
         let wide = render(120, 40, &state);
         assert!(buffer_contains(&wide, "COMPROMISED SATELLITE FEED"));
         assert!(buffer_contains(&wide, "OPERATION TELEMETRY"));
+        assert!(buffer_contains(&wide, "> OPERATION TELEMETRY"));
+        assert!(!buffer_contains(&wide, "> COMPROMISED SATELLITE FEED"));
 
         let narrow = render(90, 30, &state);
         assert!(buffer_contains(&narrow, "OPERATION TELEMETRY"));
+        assert!(buffer_contains(&narrow, "> OPERATION TELEMETRY"));
         assert!(!buffer_contains(&narrow, "COMPROMISED SATELLITE FEED"));
 
         let wide_again = render(120, 40, &state);
