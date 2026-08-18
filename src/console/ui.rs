@@ -779,7 +779,7 @@ fn draw_after_action(frame: &mut Frame, area: Rect, state: &AppState) {
         return;
     };
 
-    let scroll = state.scroll_offset(View::AfterAction);
+    let scroll = state.scroll_offset(PaneId::Report);
 
     if area.width >= TWO_PANE_MIN_COLUMNS {
         let [left, right] =
@@ -817,8 +817,8 @@ fn draw_after_action(frame: &mut Frame, area: Rect, state: &AppState) {
 /// fixed last row on failure so a long diagnostic or deployed-source excerpt
 /// filling [`MAX_DETAIL_LINES`] can never push it off the bottom of the
 /// pane at the console's supported minimum geometry, and scrolling its
-/// content by `scroll` rows (`View::AfterAction`'s entry in
-/// `event::view_is_scrollable`, #76/#77) so the success report's outcome
+/// content by `scroll` rows (`PaneId::Report`'s entry in
+/// `event::scroll_focus_matches`, #76/#77) so the success report's outcome
 /// hierarchy spacing can't be clipped there either. Built inline rather
 /// than through `draw_pane`/`draw_pane_with_pinned_action`, matching
 /// `draw_help`'s own scroll-aware rendering, since neither shared helper
@@ -1610,7 +1610,7 @@ fn draw_help(frame: &mut Frame, area: Rect, state: &AppState) {
     // or a caller that renders without going through that event loop).
     let content_rows = wrapped_row_count(&lines, inner.width);
     let max_scroll = content_rows.saturating_sub(inner.height as usize) as u16;
-    let scroll = state.scroll_offset(View::Help).min(max_scroll);
+    let scroll = state.scroll_offset(PaneId::Help).min(max_scroll);
 
     let paragraph = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
