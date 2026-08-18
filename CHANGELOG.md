@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/slaptijack/human-exception/compare/v0.3.0...v0.4.0) - 2026-08-18
+
+### Added
+
+- render a non-color focus marker on the active pane's title ([#103](https://github.com/slaptijack/human-exception/pull/103))
+- key scroll state and clamping by pane identity ([#102](https://github.com/slaptijack/human-exception/pull/102))
+- route pane-local input through focused panes ([#101](https://github.com/slaptijack/human-exception/pull/101))
+- make F8 move focus and drive responsive pane visibility ([#100](https://github.com/slaptijack/human-exception/pull/100))
+- model semantic pane identity and per-view focus ([#99](https://github.com/slaptijack/human-exception/pull/99))
+
+### Fixed
+
+- [**breaking**] restrict console module to its console::run entry point ([#108](https://github.com/slaptijack/human-exception/pull/108))
+- keep focus affordances inert on single-content console surfaces ([#105](https://github.com/slaptijack/human-exception/pull/105))
+
+### Other
+
+- codify interaction-state and public-API review guidance ([#110](https://github.com/slaptijack/human-exception/pull/110))
+- define the console pane-focus interaction contract ([#98](https://github.com/slaptijack/human-exception/pull/98))
+
 ## [0.3.0](https://github.com/slaptijack/human-exception/compare/v0.2.0...v0.3.0) - 2026-08-17
 
 ### Added
