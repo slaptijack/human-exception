@@ -83,7 +83,7 @@ Function keys are intentional because they remain available while editing Lua an
 
 `F3`, `F4`, `F5`, and `F6` may be unavailable until their prerequisite state exists. Unavailable actions should be visibly disabled rather than silently ignored.
 
-Some views bind additional local keys beyond this global set. `F7` resets the controller in Controller. `F8` toggles primary/secondary content in narrow layouts. These are documented with the views they apply to.
+Some views bind additional local keys beyond this global set. `F7` resets the controller in Controller. `F8` moves focus to the next pane in the current view at any supported width — see [Pane focus](#pane-focus). These are documented with the views they apply to.
 
 ### Navigation while a deployment is active
 
@@ -105,6 +105,115 @@ Controller source is session-only in this epic, so modified source must not be d
 - If the controller is modified, `Ctrl+Q` opens a confirmation that explicitly states the edits will be lost because cross-launch persistence is not implemented.
 - If a run is active, the same confirmation also states that the active run will be abandoned.
 - Confirming exits and restores terminal state; cancelling returns to the prior view without changing source or simulation state.
+
+## Pane focus
+
+Every multi-pane view has exactly one focused pane at a time. This section is
+the interaction contract for that focus: which panes exist, which is focused by
+default, how `F8` moves between them, how focus interacts with other input, and
+how it persists. It governs *player-visible behavior only* — it does not
+prescribe a `PaneId` enum, a widget registry, a trait hierarchy, or any other
+implementation mechanism. That is left to #82 and later issues.
+
+### Panes per view
+
+Each current view has one or two named panes:
+
+| View | Panes |
+| --- | --- |
+| Help | Help |
+| Signals | Signals list, Selected signal |
+| Target | Target intelligence, Provenance/access |
+| Controller | Controller source, Lua field reference |
+| Operation | Satellite feed, Operation telemetry |
+| After Action | Report, Final satellite frame |
+
+No current view has more than two panes.
+
+### Default focus
+
+| View | Default focused pane |
+| --- | --- |
+| Help | Help |
+| Signals | Signals list |
+| Target | Target intelligence |
+| Controller | Controller source |
+| Operation | Satellite feed |
+| After Action | Report |
+
+### F8 — next pane
+
+`F8` moves focus to the next pane in the current view, consistently at both
+wide (100+ column) and narrow (80–99 column) widths. In Help, which has a
+single pane, `F8` is inert.
+
+At 100+ columns both panes of a view remain visible (§ [Responsive
+behavior](#responsive-behavior)); `F8` only moves which one is focused. At
+80–99 columns only the focused pane renders, so `F8` is what changes which
+pane the player sees. This is one behavior, not two — F8 always means "move
+focus," and visibility at narrow widths is a rendering consequence of focus,
+not a separate toggle.
+
+### Input priority
+
+Input is resolved in this order:
+
+1. **Global safety/modal controls** — quit confirmation, controller-reset
+   confirmation, deployment-replace confirmation.
+2. **Global and view-level commands** — `F1`–`F7`, and view-level bindings such
+   as Target's `Enter`/`Esc` or Operation's `Space`/`Enter`.
+3. **Focus movement** — `F8`.
+4. **Focused-pane input** — input that only the currently focused pane
+   interprets.
+
+A modal confirmation is never hidden behind an unfocused pane at any width; if
+Controller source is modified, the reset confirmation triggered by `F7` remains
+visible regardless of which pane is currently focused or visible.
+
+### Non-color focus cue
+
+The focused pane's title carries a non-color marker (for example, a leading
+`>`) so focus is identifiable without relying on color. Bold or color styling
+may reinforce the cue but must never be the only way to identify it. The exact
+glyph and styling are a rendering concern for a later issue; this contract only
+requires that some non-color cue exists and identifies exactly one pane per
+view.
+
+### Focus persistence
+
+- Focus is remembered independently per view. Leaving a view and returning
+  restores that view's last focused pane.
+- Opening Help (`F1`) and dismissing it never changes the underlying view's
+  remembered focus.
+- Resizing between wide and narrow never leaves focus pointing at a pane that
+  is no longer visible — the already-focused pane is what narrow mode shows,
+  and both panes reappear on returning to wide without changing focus.
+- A fresh After Action result always focuses the Report pane, regardless of
+  what was focused the last time After Action was visited, so the outcome
+  hierarchy (§5) remains primary at 80×24 without requiring `F8`.
+
+### Read-only panes and unsupported input
+
+A pane with no pane-local input today (Target's two panes, Operation's
+satellite feed) may still be focused: focus also governs narrow-layout
+visibility, so a read-only pane must remain reachable. Pressing a key with no
+pane-local meaning in the focused pane stays inert. This contract does not
+manufacture new pane-local interactions merely so that every pane has
+something to do.
+
+### Pane-local vs. view-level input today
+
+| View | Pane-local input | View-level input |
+| --- | --- | --- |
+| Help | Up/Down scroll (its one pane) | — |
+| Signals | Up/Down select, Enter activate (Signals list); none (Selected signal) | — |
+| Target | none | Enter (work opportunity), Esc (back) |
+| Controller | Editing, cursor movement, typed text, paste (Controller source); none (Lua field reference) | Ctrl+V validate, F6 deploy, F7 reset |
+| Operation | none (either pane) | Space (pause/resume), Enter (step) |
+| After Action | Up/Down scroll (Report); none (Final satellite frame) | F2, F4, F5, F6 |
+
+This table is a description of existing behavior, not a change to it. It exists
+so implementation issues know, for each key, whether focus should gate it.
 
 ## Persistent frame
 
@@ -298,7 +407,7 @@ The editor owns most of the screen. API help is secondary.
 
 Product requirements:
 
-- the editor is focused when this view opens;
+- Controller source is the default focused pane the first time this view opens for a working set; returning to Controller later restores whichever pane was last focused there, per [Pane focus](#pane-focus);
 - line numbers are visible but not part of the source;
 - source survives navigation between views;
 - modified state is visible in the persistent header;
@@ -561,7 +670,8 @@ Use the two-pane compositions shown above.
 
 ### 80–99 columns
 
-Use one primary pane. Secondary information becomes a toggled subview:
+Only the focused pane renders (see [Pane focus](#pane-focus)); the other becomes
+reachable by moving focus rather than by compressing both into view:
 
 - Signals ↔ selected-signal detail;
 - Target intelligence ↔ provenance/access;
@@ -569,9 +679,18 @@ Use one primary pane. Secondary information becomes a toggled subview:
 - Satellite feed ↔ telemetry;
 - final satellite frame ↔ after-action report.
 
-`F8` toggles the primary and secondary subview at 80–99 columns. This binding is global only in narrow-layout mode and is shown in the footer. It remains safe in Controller because it does not insert a normal text character into Lua source.
+`F8` moves focus to the other pane and is shown in the footer at this width. It
+remains safe in Controller because it does not insert a normal text character
+into Lua source.
 
-For After Action specifically, the report subview defaults to primary: at 80–99 columns, including the 80×24 minimum, the player sees outcome, trigger, meaning, and completion (hierarchy items 1–4) immediately, without needing `F8` to discover whether they succeeded or what that meant. The `F8` toggle only trades which pane is primary; it never reorders the outcome hierarchy (§5) itself, so evidence, next actions, and availability keep the same relative priority within the report pane regardless of which pane is showing.
+For After Action specifically, the Report pane is focused by default (§ [Pane
+focus](#pane-focus)): at 80–99 columns, including the 80×24 minimum, the player
+sees outcome, trigger, meaning, and completion (hierarchy items 1–4)
+immediately, without needing `F8` to discover whether they succeeded or what
+that meant. Moving focus only trades which pane is visible; it never reorders
+the outcome hierarchy (§5) itself, so evidence, next actions, and availability
+keep the same relative priority within the report pane regardless of which
+pane is showing.
 
 ### Below 80 columns or 24 rows
 
