@@ -1646,13 +1646,14 @@ pub(crate) fn after_action_max_scroll(
 }
 
 fn draw_help(frame: &mut Frame, area: Rect, state: &AppState) {
-    // Help has exactly one `PaneId`, so it is always the view's focused
-    // pane (`AppState::focused_pane` and `View::default_pane` agree, and
-    // `F8` is a no-op here) — the marker always shows, same as any other
-    // view's single genuinely-focused pane.
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(pane_title(view_title(View::Help), true));
+    // Help has exactly one `PaneId` and `F8` is a no-op here, so
+    // `focus_movement_available` is always `false` for it — the marker
+    // never shows, matching the product decision that Help not imply a
+    // focus choice that doesn't exist.
+    let block = Block::default().borders(Borders::ALL).title(pane_title(
+        view_title(View::Help),
+        state.focus_movement_available(View::Help),
+    ));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -2121,11 +2122,11 @@ fn footer_line_width(labels: &[(&'static str, bool)]) -> usize {
 fn draw_footer(frame: &mut Frame, area: Rect, state: &AppState) {
     // `F8` moves focus at every supported width, not just when it also
     // changes what's visible (`docs/TUI_DESIGN.md`, "F8 -- next pane"), so
-    // the hint shows in the same five views regardless of frame width.
-    let show_f8 = matches!(
-        state.current_view(),
-        View::Signals | View::Target | View::Controller | View::Operation | View::AfterAction
-    );
+    // the hint shows regardless of frame width — but only when the
+    // currently rendered surface actually presents a multi-pane choice
+    // (`AppState::focus_movement_available` is also what gates `F8` itself
+    // in `event::map`, so the hint and the key can't disagree).
+    let show_f8 = state.focus_movement_available(state.current_view());
     let items = footer_hint_items(state, show_f8);
     let inner_width = area.width.saturating_sub(2) as usize;
 
@@ -2257,21 +2258,21 @@ mod tests {
     }
 
     #[test]
-    fn help_title_always_carries_the_focus_marker() {
+    fn help_title_never_carries_the_focus_marker() {
         use super::super::state::Msg;
 
-        // Help has exactly one `PaneId`, so it is always the view's
-        // focused pane (`F8` is a no-op there, per
-        // `AppState::focus_next_pane` skipping single-pane views) — the
-        // marker identifies it the same as any other view's sole
-        // genuinely-focused pane.
+        // Help has exactly one pane and was never meant to imply a focus
+        // choice that doesn't exist (`F8` is already a no-op there, per
+        // `AppState::focus_movement_available`) — the title renders bare,
+        // never `> HELP`.
         let mut state = AppState::new();
         state.apply(Msg::OpenHelp);
         state.apply(Msg::FocusNextPane);
 
         for (width, height) in [(MIN_COLUMNS, MIN_ROWS), (120, 40)] {
             let terminal = render(width, height, &state);
-            assert!(buffer_contains(&terminal, "> HELP"));
+            assert!(buffer_contains(&terminal, "HELP"));
+            assert!(!buffer_contains(&terminal, "> HELP"));
         }
     }
 
@@ -2772,6 +2773,26 @@ mod tests {
     }
 
     #[test]
+    fn reset_confirmation_hides_the_f8_hint_at_wide_and_narrow_widths() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.apply(Msg::EditController(super::super::editor::EditOp::Insert(
+            'x',
+        )));
+        state.apply(Msg::RequestResetController);
+        assert!(state.reset_confirmation_pending());
+
+        for (width, height) in [(120, 40), (90, 30)] {
+            let terminal = render(width, height, &state);
+            assert!(!buffer_contains(&terminal, "F8 Next Pane"));
+            assert!(!buffer_contains(&terminal, "F8 Pane"));
+        }
+    }
+
+    #[test]
     fn controller_focus_survives_a_wide_to_narrow_to_wide_resize() {
         use super::super::state::Msg;
 
@@ -2830,6 +2851,7 @@ mod tests {
             state.quit_confirmation_pending(),
             state.redeploy_confirmation_pending(),
             state.focused_pane(View::Controller),
+            state.focus_movement_available(state.current_view()),
         );
         assert_eq!(msg, None);
 
@@ -2850,6 +2872,7 @@ mod tests {
             state.quit_confirmation_pending(),
             state.redeploy_confirmation_pending(),
             state.focused_pane(View::Controller),
+            state.focus_movement_available(state.current_view()),
         );
         assert_eq!(
             msg,
@@ -3131,6 +3154,67 @@ mod tests {
         let terminal = render(120, 40, &state);
 
         assert!(buffer_contains(&terminal, "No operation is deployed yet."));
+    }
+
+    #[test]
+    fn operation_placeholder_shows_no_marker_and_no_f8_hint() {
+        let state = working_state();
+
+        for (width, height) in [(MIN_COLUMNS, MIN_ROWS), (120, 40)] {
+            let terminal = render(width, height, &state);
+            assert!(!buffer_contains(&terminal, ">"));
+            assert!(!buffer_contains(&terminal, "F8 Next Pane"));
+            assert!(!buffer_contains(&terminal, "F8 Pane"));
+        }
+    }
+
+    #[test]
+    fn f8_does_not_move_remembered_operation_focus_from_the_placeholder() {
+        use super::super::state::Msg;
+
+        let mut state = working_state();
+        state.apply(Msg::FocusNextPane);
+        state.apply(Msg::RequestDeploy);
+
+        // A stray F8 press on the undeployed placeholder must not have
+        // corrupted the remembered focus: the first real deployment still
+        // opens on the documented default (the satellite feed).
+        let terminal = render(120, 40, &state);
+        assert!(buffer_contains(&terminal, "> COMPROMISED SATELLITE FEED"));
+    }
+
+    #[test]
+    fn after_action_placeholder_shows_no_marker_and_no_f8_hint() {
+        use super::super::state::Msg;
+
+        let mut state = working_state();
+        state.apply(Msg::Navigate(View::AfterAction));
+
+        for (width, height) in [(MIN_COLUMNS, MIN_ROWS), (120, 40)] {
+            let terminal = render(width, height, &state);
+            assert!(buffer_contains(
+                &terminal,
+                "No operation has concluded yet."
+            ));
+            assert!(!buffer_contains(&terminal, ">"));
+            assert!(!buffer_contains(&terminal, "F8 Next Pane"));
+            assert!(!buffer_contains(&terminal, "F8 Pane"));
+        }
+    }
+
+    #[test]
+    fn f8_does_not_move_hidden_after_action_focus_from_the_placeholder() {
+        use super::super::state::Msg;
+
+        let mut state = working_state();
+        state.apply(Msg::Navigate(View::AfterAction));
+        state.apply(Msg::FocusNextPane);
+
+        assert_eq!(
+            state.focused_pane(View::AfterAction),
+            PaneId::Report,
+            "F8 must stay inert on the no-conclusion placeholder"
+        );
     }
 
     #[test]
@@ -3670,6 +3754,8 @@ mod tests {
             &terminal,
             "Enter / y  confirm and redeploy"
         ));
+        assert!(!buffer_contains(&terminal, "F8 Next Pane"));
+        assert!(!buffer_contains(&terminal, "F8 Pane"));
     }
 
     #[test]

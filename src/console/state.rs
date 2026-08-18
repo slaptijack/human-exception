@@ -563,15 +563,42 @@ impl AppState {
         self.focused_panes.insert(view, pane);
     }
 
+    /// Whether `view`, as currently rendered, presents a real choice between
+    /// multiple focusable panes — i.e. whether a focus marker, the `F8`
+    /// footer hint, and `F8` itself should do anything right now. The single
+    /// source of truth so the marker, the footer, and `F8`'s own routing
+    /// can't disagree (`docs/TUI_DESIGN.md`, "F8 -- next pane").
+    ///
+    /// Operation and After Action share one underlying deployment: both are
+    /// single-pane placeholders ("no operation deployed yet" /
+    /// "no operation has concluded yet") until `self.operation` exists, the
+    /// same condition their own placeholder rendering branches on.
+    pub fn focus_movement_available(&self, view: View) -> bool {
+        if self.quit_confirmation_pending
+            || self.reset_confirmation_pending
+            || self.redeploy_confirmation_pending
+        {
+            return false;
+        }
+        match view {
+            View::Help => false,
+            View::Operation | View::AfterAction => self.operation.is_some(),
+            View::Signals | View::Target | View::Controller => true,
+        }
+    }
+
     /// Moves focus to the next pane in the current view, wrapping around. A
-    /// no-op in single-pane views (Help), matching `F8`'s documented inert
-    /// behavior there (`docs/TUI_DESIGN.md`, "F8 -- next pane").
+    /// no-op whenever [`AppState::focus_movement_available`] says the
+    /// currently rendered surface doesn't present a real multi-pane choice
+    /// (Help, or an Operation/After Action placeholder), matching `F8`'s
+    /// documented inert behavior there (`docs/TUI_DESIGN.md`, "F8 -- next
+    /// pane").
     fn focus_next_pane(&mut self) {
         let view = self.current_view;
-        let panes = view.panes();
-        if panes.len() < 2 {
+        if !self.focus_movement_available(view) {
             return;
         }
+        let panes = view.panes();
         let current = self.focused_pane(view);
         let idx = panes
             .iter()
@@ -1338,6 +1365,81 @@ mod tests {
         state.apply(Msg::Navigate(View::Signals));
 
         assert_eq!(state.focused_pane(View::Signals), PaneId::SelectedSignal);
+    }
+
+    #[test]
+    fn focus_movement_available_is_false_only_for_help() {
+        let state = AppState::new();
+        assert!(!state.focus_movement_available(View::Help));
+        assert!(state.focus_movement_available(View::Signals));
+        assert!(state.focus_movement_available(View::Target));
+        assert!(state.focus_movement_available(View::Controller));
+    }
+
+    #[test]
+    fn focus_movement_available_is_false_for_operation_and_after_action_before_any_deploy() {
+        let state = AppState::new();
+        assert!(!state.focus_movement_available(View::Operation));
+        assert!(!state.focus_movement_available(View::AfterAction));
+    }
+
+    #[test]
+    fn focus_movement_available_is_true_for_operation_and_after_action_once_deployed() {
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.apply(Msg::RequestDeploy);
+
+        assert!(state.focus_movement_available(View::Operation));
+        assert!(state.focus_movement_available(View::AfterAction));
+    }
+
+    #[test]
+    fn focus_movement_available_is_false_while_reset_confirmation_is_pending() {
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.apply(Msg::EditController(EditOp::Insert('x')));
+
+        state.apply(Msg::RequestResetController);
+        assert!(!state.focus_movement_available(View::Controller));
+    }
+
+    #[test]
+    fn focus_movement_available_is_false_while_quit_confirmation_is_pending() {
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.apply(Msg::EditController(EditOp::Insert('x')));
+
+        state.apply(Msg::RequestQuit);
+        assert!(!state.focus_movement_available(View::Signals));
+    }
+
+    #[test]
+    fn focus_movement_available_is_false_while_redeploy_confirmation_is_pending() {
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+
+        state.apply(Msg::RequestDeploy);
+        state.apply(Msg::RequestDeploy); // an active run already exists: pending confirmation
+        assert!(!state.focus_movement_available(View::Operation));
+    }
+
+    #[test]
+    fn f8_on_the_undeployed_operation_placeholder_does_not_disturb_the_first_deployments_focus() {
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.apply(Msg::Navigate(View::Operation));
+
+        // A stray F8 press before anything is deployed must stay inert.
+        state.apply(Msg::FocusNextPane);
+        assert_eq!(state.focused_pane(View::Operation), PaneId::Satellite);
+
+        state.apply(Msg::RequestDeploy);
+        assert_eq!(state.focused_pane(View::Operation), PaneId::Satellite);
     }
 
     #[test]

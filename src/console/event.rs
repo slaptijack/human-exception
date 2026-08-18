@@ -24,11 +24,12 @@ fn scroll_focus_matches(view: View, focused_pane: PaneId) -> bool {
 /// Maps a key event to a player intent, given the view currently showing
 /// (several keys are context-sensitive: `F1`/`Esc` need to know whether
 /// Help is open, `Esc`/arrows/`Enter` behave differently in Signals, Target,
-/// and Help), whether any confirmation dialog is currently open, and which
-/// pane is currently focused — pane-local input (Signals selection,
-/// Controller editing, After Action scrolling) is only routed to the pane
-/// that owns it, regardless of what layout width currently has it on
-/// screen.
+/// and Help), whether any confirmation dialog is currently open, which pane
+/// is currently focused — pane-local input (Signals selection, Controller
+/// editing, After Action scrolling) is only routed to the pane that owns
+/// it, regardless of what layout width currently has it on screen — and
+/// whether the currently rendered surface presents a real multi-pane focus
+/// choice (`AppState::focus_movement_available`), which gates `F8`.
 pub fn map(
     key: KeyEvent,
     current_view: View,
@@ -36,6 +37,7 @@ pub fn map(
     quit_confirmation_pending: bool,
     redeploy_confirmation_pending: bool,
     focused_pane: PaneId,
+    focus_movement_available: bool,
 ) -> Option<Msg> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
@@ -75,7 +77,6 @@ pub fn map(
     let help_is_open = current_view == View::Help;
     let controller_is_open = current_view == View::Controller;
     let operation_is_open = current_view == View::Operation;
-    let after_action_is_open = current_view == View::AfterAction;
 
     match key.code {
         KeyCode::F(1) => Some(if help_is_open {
@@ -97,19 +98,14 @@ pub fn map(
         KeyCode::F(6) => Some(Msg::RequestDeploy),
         KeyCode::F(7) if controller_is_open => Some(Msg::RequestResetController),
         // `F8` moves focus to the next pane in every current two-pane view
-        // — Signals/Target/Controller/Operation/AfterAction — at any
-        // supported width (`docs/TUI_DESIGN.md`, "F8 -- next pane"). Help
-        // has only one pane, so `F8` stays inert there rather than mapping
-        // to a message that would be a no-op anyway.
-        KeyCode::F(8)
-            if current_view == View::Signals
-                || current_view == View::Target
-                || controller_is_open
-                || operation_is_open
-                || after_action_is_open =>
-        {
-            Some(Msg::FocusNextPane)
-        }
+        // at any supported width (`docs/TUI_DESIGN.md`, "F8 -- next pane").
+        // `focus_movement_available` is `false` for Help, for the
+        // Operation/After Action placeholders before any deployment
+        // exists, and while a confirmation dialog is pending (though those
+        // are already filtered out above) — in each case `F8` stays inert
+        // rather than mapping to a message that would be a no-op, or worse,
+        // silently move hidden focus.
+        KeyCode::F(8) if focus_movement_available => Some(Msg::FocusNextPane),
         // `Ctrl+V` is the advertised binding — an ordinary control character
         // every terminal sends correctly, so it works everywhere. `Ctrl+Enter`
         // is still accepted here too, on terminals capable of reporting it
@@ -203,10 +199,22 @@ mod tests {
         KeyEvent::new(code, modifiers)
     }
 
-    /// Shorthand for the common case: no confirmation dialog is open and
-    /// `view`'s default pane is focused.
+    /// Shorthand for the common case: no confirmation dialog is open,
+    /// `view`'s default pane is focused, and — matching every view except
+    /// Help having a real multi-pane composition on screen once a
+    /// deployment exists — focus movement is available everywhere but
+    /// Help. Tests that need a single-content Operation/After Action
+    /// placeholder call `map` directly instead.
     fn map_in(key: KeyEvent, view: View) -> Option<Msg> {
-        map(key, view, false, false, false, view.default_pane())
+        map(
+            key,
+            view,
+            false,
+            false,
+            false,
+            view.default_pane(),
+            view != View::Help,
+        )
     }
 
     #[test]
@@ -358,7 +366,8 @@ mod tests {
                 false,
                 false,
                 false,
-                reference_focused
+                reference_focused,
+                true
             ),
             None
         );
@@ -369,7 +378,8 @@ mod tests {
                 false,
                 false,
                 false,
-                reference_focused
+                reference_focused,
+                true
             ),
             None
         );
@@ -380,7 +390,8 @@ mod tests {
                 false,
                 false,
                 false,
-                reference_focused
+                reference_focused,
+                true
             ),
             None
         );
@@ -396,7 +407,8 @@ mod tests {
                 false,
                 false,
                 false,
-                reference_focused
+                reference_focused,
+                true
             ),
             Some(Msg::RequestResetController)
         );
@@ -408,7 +420,8 @@ mod tests {
                 false,
                 false,
                 false,
-                reference_focused
+                reference_focused,
+                true
             ),
             Some(Msg::ValidateController)
         );
@@ -433,6 +446,38 @@ mod tests {
     #[test]
     fn f8_is_inert_outside_signals_target_controller_operation_and_after_action() {
         assert_eq!(map_in(key(KeyCode::F(8)), View::Help), None);
+    }
+
+    #[test]
+    fn f8_is_inert_on_the_operation_placeholder_before_any_deploy() {
+        assert_eq!(
+            map(
+                key(KeyCode::F(8)),
+                View::Operation,
+                false,
+                false,
+                false,
+                View::Operation.default_pane(),
+                false,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn f8_is_inert_on_the_after_action_placeholder_before_any_conclusion() {
+        assert_eq!(
+            map(
+                key(KeyCode::F(8)),
+                View::AfterAction,
+                false,
+                false,
+                false,
+                View::AfterAction.default_pane(),
+                false,
+            ),
+            None
+        );
     }
 
     #[test]
@@ -520,7 +565,8 @@ mod tests {
                 false,
                 false,
                 false,
-                selected_signal_focused
+                selected_signal_focused,
+                true
             ),
             None
         );
@@ -531,7 +577,8 @@ mod tests {
                 false,
                 false,
                 false,
-                selected_signal_focused
+                selected_signal_focused,
+                true
             ),
             None
         );
@@ -542,7 +589,8 @@ mod tests {
                 false,
                 false,
                 false,
-                selected_signal_focused
+                selected_signal_focused,
+                true
             ),
             None
         );
@@ -560,7 +608,8 @@ mod tests {
                 false,
                 false,
                 false,
-                PaneId::Provenance
+                PaneId::Provenance,
+                true
             ),
             Some(Msg::Activate)
         );
@@ -591,7 +640,8 @@ mod tests {
                 false,
                 true,
                 false,
-                PaneId::ControllerSource
+                PaneId::ControllerSource,
+                true
             ),
             Some(Msg::ConfirmQuit)
         );
@@ -602,7 +652,8 @@ mod tests {
                 false,
                 true,
                 false,
-                PaneId::ControllerSource
+                PaneId::ControllerSource,
+                true
             ),
             Some(Msg::ConfirmQuit)
         );
@@ -613,7 +664,8 @@ mod tests {
                 false,
                 true,
                 false,
-                PaneId::ControllerSource
+                PaneId::ControllerSource,
+                true
             ),
             Some(Msg::CancelQuit)
         );
@@ -624,7 +676,8 @@ mod tests {
                 false,
                 true,
                 false,
-                PaneId::ControllerSource
+                PaneId::ControllerSource,
+                true
             ),
             Some(Msg::CancelQuit)
         );
@@ -635,7 +688,8 @@ mod tests {
                 false,
                 true,
                 false,
-                PaneId::ControllerSource
+                PaneId::ControllerSource,
+                true
             ),
             None,
             "ordinary keys must not leak through while the quit dialog is open"
@@ -651,7 +705,8 @@ mod tests {
                 true,
                 false,
                 false,
-                PaneId::ControllerSource
+                PaneId::ControllerSource,
+                true
             ),
             Some(Msg::ConfirmResetController)
         );
@@ -662,7 +717,8 @@ mod tests {
                 true,
                 false,
                 false,
-                PaneId::ControllerSource
+                PaneId::ControllerSource,
+                true
             ),
             Some(Msg::CancelResetController)
         );
@@ -673,7 +729,8 @@ mod tests {
                 true,
                 false,
                 false,
-                PaneId::ControllerSource
+                PaneId::ControllerSource,
+                true
             ),
             None,
             "ordinary keys must not leak through while the reset dialog is open"
@@ -689,7 +746,8 @@ mod tests {
                 false,
                 false,
                 true,
-                PaneId::ControllerSource
+                PaneId::ControllerSource,
+                true
             ),
             Some(Msg::ConfirmDeploy)
         );
@@ -700,7 +758,8 @@ mod tests {
                 false,
                 false,
                 true,
-                PaneId::ControllerSource
+                PaneId::ControllerSource,
+                true
             ),
             Some(Msg::ConfirmDeploy)
         );
@@ -711,7 +770,8 @@ mod tests {
                 false,
                 false,
                 true,
-                PaneId::ControllerSource
+                PaneId::ControllerSource,
+                true
             ),
             Some(Msg::CancelDeploy)
         );
@@ -722,7 +782,8 @@ mod tests {
                 false,
                 false,
                 true,
-                PaneId::ControllerSource
+                PaneId::ControllerSource,
+                true
             ),
             Some(Msg::CancelDeploy)
         );
@@ -733,7 +794,8 @@ mod tests {
                 false,
                 false,
                 true,
-                PaneId::ControllerSource
+                PaneId::ControllerSource,
+                true
             ),
             None,
             "Space must not leak through to pause/resume while the redeploy dialog is open"
@@ -756,7 +818,8 @@ mod tests {
                 false,
                 true,
                 false,
-                PaneId::ControllerSource
+                PaneId::ControllerSource,
+                true
             ),
             None
         );
@@ -767,7 +830,8 @@ mod tests {
                 false,
                 true,
                 false,
-                PaneId::ControllerSource
+                PaneId::ControllerSource,
+                true
             ),
             None
         );
@@ -778,7 +842,8 @@ mod tests {
                 false,
                 true,
                 false,
-                PaneId::ControllerSource
+                PaneId::ControllerSource,
+                true
             ),
             None
         );
@@ -789,7 +854,8 @@ mod tests {
                 false,
                 true,
                 false,
-                PaneId::ControllerSource
+                PaneId::ControllerSource,
+                true
             ),
             None
         );
@@ -802,7 +868,8 @@ mod tests {
                 true,
                 false,
                 false,
-                PaneId::ControllerSource
+                PaneId::ControllerSource,
+                true
             ),
             None
         );
@@ -813,7 +880,8 @@ mod tests {
                 true,
                 false,
                 false,
-                PaneId::ControllerSource
+                PaneId::ControllerSource,
+                true
             ),
             None
         );
@@ -824,7 +892,8 @@ mod tests {
                 true,
                 false,
                 false,
-                PaneId::ControllerSource
+                PaneId::ControllerSource,
+                true
             ),
             None
         );
@@ -835,7 +904,8 @@ mod tests {
                 true,
                 false,
                 false,
-                PaneId::ControllerSource
+                PaneId::ControllerSource,
+                true
             ),
             None
         );
@@ -857,7 +927,8 @@ mod tests {
                     false,
                     true,
                     false,
-                    PaneId::ControllerSource
+                    PaneId::ControllerSource,
+                    true
                 ),
                 None,
                 "{modifiers:?}+Enter must not confirm quit"
@@ -869,7 +940,8 @@ mod tests {
                     true,
                     false,
                     false,
-                    PaneId::ControllerSource
+                    PaneId::ControllerSource,
+                    true
                 ),
                 None,
                 "{modifiers:?}+y must not confirm reset"
@@ -886,7 +958,8 @@ mod tests {
                 true,
                 true,
                 false,
-                PaneId::ControllerSource
+                PaneId::ControllerSource,
+                true
             ),
             Some(Msg::ConfirmQuit)
         );
@@ -902,7 +975,8 @@ mod tests {
                 true,
                 false,
                 false,
-                PaneId::ControllerSource
+                PaneId::ControllerSource,
+                true
             ),
             Some(Msg::RequestQuit)
         );
@@ -918,7 +992,8 @@ mod tests {
                 false,
                 false,
                 true,
-                PaneId::ControllerSource
+                PaneId::ControllerSource,
+                true
             ),
             Some(Msg::RequestQuit)
         );
@@ -999,7 +1074,8 @@ mod tests {
                 false,
                 false,
                 false,
-                PaneId::Report
+                PaneId::Report,
+                true
             ),
             Some(Msg::ScrollUp)
         );
@@ -1010,7 +1086,8 @@ mod tests {
                 false,
                 false,
                 false,
-                PaneId::Report
+                PaneId::Report,
+                true
             ),
             Some(Msg::ScrollDown)
         );
@@ -1021,7 +1098,8 @@ mod tests {
                 false,
                 false,
                 false,
-                PaneId::FinalFrame
+                PaneId::FinalFrame,
+                true
             ),
             None
         );
@@ -1032,7 +1110,8 @@ mod tests {
                 false,
                 false,
                 false,
-                PaneId::FinalFrame
+                PaneId::FinalFrame,
+                true
             ),
             None
         );

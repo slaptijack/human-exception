@@ -145,7 +145,16 @@ No current view has more than two panes.
 
 `F8` moves focus to the next pane in the current view, consistently at both
 wide (100+ column) and narrow (80–99 column) widths. In Help, which has a
-single pane, `F8` is inert.
+single pane, `F8` is inert. The same is true whenever the currently rendered
+surface doesn't actually present a second pane to move to: Operation before
+anything has been deployed and After Action before any operation has
+concluded are each a single placeholder pane, not the two-pane composition
+their row in [Panes per view](#panes-per-view) describes once a deployment
+exists — the focus marker and the footer's `F8` hint are both absent there
+too. The same rule applies while a confirmation dialog (quit,
+controller-reset, or deployment-replace) is pending: `F8` is swallowed along
+with every other non-dialog key, and the footer hint is suppressed for as
+long as the dialog is open, even in a view that is otherwise two-pane.
 
 At 100+ columns both panes of a view remain visible (§ [Responsive
 behavior](#responsive-behavior)); `F8` only moves which one is focused. At
