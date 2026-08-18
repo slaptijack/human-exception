@@ -403,6 +403,7 @@ fn should_redraw(
         state.quit_confirmation_pending(),
         state.redeploy_confirmation_pending(),
         state.focused_pane(state.current_view()),
+        state.focus_movement_available(state.current_view()),
     ) {
         Some(msg) => {
             let is_quit_related =
