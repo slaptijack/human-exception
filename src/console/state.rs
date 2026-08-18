@@ -205,7 +205,12 @@ pub enum Msg {
     /// Context-sensitive "Enter": inspects the selected signal in Signals,
     /// or commits to working the current dossier's opportunity in Target.
     Activate,
-    ToggleSecondaryPane,
+    /// `F8`: moves focus to the next pane in the current view, wrapping
+    /// around. A no-op in single-pane views (Help). At 80-99 columns this
+    /// also changes which pane renders (`ui::draw_*`'s narrow-layout
+    /// branches derive visibility from `AppState::focused_pane`); at 100+
+    /// columns both panes stay visible and only focus itself moves.
+    FocusNextPane,
     /// Scrolls the current view's content pane up/down by one row, if it's
     /// scrollable (see `event::view_is_scrollable`). Applies to whatever
     /// view is current when the message is applied.
@@ -286,9 +291,6 @@ pub struct AppState {
     /// `F6` was pressed while another run is still active; the player must
     /// confirm before it's replaced.
     redeploy_confirmation_pending: bool,
-    /// At 80-99 columns, whether the secondary (detail/provenance) pane is
-    /// showing instead of the primary one.
-    narrow_secondary_visible: bool,
     /// Scroll offset for each view's content pane, keyed by [`View`]. A
     /// missing entry means an offset of 0 — only views a player has
     /// actually scrolled ever get an entry.
@@ -316,7 +318,6 @@ impl Default for AppState {
             operation: None,
             next_run_id: 1,
             redeploy_confirmation_pending: false,
-            narrow_secondary_visible: false,
             scroll_offsets: HashMap::new(),
             focused_panes: HashMap::new(),
             should_quit: false,
@@ -513,10 +514,6 @@ impl AppState {
         self.step_operation()
     }
 
-    pub fn narrow_secondary_visible(&self) -> bool {
-        self.narrow_secondary_visible
-    }
-
     /// The current scroll offset for `view`'s content pane, or 0 if it's
     /// never been scrolled.
     pub fn scroll_offset(&self, view: View) -> u16 {
@@ -556,17 +553,25 @@ impl AppState {
         self.focused_panes.insert(view, pane);
     }
 
-    pub fn should_quit(&self) -> bool {
-        self.should_quit
+    /// Moves focus to the next pane in the current view, wrapping around. A
+    /// no-op in single-pane views (Help), matching `F8`'s documented inert
+    /// behavior there (`docs/TUI_DESIGN.md`, "F8 -- next pane").
+    fn focus_next_pane(&mut self) {
+        let view = self.current_view;
+        let panes = view.panes();
+        if panes.len() < 2 {
+            return;
+        }
+        let current = self.focused_pane(view);
+        let idx = panes
+            .iter()
+            .position(|&pane| pane == current)
+            .expect("focused_pane always returns a pane belonging to its view");
+        self.set_focused_pane(view, panes[(idx + 1) % panes.len()]);
     }
 
-    /// Resets narrow-layout state that only makes sense for the geometry it
-    /// was toggled under: a `ToggleSecondaryPane` while wide has no visible
-    /// effect, but without this it would still silently flip the flag, so a
-    /// later resize into narrow layout could show the secondary pane
-    /// without the player ever having pressed `F8` in that layout.
-    pub fn handle_resize(&mut self) {
-        self.narrow_secondary_visible = false;
+    pub fn should_quit(&self) -> bool {
+        self.should_quit
     }
 
     /// Whether `view` is currently reachable via `Navigate`, given what the
@@ -597,7 +602,6 @@ impl AppState {
                         op.paused = true;
                     }
                     self.current_view = view;
-                    self.narrow_secondary_visible = false;
                 }
             }
             Msg::OpenHelp => {
@@ -620,9 +624,7 @@ impl AppState {
                 self.selected_signal = (self.selected_signal + 1).min(last);
             }
             Msg::Activate => self.activate(),
-            Msg::ToggleSecondaryPane => {
-                self.narrow_secondary_visible = !self.narrow_secondary_visible;
-            }
+            Msg::FocusNextPane => self.focus_next_pane(),
             Msg::ScrollUp => {
                 let offset = self.scroll_offsets.entry(self.current_view).or_insert(0);
                 *offset = offset.saturating_sub(1);
@@ -698,7 +700,6 @@ impl AppState {
                         // make before one exists.
                         self.redeploy_confirmation_pending = true;
                         self.current_view = View::Operation;
-                        self.narrow_secondary_visible = false;
                     } else {
                         self.deploy();
                     }
@@ -774,7 +775,6 @@ impl AppState {
             View::Operation
         };
         self.operation = Some(operation);
-        self.narrow_secondary_visible = false;
         // A fresh report may be shorter than whatever was last scrolled to,
         // so start it at the top rather than carrying over an offset from a
         // previous run's report — same reasoning as `OpenHelp`'s reset.
@@ -811,7 +811,6 @@ impl AppState {
         // player moves from "watching it run" to "learning what happened."
         if op.is_finished() {
             self.current_view = View::AfterAction;
-            self.narrow_secondary_visible = false;
             self.scroll_offsets.insert(View::AfterAction, 0);
             self.set_focused_pane(View::AfterAction, PaneId::Report);
         }
@@ -832,7 +831,6 @@ impl AppState {
                 if selected.is_some_and(|signal| signal.is_actionable()) {
                     self.target_known = true;
                     self.current_view = View::Target;
-                    self.narrow_secondary_visible = false;
                 }
             }
             View::Target => {
@@ -841,7 +839,6 @@ impl AppState {
                     self.controller = Some(Editor::new(super::intel::STARTER_CONTROLLER));
                 }
                 self.current_view = View::Controller;
-                self.narrow_secondary_visible = false;
             }
             _ => {}
         }
@@ -1294,13 +1291,37 @@ mod tests {
     }
 
     #[test]
-    fn toggling_the_secondary_pane_flips_visibility_and_navigation_resets_it() {
+    fn focus_next_pane_advances_through_a_views_panes_and_wraps_around() {
         let mut state = AppState::new();
-        state.apply(Msg::ToggleSecondaryPane);
-        assert!(state.narrow_secondary_visible());
+        assert_eq!(state.focused_pane(View::Signals), PaneId::SignalsList);
 
+        state.apply(Msg::FocusNextPane);
+        assert_eq!(state.focused_pane(View::Signals), PaneId::SelectedSignal);
+
+        state.apply(Msg::FocusNextPane);
+        assert_eq!(state.focused_pane(View::Signals), PaneId::SignalsList);
+    }
+
+    #[test]
+    fn focus_next_pane_is_inert_in_help() {
+        let mut state = AppState::new();
+        state.apply(Msg::OpenHelp);
+        assert_eq!(state.focused_pane(View::Help), PaneId::Help);
+
+        state.apply(Msg::FocusNextPane);
+        assert_eq!(state.focused_pane(View::Help), PaneId::Help);
+    }
+
+    #[test]
+    fn navigating_away_and_back_preserves_moved_focus() {
+        let mut state = AppState::new();
+        state.apply(Msg::FocusNextPane);
+        assert_eq!(state.focused_pane(View::Signals), PaneId::SelectedSignal);
+
+        state.apply(Msg::Navigate(View::AfterAction));
         state.apply(Msg::Navigate(View::Signals));
-        assert!(!state.narrow_secondary_visible());
+
+        assert_eq!(state.focused_pane(View::Signals), PaneId::SelectedSignal);
     }
 
     #[test]
@@ -1331,17 +1352,6 @@ mod tests {
             state.apply(Msg::ScrollUp);
         }
         assert_eq!(state.scroll_offset(View::Help), 0);
-    }
-
-    #[test]
-    fn resizing_clears_the_narrow_secondary_pane_flag() {
-        let mut state = AppState::new();
-        state.apply(Msg::ToggleSecondaryPane);
-        assert!(state.narrow_secondary_visible());
-
-        state.handle_resize();
-
-        assert!(!state.narrow_secondary_visible());
     }
 
     #[test]

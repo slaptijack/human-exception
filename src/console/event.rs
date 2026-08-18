@@ -19,7 +19,8 @@ fn view_is_scrollable(view: View) -> bool {
 /// Help is open, `Esc`/arrows/`Enter` behave differently in Signals, Target,
 /// and Help), whether any confirmation dialog is currently open, and
 /// whether Controller's source pane (rather than the Lua reference pane,
-/// which `F8` can swap in at 80-99 columns) is what's actually on screen.
+/// which `F8` focus movement can swap in at 80-99 columns) is what's
+/// actually on screen.
 pub fn map(
     key: KeyEvent,
     current_view: View,
@@ -87,11 +88,11 @@ pub fn map(
         // itself is a no-op without a loaded controller source.
         KeyCode::F(6) => Some(Msg::RequestDeploy),
         KeyCode::F(7) if controller_is_open => Some(Msg::RequestResetController),
-        // F8's narrow-layout pane toggle applies to Signals/Target/
-        // Controller/Operation/AfterAction (`docs/TUI_DESIGN.md`,
-        // "Responsive behavior"); mapping it elsewhere — e.g. while Help is
-        // open — would flip the hidden toggle without a resize or
-        // navigation to ever reset it.
+        // `F8` moves focus to the next pane in every current two-pane view
+        // — Signals/Target/Controller/Operation/AfterAction — at any
+        // supported width (`docs/TUI_DESIGN.md`, "F8 -- next pane"). Help
+        // has only one pane, so `F8` stays inert there rather than mapping
+        // to a message that would be a no-op anyway.
         KeyCode::F(8)
             if current_view == View::Signals
                 || current_view == View::Target
@@ -99,7 +100,7 @@ pub fn map(
                 || operation_is_open
                 || after_action_is_open =>
         {
-            Some(Msg::ToggleSecondaryPane)
+            Some(Msg::FocusNextPane)
         }
         // `Ctrl+V` is the advertised binding — an ordinary control character
         // every terminal sends correctly, so it works everywhere. `Ctrl+Enter`
@@ -399,18 +400,18 @@ mod tests {
     }
 
     #[test]
-    fn f8_toggles_the_secondary_pane() {
+    fn f8_moves_focus_to_the_next_pane() {
         assert_eq!(
             map_in(key(KeyCode::F(8)), View::Signals),
-            Some(Msg::ToggleSecondaryPane)
+            Some(Msg::FocusNextPane)
         );
         assert_eq!(
             map_in(key(KeyCode::F(8)), View::Target),
-            Some(Msg::ToggleSecondaryPane)
+            Some(Msg::FocusNextPane)
         );
         assert_eq!(
             map_in(key(KeyCode::F(8)), View::Controller),
-            Some(Msg::ToggleSecondaryPane)
+            Some(Msg::FocusNextPane)
         );
     }
 
@@ -812,18 +813,18 @@ mod tests {
     }
 
     #[test]
-    fn f8_toggles_the_secondary_pane_in_operation_too() {
+    fn f8_moves_focus_to_the_next_pane_in_operation_too() {
         assert_eq!(
             map_in(key(KeyCode::F(8)), View::Operation),
-            Some(Msg::ToggleSecondaryPane)
+            Some(Msg::FocusNextPane)
         );
     }
 
     #[test]
-    fn f8_toggles_the_secondary_pane_in_after_action_too() {
+    fn f8_moves_focus_to_the_next_pane_in_after_action_too() {
         assert_eq!(
             map_in(key(KeyCode::F(8)), View::AfterAction),
-            Some(Msg::ToggleSecondaryPane)
+            Some(Msg::FocusNextPane)
         );
     }
 }

@@ -6,7 +6,8 @@
 
 use super::intel::{Signal, TargetDossier, authored_signals, first_contact_dossier};
 use super::state::{
-    AppState, ConclusionKind, OperationSnapshot, OperationView, Validation, View, WorkingSet,
+    AppState, ConclusionKind, OperationSnapshot, OperationView, PaneId, Validation, View,
+    WorkingSet,
 };
 use crate::lua_controller::{ControllerError, TickRecord};
 use crate::render::render_satellite_view;
@@ -22,9 +23,10 @@ use unicode_segmentation::UnicodeSegmentation;
 pub const MIN_COLUMNS: u16 = 80;
 pub const MIN_ROWS: u16 = 24;
 
-/// Below this width, Signals and Target fall back to a single primary pane
-/// with `F8` toggling to the secondary one, per `docs/TUI_DESIGN.md`
-/// ("Responsive behavior").
+/// Below this width, every two-pane view falls back to rendering only its
+/// currently focused pane (`AppState::focused_pane`), with `F8` moving focus
+/// to reveal the other one, per `docs/TUI_DESIGN.md` ("Responsive
+/// behavior").
 const TWO_PANE_MIN_COLUMNS: u16 = 100;
 
 const TITLE: &str = "HUMAN EXCEPTION // RESISTANCE CONSOLE";
@@ -59,7 +61,7 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
 
     draw_header(frame, header, state);
     draw_body(frame, body, state);
-    draw_footer(frame, footer, state, area.width);
+    draw_footer(frame, footer, state);
 }
 
 /// Rendered in place of the entire frame (like [`draw_geometry_warning`]),
@@ -331,7 +333,7 @@ fn draw_body(frame: &mut Frame, area: Rect, state: &AppState) {
 /// invisible source (see `event::map`).
 pub(crate) fn controller_source_visible(state: &AppState, frame_width: u16) -> bool {
     frame_width >= TWO_PANE_MIN_COLUMNS
-        || !state.narrow_secondary_visible()
+        || state.focused_pane(View::Controller) == PaneId::ControllerSource
         || state.reset_confirmation_pending()
 }
 
@@ -347,7 +349,9 @@ fn draw_controller(frame: &mut Frame, area: Rect, state: &AppState) {
             "LUA FIELD REFERENCE",
             lua_field_reference_lines(),
         );
-    } else if state.narrow_secondary_visible() && !state.reset_confirmation_pending() {
+    } else if state.focused_pane(View::Controller) == PaneId::LuaFieldReference
+        && !state.reset_confirmation_pending()
+    {
         // Unlike the wide two-pane layout above (where the source pane and
         // its banner are always visible alongside the reference), this is
         // the only place the reference pane can be shown *instead of* the
@@ -356,10 +360,10 @@ fn draw_controller(frame: &mut Frame, area: Rect, state: &AppState) {
         // looking at the reference would appear to do nothing.
         draw_controller_reference(frame, area, state);
     } else {
-        // A pending reset confirmation always wins the narrow-layout toggle:
-        // its banner only ever renders inside the source pane, so showing
-        // the reference pane instead while it's pending would leave the
-        // prompt (and the `Enter`/`Esc` it's waiting on) invisible.
+        // A pending reset confirmation always wins focus: its banner only
+        // ever renders inside the source pane, so showing the reference
+        // pane instead while it's pending would leave the prompt (and the
+        // `Enter`/`Esc` it's waiting on) invisible.
         draw_controller_source(frame, area, state);
     }
 }
@@ -705,14 +709,14 @@ fn lua_field_reference_lines() -> Vec<Line<'static>> {
 
 /// The live operation view: the satellite feed dominates, telemetry is
 /// secondary (`docs/TUI_DESIGN.md` §4, "Operation"). Two panes at 100+
-/// columns; below that, one primary pane with `F8` swapping to the other,
-/// reusing the same `narrow_secondary_visible` toggle Controller and
-/// Signals already use.
+/// columns; below that, only the focused pane renders, with `F8` moving
+/// focus to reveal the other — the same focus-driven visibility Controller
+/// and Signals already use.
 fn draw_operation(frame: &mut Frame, area: Rect, state: &AppState) {
     // Wins over the normal layout regardless of width, the same way a
-    // pending reset confirmation always wins Controller's narrow-layout
-    // toggle: the prompt (and the `Enter`/`Esc` it's waiting on) must never
-    // end up on the pane the player currently isn't looking at.
+    // pending reset confirmation always wins Controller's focus-driven
+    // visibility: the prompt (and the `Enter`/`Esc` it's waiting on) must
+    // never end up on the pane the player currently isn't looking at.
     if state.redeploy_confirmation_pending() {
         draw_pane(
             frame,
@@ -755,7 +759,7 @@ fn draw_operation(frame: &mut Frame, area: Rect, state: &AppState) {
             satellite_lines(&op.current),
         );
         draw_pane(frame, right, "OPERATION TELEMETRY", telemetry_lines(&op));
-    } else if state.narrow_secondary_visible() {
+    } else if state.focused_pane(View::Operation) == PaneId::OperationTelemetry {
         draw_pane(frame, area, "OPERATION TELEMETRY", telemetry_lines(&op));
     } else {
         draw_pane(
@@ -799,25 +803,24 @@ fn draw_after_action(frame: &mut Frame, area: Rect, state: &AppState) {
             satellite_lines(&op.current),
         );
         draw_after_action_report_pane(frame, right, &op, scroll);
-    } else {
+    } else if state.focused_pane(View::AfterAction) == PaneId::Report {
         // The report pane carries hierarchy items 1-4 (outcome, trigger,
         // meaning, completion) that the player must see before anything
         // else, for every finished operation — not just a synchronous load
         // failure with no discovered tiles (`docs/TUI_DESIGN.md` §5,
         // "Responsive behavior": "the report subview defaults to primary").
-        // `narrow_secondary_visible` still flips which pane is showing from
-        // there, same as every other narrow-layout view.
-        let defaults_to_report = op.finished;
-        if state.narrow_secondary_visible() ^ defaults_to_report {
-            draw_after_action_report_pane(frame, area, &op, scroll);
-        } else {
-            draw_pane(
-                frame,
-                area,
-                "FINAL SATELLITE FRAME",
-                satellite_lines(&op.current),
-            );
-        }
+        // `deploy`/`step_operation` already focus `PaneId::Report` on every
+        // fresh terminal outcome, so this direct comparison is sufficient
+        // to keep the report primary without any extra "defaults to report"
+        // bookkeeping here.
+        draw_after_action_report_pane(frame, area, &op, scroll);
+    } else {
+        draw_pane(
+            frame,
+            area,
+            "FINAL SATELLITE FRAME",
+            satellite_lines(&op.current),
+        );
     }
 }
 
@@ -1357,7 +1360,7 @@ fn draw_signals(frame: &mut Frame, area: Rect, state: &AppState) {
                 .areas(area);
         draw_pane(frame, left, "SIGNALS", signal_list_lines(state));
         draw_signal_detail_pane(frame, right, signal);
-    } else if state.narrow_secondary_visible() {
+    } else if state.focused_pane(View::Signals) == PaneId::SelectedSignal {
         draw_signal_detail_pane(frame, area, signal);
     } else {
         draw_pane(frame, area, "SIGNALS", signal_list_lines(state));
@@ -1450,7 +1453,7 @@ fn draw_target(frame: &mut Frame, area: Rect, state: &AppState) {
             target_provenance_lines(&dossier),
             "Esc  back to signals",
         );
-    } else if state.narrow_secondary_visible() {
+    } else if state.focused_pane(View::Target) == PaneId::Provenance {
         draw_pane_with_pinned_action(
             frame,
             area,
@@ -1931,24 +1934,30 @@ fn view_specific_help(view: View) -> Vec<Line<'static>> {
             Line::from("Up/Down  move the selection"),
             Line::from("Enter    open Target (only signals marked [OPEN] respond)"),
             Line::from("at 100+ columns its detail shows alongside the list automatically;"),
-            Line::from("at 80-99 columns, F8 switches to that detail"),
+            Line::from("F8 moves focus there, which is what shows at 80-99 columns"),
         ],
         View::Target => vec![
             Line::from("Enter  work this opportunity"),
             Line::from("Esc    back to Signals"),
-            Line::from("F8     (80-99 columns) switch between intel and provenance"),
+            Line::from(
+                "F8     move focus between intel and provenance (visible pane at 80-99 columns)",
+            ),
         ],
         View::Controller => vec![
             Line::from("Type to edit; arrows/Home/End/PageUp/PageDown move the cursor"),
             Line::from("F7          reset to the starter controller (confirms if modified)"),
             Line::from("Ctrl+V      load the source and check for on_tick, without calling it"),
-            Line::from("F8          (80-99 columns) switch between source and reference"),
+            Line::from(
+                "F8          move focus between source and reference (visible pane at 80-99 columns)",
+            ),
         ],
         View::Operation => vec![
             Line::from("F6     deploy the current controller (confirms if a run is active)"),
             Line::from("Space  pause/resume the run"),
             Line::from("Enter  advance exactly one tick while paused"),
-            Line::from("F8     (80-99 columns) switch between satellite feed and telemetry"),
+            Line::from(
+                "F8     move focus between feed and telemetry (visible pane at 80-99 columns)",
+            ),
             Line::from("Leaving via F2/F3/F4 pauses the run; F5 returns to it as you left it."),
         ],
         View::AfterAction => vec![
@@ -1957,7 +1966,9 @@ fn view_specific_help(view: View) -> Vec<Line<'static>> {
             Line::from("F4       edit the controller (your edits are preserved)"),
             Line::from("F5       review this run's frozen source and telemetry (Review Run)"),
             Line::from("F6       redeploy from a clean scenario state"),
-            Line::from("F8       (80-99 columns) switch between satellite frame and report"),
+            Line::from(
+                "F8       move focus between frame and report (visible pane at 80-99 columns)",
+            ),
         ],
         View::Help => Vec::new(),
     }
@@ -2010,7 +2021,7 @@ fn footer_hint_items(state: &AppState, show_f8: bool) -> Vec<(&'static str, &'st
         }
     }
     if show_f8 {
-        items.push(("F8 Toggle Pane", "F8 Pane", true));
+        items.push(("F8 Next Pane", "F8 Pane", true));
     }
     items
 }
@@ -2065,12 +2076,14 @@ fn footer_line_width(labels: &[(&'static str, bool)]) -> usize {
     labels.iter().map(|(label, _)| label.len()).sum::<usize>() + labels.len().saturating_sub(1)
 }
 
-fn draw_footer(frame: &mut Frame, area: Rect, state: &AppState, full_width: u16) {
-    let show_f8 = full_width < TWO_PANE_MIN_COLUMNS
-        && matches!(
-            state.current_view(),
-            View::Signals | View::Target | View::Controller | View::Operation | View::AfterAction
-        );
+fn draw_footer(frame: &mut Frame, area: Rect, state: &AppState) {
+    // `F8` moves focus at every supported width, not just when it also
+    // changes what's visible (`docs/TUI_DESIGN.md`, "F8 -- next pane"), so
+    // the hint shows in the same five views regardless of frame width.
+    let show_f8 = matches!(
+        state.current_view(),
+        View::Signals | View::Target | View::Controller | View::Operation | View::AfterAction
+    );
     let items = footer_hint_items(state, show_f8);
     let inner_width = area.width.saturating_sub(2) as usize;
 
@@ -2202,7 +2215,7 @@ mod tests {
     }
 
     #[test]
-    fn narrow_signals_view_shows_one_pane_until_f8_toggles_it() {
+    fn narrow_signals_view_shows_one_pane_until_f8_moves_focus() {
         let state = AppState::new();
         let terminal = render(90, 30, &state);
 
@@ -2211,14 +2224,41 @@ mod tests {
     }
 
     #[test]
-    fn narrow_signals_view_shows_detail_pane_once_toggled() {
+    fn narrow_signals_view_shows_detail_pane_once_focus_moves() {
         use super::super::state::Msg;
 
         let mut state = AppState::new();
-        state.apply(Msg::ToggleSecondaryPane);
+        state.apply(Msg::FocusNextPane);
         let terminal = render(90, 30, &state);
 
         assert!(buffer_contains(&terminal, "SELECTED SIGNAL"));
+    }
+
+    #[test]
+    fn signals_focus_survives_a_wide_to_narrow_to_wide_resize() {
+        use super::super::state::Msg;
+
+        // Focus itself is `AppState` state, entirely independent of the
+        // frame width `render` is called with — so "resizing" here is
+        // simply rendering the same state at different widths, mirroring
+        // what `should_redraw`'s `Event::Resize` arm (which no longer
+        // touches pane state at all) actually preserves.
+        let mut state = AppState::new();
+        state.apply(Msg::FocusNextPane);
+        assert_eq!(state.focused_pane(View::Signals), PaneId::SelectedSignal);
+
+        let wide = render(120, 40, &state);
+        assert!(buffer_contains(&wide, "SIGNALS"));
+        assert!(buffer_contains(&wide, "SELECTED SIGNAL"));
+
+        let narrow = render(90, 30, &state);
+        assert!(buffer_contains(&narrow, "SELECTED SIGNAL"));
+        assert!(!buffer_contains(&narrow, "> 11:42"));
+
+        let wide_again = render(120, 40, &state);
+        assert!(buffer_contains(&wide_again, "SIGNALS"));
+        assert!(buffer_contains(&wide_again, "SELECTED SIGNAL"));
+        assert_eq!(state.focused_pane(View::Signals), PaneId::SelectedSignal);
     }
 
     #[test]
@@ -2372,7 +2412,7 @@ mod tests {
     }
 
     #[test]
-    fn signals_help_describes_the_narrow_layout_toggle_accurately() {
+    fn signals_help_describes_focus_movement_accurately() {
         use super::super::state::Msg;
 
         let mut state = AppState::new();
@@ -2380,7 +2420,7 @@ mod tests {
         let terminal = render(120, 40, &state);
 
         assert!(!buffer_contains(&terminal, "follows automatically"));
-        assert!(buffer_contains(&terminal, "at 80-99 columns, F8 switches"));
+        assert!(buffer_contains(&terminal, "F8 moves focus there"));
     }
 
     #[test]
@@ -2597,7 +2637,7 @@ mod tests {
     }
 
     #[test]
-    fn reset_confirmation_is_visible_even_when_the_narrow_reference_pane_was_toggled_on() {
+    fn reset_confirmation_is_visible_even_when_the_reference_pane_was_focused() {
         use super::super::state::Msg;
 
         let mut state = AppState::new();
@@ -2606,16 +2646,45 @@ mod tests {
         state.apply(Msg::EditController(super::super::editor::EditOp::Insert(
             'x',
         )));
-        state.apply(Msg::ToggleSecondaryPane); // swap to the Lua reference pane
+        state.apply(Msg::FocusNextPane); // move focus to the Lua reference pane
         state.apply(Msg::RequestResetController);
         let terminal = render(90, 30, &state);
 
-        assert!(state.narrow_secondary_visible());
+        assert_eq!(
+            state.focused_pane(View::Controller),
+            PaneId::LuaFieldReference
+        );
         assert!(state.reset_confirmation_pending());
         assert!(buffer_contains(
             &terminal,
             "Reset controller? Edits will be lost."
         ));
+    }
+
+    #[test]
+    fn controller_focus_survives_a_wide_to_narrow_to_wide_resize() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.apply(Msg::FocusNextPane); // move focus to the Lua reference pane
+
+        let wide = render(120, 40, &state);
+        assert!(buffer_contains(&wide, "CAPTURED CONTROLLER"));
+        assert!(buffer_contains(&wide, "LUA FIELD REFERENCE"));
+
+        let narrow = render(90, 30, &state);
+        assert!(buffer_contains(&narrow, "LUA FIELD REFERENCE"));
+        assert!(!buffer_contains(&narrow, "CAPTURED CONTROLLER"));
+
+        let wide_again = render(120, 40, &state);
+        assert!(buffer_contains(&wide_again, "CAPTURED CONTROLLER"));
+        assert!(buffer_contains(&wide_again, "LUA FIELD REFERENCE"));
+        assert_eq!(
+            state.focused_pane(View::Controller),
+            PaneId::LuaFieldReference
+        );
     }
 
     #[test]
@@ -3024,6 +3093,32 @@ mod tests {
     }
 
     #[test]
+    fn after_action_focus_survives_a_wide_to_narrow_to_wide_resize() {
+        use super::super::state::Msg;
+
+        // `budget_exhausted_state` is defined below, alongside the rest of
+        // the After Action test helpers; this test only needs a finished
+        // operation, not a specific outcome.
+        let mut state = budget_exhausted_state();
+        assert_eq!(state.focused_pane(View::AfterAction), PaneId::Report);
+
+        state.apply(Msg::FocusNextPane); // move focus to the final satellite frame
+
+        let wide = render(120, 40, &state);
+        assert!(buffer_contains(&wide, "AFTER-ACTION REPORT"));
+        assert!(buffer_contains(&wide, "FINAL SATELLITE FRAME"));
+
+        let narrow = render(90, 30, &state);
+        assert!(buffer_contains(&narrow, "FINAL SATELLITE FRAME"));
+        assert!(!buffer_contains(&narrow, "AFTER-ACTION REPORT"));
+
+        let wide_again = render(120, 40, &state);
+        assert!(buffer_contains(&wide_again, "AFTER-ACTION REPORT"));
+        assert!(buffer_contains(&wide_again, "FINAL SATELLITE FRAME"));
+        assert_eq!(state.focused_pane(View::AfterAction), PaneId::FinalFrame);
+    }
+
+    #[test]
     fn the_recovery_hint_stays_visible_at_the_two_pane_minimum_geometry() {
         use super::super::editor::EditOp;
         use super::super::state::Msg;
@@ -3400,7 +3495,7 @@ mod tests {
     }
 
     #[test]
-    fn narrow_operation_view_shows_one_pane_until_f8_toggles_it() {
+    fn narrow_operation_view_shows_one_pane_until_f8_moves_focus() {
         use super::super::state::Msg;
 
         let mut state = working_state();
@@ -3409,10 +3504,35 @@ mod tests {
         assert!(buffer_contains(&terminal, "COMPROMISED SATELLITE FEED"));
         assert!(!buffer_contains(&terminal, "OPERATION TELEMETRY"));
 
-        state.apply(Msg::ToggleSecondaryPane);
+        state.apply(Msg::FocusNextPane);
         let terminal = render(90, 30, &state);
         assert!(buffer_contains(&terminal, "OPERATION TELEMETRY"));
         assert!(!buffer_contains(&terminal, "COMPROMISED SATELLITE FEED"));
+    }
+
+    #[test]
+    fn operation_focus_survives_a_wide_to_narrow_to_wide_resize() {
+        use super::super::state::Msg;
+
+        let mut state = working_state();
+        state.apply(Msg::RequestDeploy);
+        state.apply(Msg::FocusNextPane); // move focus to telemetry
+
+        let wide = render(120, 40, &state);
+        assert!(buffer_contains(&wide, "COMPROMISED SATELLITE FEED"));
+        assert!(buffer_contains(&wide, "OPERATION TELEMETRY"));
+
+        let narrow = render(90, 30, &state);
+        assert!(buffer_contains(&narrow, "OPERATION TELEMETRY"));
+        assert!(!buffer_contains(&narrow, "COMPROMISED SATELLITE FEED"));
+
+        let wide_again = render(120, 40, &state);
+        assert!(buffer_contains(&wide_again, "COMPROMISED SATELLITE FEED"));
+        assert!(buffer_contains(&wide_again, "OPERATION TELEMETRY"));
+        assert_eq!(
+            state.focused_pane(View::Operation),
+            PaneId::OperationTelemetry
+        );
     }
 
     #[test]

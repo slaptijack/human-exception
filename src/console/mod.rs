@@ -268,9 +268,11 @@ fn is_repeat_untrustworthy(code: KeyCode) -> bool {
 /// warning is showing.
 ///
 /// A resize always needs a redraw, since the geometry warning (or the shell
-/// it replaces) depends on the frame size, not on any key event. It also
-/// clears layout-specific state (the narrow-mode secondary-pane toggle) so
-/// it can't leak across a change in available width.
+/// it replaces) depends on the frame size, not on any key event. Pane focus
+/// itself is untouched by a resize — narrow-layout visibility is derived
+/// from `AppState::focused_pane`, so the already-focused pane is simply
+/// what narrow mode shows, with no separate state to reset here (`docs/
+/// TUI_DESIGN.md`, "Focus persistence").
 fn should_redraw(
     state: &mut AppState,
     event: Event,
@@ -278,7 +280,6 @@ fn should_redraw(
     last_transition_press: &mut TransitionKeyDebounce,
 ) -> bool {
     if matches!(event, Event::Resize(_, _)) {
-        state.handle_resize();
         return true;
     }
 
@@ -926,26 +927,33 @@ mod tests {
 
     #[test]
     fn typing_while_the_narrow_reference_pane_is_shown_does_not_edit_the_hidden_source() {
+        use state::PaneId;
+
         let (state, _) = render(
             90,
             30,
             &[
                 press(KeyCode::Enter), // inspect the actionable signal, opening Target
                 press(KeyCode::Enter), // commit, opening Controller
-                press(KeyCode::F(8)),  // swap to the Lua reference pane
+                press(KeyCode::F(8)),  // move focus to the Lua reference pane
                 press(KeyCode::Char('x')),
                 press(KeyCode::Backspace),
             ],
         );
 
-        assert!(state.narrow_secondary_visible());
+        assert_eq!(
+            state.focused_pane(View::Controller),
+            PaneId::LuaFieldReference
+        );
         assert_eq!(state.controller_source(), Some(intel::STARTER_CONTROLLER));
     }
 
     #[test]
-    fn a_resize_clears_the_narrow_secondary_pane_toggle() {
+    fn a_resize_preserves_focus_moved_by_f8() {
+        use state::PaneId;
+
         let (mut state, _) = render(90, 30, &[press(KeyCode::F(8))]);
-        assert!(state.narrow_secondary_visible());
+        assert_eq!(state.focused_pane(View::Signals), PaneId::SelectedSignal);
 
         let mut last_transition_press: TransitionKeyDebounce = None;
         should_redraw(
@@ -955,7 +963,7 @@ mod tests {
             &mut last_transition_press,
         );
 
-        assert!(!state.narrow_secondary_visible());
+        assert_eq!(state.focused_pane(View::Signals), PaneId::SelectedSignal);
     }
 
     #[test]
