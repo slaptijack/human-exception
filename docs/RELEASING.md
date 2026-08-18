@@ -87,6 +87,27 @@ tag, and release without doing any of it. Manually dispatching with
 the `dry_run` input set to `false` performs a real release outside the
 normal push-triggered flow, if ever needed.
 
+## Reviewing breaking-change reports before release
+
+When a release PR includes a major (`!`) bump, or any change to publicly
+reachable symbols, run `cargo-semver-checks` against the previous
+published tag before merging:
+
+```console
+cargo install cargo-semver-checks
+cargo semver-checks --baseline-rev <previous-tag>
+```
+
+This is a manual, informational check — not a required CI job, and not
+a merge gate. Review its output:
+
+- confirm every reported break is either an intentional, reviewed API
+  change or a bug to fix before merging;
+- for intentional breaks, make sure the release PR or release notes
+  spell out migration guidance for downstream consumers (see PR #108,
+  which documented the `console` module's narrowed public surface this
+  way).
+
 ## Recovering from a failed release
 
 If the `release-plz-release` job fails partway (for example, crates.io
