@@ -147,14 +147,18 @@ No current view has more than two panes.
 wide (100+ column) and narrow (80–99 column) widths. In Help, which has a
 single pane, `F8` is inert. The same is true whenever the currently rendered
 surface doesn't actually present a second pane to move to: Operation before
-anything has been deployed and After Action before any operation has
-concluded are each a single placeholder pane, not the two-pane composition
-their row in [Panes per view](#panes-per-view) describes once a deployment
-exists — the focus marker and the footer's `F8` hint are both absent there
-too. The same rule applies while a confirmation dialog (quit,
-controller-reset, or deployment-replace) is pending: `F8` is swallowed along
-with every other non-dialog key, and the footer hint is suppressed for as
-long as the dialog is open, even in a view that is otherwise two-pane.
+anything has ever been deployed, and After Action before anything has ever
+been deployed, are each a single placeholder pane, not the two-pane
+composition their row in [Panes per view](#panes-per-view) describes once a
+deployment exists — the focus marker and the footer's `F8` hint are both
+absent there too. (An active, not-yet-finished deployment viewed via After
+Action is a different case: both panes already render real content there, so
+that remains an ordinary two-pane view with `F8` and the marker both
+working normally.) The same placeholder-style inertness applies while a
+confirmation dialog (quit, controller-reset, or deployment-replace) is
+pending: `F8` is swallowed along with every other non-dialog key, and the
+footer hint is suppressed for as long as the dialog is open, even in a view
+that is otherwise two-pane.
 
 At 100+ columns both panes of a view remain visible (§ [Responsive
 behavior](#responsive-behavior)); `F8` only moves which one is focused. At
@@ -181,12 +185,19 @@ visible regardless of which pane is currently focused or visible.
 
 ### Non-color focus cue
 
-The focused pane's title carries a non-color marker (for example, a leading
-`>`) so focus is identifiable without relying on color. Bold or color styling
-may reinforce the cue but must never be the only way to identify it. The exact
-glyph and styling are a rendering concern for a later issue; this contract only
-requires that some non-color cue exists and identifies exactly one pane per
-view.
+Whenever a view currently renders more than one focusable pane, the focused
+pane's title carries a non-color marker (for example, a leading `>`) so focus
+is identifiable without relying on color. Bold or color styling may reinforce
+the cue but must never be the only way to identify it. The exact glyph and
+styling are a rendering concern for a later issue; this contract only
+requires that some non-color cue exists and identifies exactly one pane
+whenever such a choice actually exists.
+
+The cue is absent, by design, wherever [F8 — next pane](#f8--next-pane)
+documents focus movement as unavailable: Help, the Operation/After Action
+placeholders before anything has ever been deployed, and a pending
+confirmation dialog. None of those surfaces present a real choice between
+panes, so a marker there would claim a choice that doesn't exist.
 
 ### Focus persistence
 
