@@ -350,11 +350,20 @@ fn draw_controller(frame: &mut Frame, area: Rect, state: &AppState) {
         // looking at the reference would appear to do nothing.
         draw_controller_reference(frame, area, state);
     } else {
-        // A pending reset confirmation always wins focus: its banner only
-        // ever renders inside the source pane, so showing the reference
-        // pane instead while it's pending would leave the prompt (and the
-        // `Enter`/`Esc` it's waiting on) invisible.
-        draw_controller_source(frame, area, state, true);
+        // A pending reset confirmation always wins the narrow-mode display
+        // (its banner only ever renders inside the source pane, so showing
+        // the reference pane instead while it's pending would leave the
+        // prompt invisible) but does not itself move focus — so the marker
+        // must still reflect the stored focus, not just which pane is on
+        // screen. If the reference pane was focused when `F7` fired, the
+        // source is shown unmarked here and the marker returns to the
+        // reference pane once the confirmation resolves.
+        draw_controller_source(
+            frame,
+            area,
+            state,
+            state.focused_pane(View::Controller) == PaneId::ControllerSource,
+        );
     }
 }
 
@@ -1637,9 +1646,13 @@ pub(crate) fn after_action_max_scroll(
 }
 
 fn draw_help(frame: &mut Frame, area: Rect, state: &AppState) {
+    // Help has exactly one `PaneId`, so it is always the view's focused
+    // pane (`AppState::focused_pane` and `View::default_pane` agree, and
+    // `F8` is a no-op here) — the marker always shows, same as any other
+    // view's single genuinely-focused pane.
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(view_title(View::Help));
+        .title(pane_title(view_title(View::Help), true));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -2244,21 +2257,21 @@ mod tests {
     }
 
     #[test]
-    fn help_title_never_carries_the_focus_marker() {
+    fn help_title_always_carries_the_focus_marker() {
         use super::super::state::Msg;
 
-        // Help has exactly one `PaneId` and `F8` is a no-op there
-        // (`AppState::focus_next_pane` skips single-pane views), so
-        // marking its title would imply a movable focus that doesn't
-        // exist.
+        // Help has exactly one `PaneId`, so it is always the view's
+        // focused pane (`F8` is a no-op there, per
+        // `AppState::focus_next_pane` skipping single-pane views) — the
+        // marker identifies it the same as any other view's sole
+        // genuinely-focused pane.
         let mut state = AppState::new();
         state.apply(Msg::OpenHelp);
         state.apply(Msg::FocusNextPane);
 
         for (width, height) in [(MIN_COLUMNS, MIN_ROWS), (120, 40)] {
             let terminal = render(width, height, &state);
-            assert!(buffer_contains(&terminal, "HELP"));
-            assert!(!buffer_contains(&terminal, "> HELP"));
+            assert!(buffer_contains(&terminal, "> HELP"));
         }
     }
 
@@ -2741,6 +2754,21 @@ mod tests {
             &terminal,
             "Reset controller? Edits will be lost."
         ));
+
+        // The confirmation forces the source pane onto screen (so its
+        // banner and Enter/Esc prompt stay reachable) without moving
+        // focus off the reference pane — the marker must track the
+        // stored focus, not just which pane is displayed, so the source
+        // shown here stays unmarked.
+        assert!(!buffer_contains(&terminal, "> CAPTURED CONTROLLER"));
+
+        state.apply(Msg::CancelResetController);
+        let after_cancel = render(90, 30, &state);
+        assert!(buffer_contains(&after_cancel, "> LUA FIELD REFERENCE"));
+        assert_eq!(
+            state.focused_pane(View::Controller),
+            PaneId::LuaFieldReference
+        );
     }
 
     #[test]
