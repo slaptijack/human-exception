@@ -47,6 +47,55 @@ pub enum View {
     Help,
 }
 
+impl View {
+    /// The pane focused in `self` by default, and whenever no explicit
+    /// focus has been recorded yet (`docs/TUI_DESIGN.md`, "Pane focus" >
+    /// "Default focus").
+    fn default_pane(self) -> PaneId {
+        match self {
+            View::Help => PaneId::Help,
+            View::Signals => PaneId::SignalsList,
+            View::Target => PaneId::TargetIntelligence,
+            View::Controller => PaneId::ControllerSource,
+            View::Operation => PaneId::Satellite,
+            View::AfterAction => PaneId::Report,
+        }
+    }
+
+    /// Every pane that belongs to `self`, in the order defined by
+    /// `docs/TUI_DESIGN.md`'s "Panes per view" table.
+    fn panes(self) -> &'static [PaneId] {
+        match self {
+            View::Help => &[PaneId::Help],
+            View::Signals => &[PaneId::SignalsList, PaneId::SelectedSignal],
+            View::Target => &[PaneId::TargetIntelligence, PaneId::Provenance],
+            View::Controller => &[PaneId::ControllerSource, PaneId::LuaFieldReference],
+            View::Operation => &[PaneId::Satellite, PaneId::OperationTelemetry],
+            View::AfterAction => &[PaneId::Report, PaneId::FinalFrame],
+        }
+    }
+}
+
+/// A named pane within a multi-pane view (`docs/TUI_DESIGN.md`, "Pane
+/// focus"). Every view has one or two of these; which combinations are
+/// valid is defined by [`View::panes`], and the only place `AppState` writes
+/// a pane into its per-view focus map (`AppState::set_focused_pane`)
+/// enforces that a pane always belongs to the view it's recorded against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PaneId {
+    Help,
+    SignalsList,
+    SelectedSignal,
+    TargetIntelligence,
+    Provenance,
+    ControllerSource,
+    LuaFieldReference,
+    Satellite,
+    OperationTelemetry,
+    Report,
+    FinalFrame,
+}
+
 /// The opportunity the player has chosen to work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WorkingSet {
@@ -244,6 +293,11 @@ pub struct AppState {
     /// missing entry means an offset of 0 — only views a player has
     /// actually scrolled ever get an entry.
     scroll_offsets: HashMap<View, u16>,
+    /// Focused pane for each view, keyed by [`View`]. A missing entry means
+    /// that view's documented default pane ([`View::default_pane`]) — only
+    /// views whose focus has actually diverged from the default get an
+    /// entry.
+    focused_panes: HashMap<View, PaneId>,
     should_quit: bool,
 }
 
@@ -264,6 +318,7 @@ impl Default for AppState {
             redeploy_confirmation_pending: false,
             narrow_secondary_visible: false,
             scroll_offsets: HashMap::new(),
+            focused_panes: HashMap::new(),
             should_quit: false,
         }
     }
@@ -477,6 +532,28 @@ impl AppState {
         if let Some(offset) = self.scroll_offsets.get_mut(&view) {
             *offset = (*offset).min(max);
         }
+    }
+
+    /// The pane currently focused in `view`, or its documented default if
+    /// focus hasn't been recorded (`docs/TUI_DESIGN.md`, "Pane focus" >
+    /// "Default focus").
+    pub fn focused_pane(&self, view: View) -> PaneId {
+        self.focused_panes
+            .get(&view)
+            .copied()
+            .unwrap_or_else(|| view.default_pane())
+    }
+
+    /// Records `view`'s focused pane as `pane`. The only place
+    /// `focused_panes` is written, so an invalid view/pane combination can
+    /// never be stored: `pane` must belong to `view`'s pane set
+    /// ([`View::panes`]).
+    fn set_focused_pane(&mut self, view: View, pane: PaneId) {
+        debug_assert!(
+            view.panes().contains(&pane),
+            "{pane:?} is not a pane of {view:?}"
+        );
+        self.focused_panes.insert(view, pane);
     }
 
     pub fn should_quit(&self) -> bool {
@@ -702,6 +779,11 @@ impl AppState {
         // so start it at the top rather than carrying over an offset from a
         // previous run's report — same reasoning as `OpenHelp`'s reset.
         self.scroll_offsets.insert(View::AfterAction, 0);
+        // A fresh terminal result always focuses the report pane, so the
+        // outcome hierarchy stays primary regardless of what was last
+        // focused in After Action (`docs/TUI_DESIGN.md`, "Focus
+        // persistence").
+        self.set_focused_pane(View::AfterAction, PaneId::Report);
     }
 
     /// Advances the active operation by exactly one tick, appending the
@@ -731,6 +813,7 @@ impl AppState {
             self.current_view = View::AfterAction;
             self.narrow_secondary_visible = false;
             self.scroll_offsets.insert(View::AfterAction, 0);
+            self.set_focused_pane(View::AfterAction, PaneId::Report);
         }
         true
     }
@@ -864,6 +947,78 @@ mod tests {
         state.apply(Msg::DismissHelp);
 
         assert_eq!(state.current_view(), View::AfterAction);
+    }
+
+    #[test]
+    fn every_view_resolves_a_focused_pane_that_belongs_to_it() {
+        let state = AppState::new();
+
+        for view in [
+            View::Help,
+            View::Signals,
+            View::Target,
+            View::Controller,
+            View::Operation,
+            View::AfterAction,
+        ] {
+            let pane = state.focused_pane(view);
+            assert!(
+                view.panes().contains(&pane),
+                "{pane:?} is not a pane of {view:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn default_focused_panes_match_the_design_contract() {
+        let state = AppState::new();
+
+        assert_eq!(state.focused_pane(View::Help), PaneId::Help);
+        assert_eq!(state.focused_pane(View::Signals), PaneId::SignalsList);
+        assert_eq!(state.focused_pane(View::Target), PaneId::TargetIntelligence);
+        assert_eq!(
+            state.focused_pane(View::Controller),
+            PaneId::ControllerSource
+        );
+        assert_eq!(state.focused_pane(View::Operation), PaneId::Satellite);
+        assert_eq!(state.focused_pane(View::AfterAction), PaneId::Report);
+    }
+
+    #[test]
+    fn focus_persists_independently_per_view_across_navigation() {
+        let mut state = AppState::new();
+        state.set_focused_pane(View::Controller, PaneId::LuaFieldReference);
+        state.set_focused_pane(View::Signals, PaneId::SelectedSignal);
+
+        state.apply(Msg::Navigate(View::AfterAction));
+        state.apply(Msg::Navigate(View::Signals));
+        state.apply(Msg::Navigate(View::AfterAction));
+
+        assert_eq!(
+            state.focused_pane(View::Controller),
+            PaneId::LuaFieldReference
+        );
+        assert_eq!(state.focused_pane(View::Signals), PaneId::SelectedSignal);
+        assert_eq!(state.focused_pane(View::AfterAction), PaneId::Report);
+    }
+
+    #[test]
+    fn opening_and_dismissing_help_preserves_the_underlying_views_focus() {
+        let mut state = AppState::new();
+        state.set_focused_pane(View::Signals, PaneId::SelectedSignal);
+
+        state.apply(Msg::OpenHelp);
+        assert_eq!(state.focused_pane(View::Help), PaneId::Help);
+
+        state.apply(Msg::DismissHelp);
+        assert_eq!(state.focused_pane(View::Signals), PaneId::SelectedSignal);
+    }
+
+    #[test]
+    #[should_panic(expected = "is not a pane of")]
+    fn set_focused_pane_panics_on_an_invalid_view_pane_combination() {
+        let mut state = AppState::new();
+        state.set_focused_pane(View::Signals, PaneId::Report);
     }
 
     #[test]
@@ -1300,6 +1455,18 @@ mod tests {
     }
 
     #[test]
+    fn deploying_a_fresh_run_focuses_the_after_action_report() {
+        let mut state = working_state();
+        state.set_focused_pane(View::AfterAction, PaneId::FinalFrame);
+        state.controller = Some(Editor::new("function on_tick("));
+
+        state.apply(Msg::RequestDeploy);
+
+        assert_eq!(state.current_view(), View::AfterAction);
+        assert_eq!(state.focused_pane(View::AfterAction), PaneId::Report);
+    }
+
+    #[test]
     fn redeploying_a_finished_operation_needs_no_confirmation() {
         let mut state = working_state();
         state.controller = Some(Editor::new(ALWAYS_ERRORS));
@@ -1315,6 +1482,20 @@ mod tests {
         // resumes on Operation since the starter controller loads fine.
         assert!(state.operation().unwrap().records.is_empty());
         assert_eq!(state.current_view(), View::Operation);
+    }
+
+    #[test]
+    fn finishing_a_running_operation_focuses_the_after_action_report() {
+        let mut state = working_state();
+        state.controller = Some(Editor::new(ALWAYS_ERRORS));
+        state.apply(Msg::RequestDeploy);
+        state.set_focused_pane(View::AfterAction, PaneId::FinalFrame);
+
+        state.advance_running_operation();
+
+        assert!(state.operation().unwrap().finished);
+        assert_eq!(state.current_view(), View::AfterAction);
+        assert_eq!(state.focused_pane(View::AfterAction), PaneId::Report);
     }
 
     #[test]
