@@ -437,6 +437,187 @@ Product requirements:
 - the sidebar is a cheat sheet, not a complete manual;
 - no mouse is required.
 
+### The editor contract
+
+This section is the interaction contract for the Controller source editor
+itself — the successor to today's single-cursor bespoke editor
+(`src/console/editor.rs`), which epic #88 will replace with a real terminal
+code-editor foundation. It governs *player-visible behavior only*: which
+keys do what, in what priority, and what state survives which action. It
+does not prescribe a `TextArea`/`Rope`/widget type, an undo-stack
+representation, or any other implementation mechanism — that is left to #90
+and later issues. Where this section states a rule the current bespoke
+editor already satisfies, it is being carried forward as a requirement, not
+newly invented; where it describes a capability the current editor does not
+have (selection, undo/redo, word movement), it is new.
+
+#### Minimum editor experience
+
+- Grapheme-safe cursor movement: `Left`/`Right`/`Up`/`Down`, `Home`/`End`,
+  `PageUp`/`PageDown`, and a word-movement pair (e.g. `Ctrl+Left`/`Ctrl+Right`).
+  Vertical movement remembers the column the player last moved to
+  horizontally, so moving through a shorter line and back doesn't forget how
+  far right the cursor was.
+- The vertical and horizontal viewport auto-scrolls to keep the cursor
+  visible, accounting for wide/combining characters. There is no separately
+  persisted scroll offset for this pane — the visible viewport is always
+  derived from the current cursor position, so it never needs independent
+  resetting; contrast the Help and After-Action-report panes, which do
+  remember an explicit scroll offset because they have no cursor to derive
+  one from.
+- Line numbers are visible but are not part of the source and are never
+  included in a copy or in what is validated/deployed.
+- The cursor is visibly rendered whenever Controller source is the focused
+  pane.
+- **Selection:** `Shift`+any cursor-movement key (arrows, `Home`/`End`,
+  `PageUp`/`PageDown`, word movement) extends a selection from an anchor at
+  the point `Shift` was first held; a documented select-all binding (e.g.
+  `Ctrl+A`) selects the whole document. Typing a character, `Tab`, or
+  pressing `Backspace`/`Delete` while a selection is active replaces the
+  selection rather than acting at the cursor alone. This is new relative to
+  today's editor, which has no selection concept at all.
+- **Undo/redo:** a documented pair of bindings (e.g. `Ctrl+Z` to undo,
+  `Ctrl+Shift+Z` or `Ctrl+Y` to redo) steps backward and forward through
+  discrete edits — typed insertion, `Backspace`/`Delete`, a pasted block, and
+  a selection replacement each count as one undoable step. This is new;
+  today's editor has no undo history.
+- `Tab` inserts an indentation appropriate for Lua as ordinary space
+  characters, never a literal tab byte in the source — preserving today's
+  decision to avoid mixing tabs and spaces in player-visible source, while
+  allowing a real indent width rather than exactly one space.
+- Comfortable editing of long lines and of programs larger than the starter:
+  no arbitrary line-length or document-size cap.
+- Lua syntax highlighting is desirable but is **not required** for this
+  epic, matching #88. No Lua syntax highlighting exists in the current
+  implementation; a reliable, unhighlighted editor is preferable to a
+  fragile grammar integration.
+
+#### Command priority
+
+Controller's editor keys follow the console-wide [Input priority](#input-priority)
+order already established in [Pane focus](#pane-focus): confirmation dialogs
+first, then global/view-level commands, then `F8` focus movement, then
+focused-pane input. Selection, undo/redo, `Tab`, and paste do not change
+that order — they are all still focused-pane input, exactly like plain
+typing today, and so remain unavailable whenever `Controller source` isn't
+the focused pane or Controller isn't the open view.
+
+Restating which Controller commands are pane-local versus view-level (this
+extends, and must stay consistent with, the existing
+[Pane-local vs. view-level input today](#pane-local-vs-view-level-input-today)
+table):
+
+- **View-level** (available whenever Controller is open, regardless of
+  which of its two panes is focused): `Ctrl+V`/optional `Ctrl+Enter`
+  (validate), `F6` (deploy), `F7` (reset).
+- **Pane-local to Controller source:** all cursor movement, selection,
+  typed insertion, `Backspace`/`Delete`, `Tab`, undo/redo, and a terminal
+  paste.
+- **Pane-local to the Lua field reference pane:** none — it remains
+  read-only, as today.
+
+#### `Ctrl+V` and the optional `Ctrl+Enter` alias
+
+`Ctrl+V` is the advertised, guaranteed validate binding: an ordinary control
+character every terminal reports correctly, regardless of keyboard protocol
+support. `Ctrl+Enter` may continue to work as an unadvertised alias on
+terminals that can report it distinctly from plain `Enter` (for example via
+the Kitty keyboard protocol); it is not the primary path, because most
+terminals without that protocol report it identically to plain `Enter`,
+which would otherwise insert a newline instead of validating. Whatever
+editor foundation #90 selects, its default keymap must not take ownership of
+`Ctrl+V` for its own purpose (e.g. a library default of "paste").
+
+#### Bracketed paste
+
+A terminal-initiated paste (the terminal's own paste action, not a bound
+key) is accepted only when all of the following hold: Controller is the
+open view, `Controller source` is the focused pane, no confirmation dialog
+is pending, and the terminal is not below the supported minimum geometry.
+Outside that state the paste is silently ignored rather than applied to the
+wrong place. Line endings are normalized (CRLF/CR to LF) before insertion.
+The pasted text is inserted at the cursor in a single operation, preserving
+embedded newlines and whitespace exactly, and counts as one atomic step for
+undo purposes — undoing a paste removes the whole block at once, not one
+character at a time.
+
+#### `F7` reset — state after confirmed restoration
+
+`F7` restores the starter controller, with confirmation if edits would be
+lost (unmodified source resets immediately with no prompt). After a
+confirmed reset:
+
+- the source becomes the exact starter controller text;
+- the cursor moves to the end of the restored source (there is no stored
+  "starter cursor position" to return to instead);
+- any active selection is cleared;
+- the viewport scrolls so the cursor is visible, as an ordinary consequence
+  of the viewport always being cursor-derived (see
+  [Minimum editor experience](#minimum-editor-experience));
+- undo/redo history is cleared — restoring the starter is an intentional,
+  confirmed discard of the prior modified state, not something the player
+  can step back through with undo;
+- validation reverts to unchecked.
+
+While the reset confirmation is pending, it takes priority over all editor
+input — including selection and undo/redo keys — exactly as the existing
+[Input priority](#input-priority) rule already requires for every other
+Controller key. At 80–99 columns, if the Lua field reference pane happened
+to be the visible/focused pane when `F7` was pressed, the confirmation is
+still shown in the source pane's screen position (since that is where the
+banner renders) without changing which pane is actually focused; focus
+itself is restored to whatever the player had once the dialog resolves.
+
+#### Modified state and validation invalidation
+
+"Modified" means the current source differs from the starter controller
+text — it is not a separate dirty flag and is not tied to undo-history
+depth, so a sequence of edits that nets back to exactly the starter text is
+unmodified again. A prior `Ctrl+V` validation result (`READY`/`INVALID`) is
+invalidated back to unchecked only by an edit that actually changes the
+source's content. Pure cursor movement, a selection that is created but
+never used to mutate anything, and an edit that has no effect (e.g.
+`Backspace` at the start of the document) must not silently clear a
+`READY`/`INVALID` banner that is still accurate.
+
+#### Deployed-source provenance
+
+`F6` deploy snapshots the exact current working source into the run record
+at the moment of deployment. Later edits to the working copy — including
+undo/redo — never retroactively change that snapshot, and **Review Run**
+always shows the frozen deployed source for that run, never whatever source
+currently happens to be in the editor. This must hold regardless of which
+editor foundation #90 selects: an editor library must expose, or be wrapped
+to expose, an exact-string snapshot of its current content.
+
+#### Interaction-state matrix
+
+| State | `Ctrl+V` validate | `F6` deploy | `F7` reset | Typing / cursor movement | Selection | Undo/redo | Paste |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Source pane focused, no dialog pending | available | available | available | accepted, mutates | accepted | accepted, mutates | accepted, mutates |
+| Reference pane focused | available | available | available | inert | inert | inert | inert (silently ignored) |
+| Reset / quit / redeploy confirmation pending | inert (dialog swallows all non-dialog keys) | inert | inert (already open) | inert | inert | inert | inert |
+| Narrow (80–99 columns), source pane focused | available, advertised | available | available | accepted | accepted | accepted | accepted |
+| Narrow (80–99 columns), reference pane focused | available (view-level; works even though source isn't currently visible) | available | available | inert | inert | inert | inert |
+| Below minimum geometry (<80×24) | inert (only the geometry warning and `Ctrl+Q` are live) | inert | inert | inert | inert | inert | inert |
+
+`Ctrl+V`/`F6`/`F7` availability in every row follows one authoritative rule —
+Controller is the open view, the terminal is not below minimum geometry, and
+no confirmation dialog is pending — independent of which pane is focused,
+because they are view-level. Typing/selection/undo/paste availability
+follows a second, different authoritative rule — the same three conditions,
+**plus** `Controller source` specifically being the focused pane — because
+they are pane-local. Neither rule is restated per-command; every row above
+is a consequence of applying one of those two rules, per
+[Command priority](#command-priority).
+
+#### Explicitly out of scope for this contract
+
+LSP, autocomplete/completion, diagnostics beyond load/syntax validation,
+formatting, refactoring, configurable keymaps, full Vim/Emacs emulation,
+mouse-first editing, multiple buffers or files, and a filesystem browser.
+Lua syntax highlighting is desirable but not required.
+
 ### Starter controller
 
 The first-play starter must be **useful but intentionally incomplete**.
