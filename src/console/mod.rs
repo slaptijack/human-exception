@@ -32,7 +32,7 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
-use state::{AppState, Msg, View};
+use state::{AppState, Msg, PaneId, View};
 
 type PanicHook = dyn Fn(&PanicHookInfo<'_>) + Sync + Send + 'static;
 
@@ -295,7 +295,7 @@ fn should_redraw(
         let accepted = !undersized
             && !dialog_pending
             && state.current_view() == state::View::Controller
-            && ui::controller_source_visible(state, frame_size.0);
+            && state.focused_pane(state::View::Controller) == PaneId::ControllerSource;
         if !accepted || text.is_empty() {
             return false;
         }
@@ -402,7 +402,7 @@ fn should_redraw(
         state.reset_confirmation_pending(),
         state.quit_confirmation_pending(),
         state.redeploy_confirmation_pending(),
-        ui::controller_source_visible(state, frame_size.0),
+        state.focused_pane(state.current_view()),
     ) {
         Some(msg) => {
             let is_quit_related =
@@ -506,6 +506,23 @@ mod tests {
     fn signals_is_the_default_view() {
         let (_, terminal) = render(120, 40, &[]);
         assert!(buffer_contains(&terminal, "SIGNALS"));
+    }
+
+    #[test]
+    fn signals_selection_and_activation_are_inert_while_the_detail_pane_is_focused() {
+        let (state, _) = render(
+            120,
+            40,
+            &[
+                press(KeyCode::F(8)), // move focus to the selected-signal detail pane
+                press(KeyCode::Down),
+                press(KeyCode::Up),
+                press(KeyCode::Enter),
+            ],
+        );
+
+        assert_eq!(state.current_view(), View::Signals);
+        assert_eq!(state.selected_signal(), 0);
     }
 
     #[test]
@@ -788,6 +805,42 @@ mod tests {
                 press(KeyCode::Enter),
                 press(KeyCode::F(8)), // swap the narrow secondary pane to the Lua reference
                 paste("sneaked in"),
+            ],
+        );
+
+        assert_eq!(state.controller_source(), Some(intel::STARTER_CONTROLLER));
+    }
+
+    #[test]
+    fn paste_while_reference_pane_focused_in_wide_layout_is_ignored() {
+        // At 100+ columns both panes are visible, so screen visibility alone
+        // can't tell paste apart from real focus — this is the wide-width
+        // counterpart to `paste_while_reference_pane_visible_in_narrow_layout_is_ignored`
+        // above, proving routing follows focus rather than layout.
+        let (state, _) = render(
+            120,
+            40,
+            &[
+                press(KeyCode::Enter),
+                press(KeyCode::Enter),
+                press(KeyCode::F(8)), // move focus to the Lua reference pane
+                paste("sneaked in"),
+            ],
+        );
+
+        assert_eq!(state.controller_source(), Some(intel::STARTER_CONTROLLER));
+    }
+
+    #[test]
+    fn typed_characters_while_reference_pane_focused_in_wide_layout_are_ignored() {
+        let (state, _) = render(
+            120,
+            40,
+            &[
+                press(KeyCode::Enter),
+                press(KeyCode::Enter),
+                press(KeyCode::F(8)), // move focus to the Lua reference pane
+                press(KeyCode::Char('x')),
             ],
         );
 
@@ -1163,6 +1216,54 @@ mod tests {
         assert!(state.operation().unwrap().finished);
         assert!(buffer_contains(&terminal, "AFTER-ACTION REPORT"));
         assert!(buffer_contains(&terminal, "controller script error"));
+    }
+
+    #[test]
+    fn after_action_arrows_do_not_scroll_the_report_while_its_satellite_pane_is_focused() {
+        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
+        events.extend(clear_and_type(ROUTE_TO_UPLINK));
+        events.push(press(KeyCode::F(6)));
+        events.push(press(KeyCode::Char(' '))); // pause
+        events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
+
+        // A short viewport (`ui::MIN_ROWS`) so the report actually needs
+        // scrolling — otherwise there'd be nothing to distinguish "scrolled"
+        // from "already at the bottom".
+        let width = 100; // the narrowest width the two-pane layout takes
+        let (mut state, mut terminal) = render(width, ui::MIN_ROWS, &events);
+        assert_eq!(state.current_view(), View::AfterAction);
+
+        // With the report focused (After Action's default), Down actually
+        // scrolls it.
+        let mut last_transition_press: TransitionKeyDebounce = None;
+        should_redraw(
+            &mut state,
+            press(KeyCode::Down),
+            (width, ui::MIN_ROWS),
+            &mut last_transition_press,
+        );
+        terminal
+            .draw(|frame| ui::draw(frame, &state))
+            .expect("redraw should succeed");
+        let scrolled_offset = state.scroll_offset(View::AfterAction);
+        assert!(scrolled_offset > 0, "report should have scrolled");
+
+        // Moving focus to the final-frame satellite pane must stop further
+        // Down presses from scrolling the report.
+        should_redraw(
+            &mut state,
+            press(KeyCode::F(8)),
+            (width, ui::MIN_ROWS),
+            &mut last_transition_press,
+        );
+        should_redraw(
+            &mut state,
+            press(KeyCode::Down),
+            (width, ui::MIN_ROWS),
+            &mut last_transition_press,
+        );
+
+        assert_eq!(state.scroll_offset(View::AfterAction), scrolled_offset);
     }
 
     #[test]

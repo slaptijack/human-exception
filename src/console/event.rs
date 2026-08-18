@@ -7,27 +7,35 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::editor::EditOp;
-use super::state::{Msg, View};
+use super::state::{Msg, PaneId, View};
 
-/// Views whose content pane can scroll via `Msg::ScrollUp`/`Msg::ScrollDown`.
-fn view_is_scrollable(view: View) -> bool {
-    matches!(view, View::Help | View::AfterAction)
+/// Whether `view`'s scrollable pane is focused, and so `Up`/`Down` should
+/// scroll it via `Msg::ScrollUp`/`Msg::ScrollDown`. Help has only one pane,
+/// so it's always scrollable; After Action's report pane must be focused
+/// (rather than the final-frame pane `F8` can swap in).
+fn scroll_focus_matches(view: View, focused_pane: PaneId) -> bool {
+    match view {
+        View::Help => true,
+        View::AfterAction => focused_pane == PaneId::Report,
+        _ => false,
+    }
 }
 
 /// Maps a key event to a player intent, given the view currently showing
 /// (several keys are context-sensitive: `F1`/`Esc` need to know whether
 /// Help is open, `Esc`/arrows/`Enter` behave differently in Signals, Target,
-/// and Help), whether any confirmation dialog is currently open, and
-/// whether Controller's source pane (rather than the Lua reference pane,
-/// which `F8` focus movement can swap in at 80-99 columns) is what's
-/// actually on screen.
+/// and Help), whether any confirmation dialog is currently open, and which
+/// pane is currently focused — pane-local input (Signals selection,
+/// Controller editing, After Action scrolling) is only routed to the pane
+/// that owns it, regardless of what layout width currently has it on
+/// screen.
 pub fn map(
     key: KeyEvent,
     current_view: View,
     reset_confirmation_pending: bool,
     quit_confirmation_pending: bool,
     redeploy_confirmation_pending: bool,
-    controller_source_visible: bool,
+    focused_pane: PaneId,
 ) -> Option<Msg> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
@@ -114,7 +122,9 @@ pub fn map(
             Some(Msg::ValidateController)
         }
         KeyCode::Enter
-            if !ctrl && (current_view == View::Signals || current_view == View::Target) =>
+            if !ctrl
+                && (current_view == View::Target
+                    || (current_view == View::Signals && focused_pane == PaneId::SignalsList)) =>
         {
             Some(Msg::Activate)
         }
@@ -124,14 +134,19 @@ pub fn map(
         // paused, so `Enter` here doesn't fast-forward a running operation.
         KeyCode::Enter if !ctrl && operation_is_open => Some(Msg::StepOperationTick),
         KeyCode::Char(' ') if !ctrl && operation_is_open => Some(Msg::TogglePauseOperation),
-        KeyCode::Up if current_view == View::Signals => Some(Msg::SelectPreviousSignal),
-        KeyCode::Down if current_view == View::Signals => Some(Msg::SelectNextSignal),
-        KeyCode::Up if view_is_scrollable(current_view) => Some(Msg::ScrollUp),
-        KeyCode::Down if view_is_scrollable(current_view) => Some(Msg::ScrollDown),
-        // While the reference pane is swapped in at 80-99 columns, the
-        // source isn't on screen at all, so ordinary editing keys must not
-        // silently mutate it — only F8 (handled above) can bring it back.
-        _ if controller_is_open && controller_source_visible => {
+        KeyCode::Up if current_view == View::Signals && focused_pane == PaneId::SignalsList => {
+            Some(Msg::SelectPreviousSignal)
+        }
+        KeyCode::Down if current_view == View::Signals && focused_pane == PaneId::SignalsList => {
+            Some(Msg::SelectNextSignal)
+        }
+        KeyCode::Up if scroll_focus_matches(current_view, focused_pane) => Some(Msg::ScrollUp),
+        KeyCode::Down if scroll_focus_matches(current_view, focused_pane) => Some(Msg::ScrollDown),
+        // Ordinary editing keys must not silently mutate the source unless
+        // it's the pane actually focused — whether because the reference
+        // pane is focused instead (which `F8` can swap to at any width) or
+        // because it's swapped in on screen at 80-99 columns.
+        _ if controller_is_open && focused_pane == PaneId::ControllerSource => {
             // AltGr (used on many non-US keyboard layouts to type
             // punctuation like `{`, `}`, `[`, `]`, `\`, `@`) is reported by
             // some terminals — notably on Windows — as `CONTROL | ALT`
@@ -189,9 +204,9 @@ mod tests {
     }
 
     /// Shorthand for the common case: no confirmation dialog is open and
-    /// Controller's source pane (if relevant) is visible.
+    /// `view`'s default pane is focused.
     fn map_in(key: KeyEvent, view: View) -> Option<Msg> {
-        map(key, view, false, false, false, true)
+        map(key, view, false, false, false, view.default_pane())
     }
 
     #[test]
@@ -334,8 +349,8 @@ mod tests {
     }
 
     #[test]
-    fn editing_keys_are_inert_while_the_reference_pane_is_shown_instead_of_source() {
-        let source_hidden = false;
+    fn editing_keys_are_inert_while_the_reference_pane_is_focused_instead_of_source() {
+        let reference_focused = PaneId::LuaFieldReference;
         assert_eq!(
             map(
                 key(KeyCode::Char('x')),
@@ -343,7 +358,7 @@ mod tests {
                 false,
                 false,
                 false,
-                source_hidden
+                reference_focused
             ),
             None
         );
@@ -354,7 +369,7 @@ mod tests {
                 false,
                 false,
                 false,
-                source_hidden
+                reference_focused
             ),
             None
         );
@@ -365,15 +380,15 @@ mod tests {
                 false,
                 false,
                 false,
-                source_hidden
+                reference_focused
             ),
             None
         );
     }
 
     #[test]
-    fn f7_and_validate_still_work_while_the_reference_pane_is_shown() {
-        let source_hidden = false;
+    fn f7_and_validate_still_work_while_the_reference_pane_is_focused() {
+        let reference_focused = PaneId::LuaFieldReference;
         assert_eq!(
             map(
                 key(KeyCode::F(7)),
@@ -381,7 +396,7 @@ mod tests {
                 false,
                 false,
                 false,
-                source_hidden
+                reference_focused
             ),
             Some(Msg::RequestResetController)
         );
@@ -393,7 +408,7 @@ mod tests {
                 false,
                 false,
                 false,
-                source_hidden
+                reference_focused
             ),
             Some(Msg::ValidateController)
         );
@@ -496,6 +511,62 @@ mod tests {
     }
 
     #[test]
+    fn signals_selection_and_activation_are_inert_while_the_selected_signal_pane_is_focused() {
+        let selected_signal_focused = PaneId::SelectedSignal;
+        assert_eq!(
+            map(
+                key(KeyCode::Up),
+                View::Signals,
+                false,
+                false,
+                false,
+                selected_signal_focused
+            ),
+            None
+        );
+        assert_eq!(
+            map(
+                key(KeyCode::Down),
+                View::Signals,
+                false,
+                false,
+                false,
+                selected_signal_focused
+            ),
+            None
+        );
+        assert_eq!(
+            map(
+                key(KeyCode::Enter),
+                View::Signals,
+                false,
+                false,
+                false,
+                selected_signal_focused
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn target_activation_is_not_gated_by_focus() {
+        // Target has no pane-local input at all (`docs/TUI_DESIGN.md`'s
+        // "Pane-local vs. view-level input today" table), so `Enter` must
+        // fire regardless of which of Target's panes is focused.
+        assert_eq!(
+            map(
+                key(KeyCode::Enter),
+                View::Target,
+                false,
+                false,
+                false,
+                PaneId::Provenance
+            ),
+            Some(Msg::Activate)
+        );
+    }
+
+    #[test]
     fn unbound_keys_map_to_nothing() {
         assert_eq!(map_in(key(KeyCode::Char('x')), View::Signals), None);
     }
@@ -520,7 +591,7 @@ mod tests {
                 false,
                 true,
                 false,
-                true
+                PaneId::ControllerSource
             ),
             Some(Msg::ConfirmQuit)
         );
@@ -531,7 +602,7 @@ mod tests {
                 false,
                 true,
                 false,
-                true
+                PaneId::ControllerSource
             ),
             Some(Msg::ConfirmQuit)
         );
@@ -542,7 +613,7 @@ mod tests {
                 false,
                 true,
                 false,
-                true
+                PaneId::ControllerSource
             ),
             Some(Msg::CancelQuit)
         );
@@ -553,7 +624,7 @@ mod tests {
                 false,
                 true,
                 false,
-                true
+                PaneId::ControllerSource
             ),
             Some(Msg::CancelQuit)
         );
@@ -564,7 +635,7 @@ mod tests {
                 false,
                 true,
                 false,
-                true
+                PaneId::ControllerSource
             ),
             None,
             "ordinary keys must not leak through while the quit dialog is open"
@@ -580,7 +651,7 @@ mod tests {
                 true,
                 false,
                 false,
-                true
+                PaneId::ControllerSource
             ),
             Some(Msg::ConfirmResetController)
         );
@@ -591,7 +662,7 @@ mod tests {
                 true,
                 false,
                 false,
-                true
+                PaneId::ControllerSource
             ),
             Some(Msg::CancelResetController)
         );
@@ -602,7 +673,7 @@ mod tests {
                 true,
                 false,
                 false,
-                true
+                PaneId::ControllerSource
             ),
             None,
             "ordinary keys must not leak through while the reset dialog is open"
@@ -618,7 +689,7 @@ mod tests {
                 false,
                 false,
                 true,
-                true
+                PaneId::ControllerSource
             ),
             Some(Msg::ConfirmDeploy)
         );
@@ -629,12 +700,19 @@ mod tests {
                 false,
                 false,
                 true,
-                true
+                PaneId::ControllerSource
             ),
             Some(Msg::ConfirmDeploy)
         );
         assert_eq!(
-            map(key(KeyCode::Esc), View::Operation, false, false, true, true),
+            map(
+                key(KeyCode::Esc),
+                View::Operation,
+                false,
+                false,
+                true,
+                PaneId::ControllerSource
+            ),
             Some(Msg::CancelDeploy)
         );
         assert_eq!(
@@ -644,7 +722,7 @@ mod tests {
                 false,
                 false,
                 true,
-                true
+                PaneId::ControllerSource
             ),
             Some(Msg::CancelDeploy)
         );
@@ -655,7 +733,7 @@ mod tests {
                 false,
                 false,
                 true,
-                true
+                PaneId::ControllerSource
             ),
             None,
             "Space must not leak through to pause/resume while the redeploy dialog is open"
@@ -672,37 +750,93 @@ mod tests {
         // Quit dialog: Ctrl+Enter must not silently discard the modified
         // controller just because it would otherwise mean "validate".
         assert_eq!(
-            map(ctrl_enter, View::Controller, false, true, false, true),
+            map(
+                ctrl_enter,
+                View::Controller,
+                false,
+                true,
+                false,
+                PaneId::ControllerSource
+            ),
             None
         );
         assert_eq!(
-            map(ctrl_y, View::Controller, false, true, false, true),
+            map(
+                ctrl_y,
+                View::Controller,
+                false,
+                true,
+                false,
+                PaneId::ControllerSource
+            ),
             None
         );
         assert_eq!(
-            map(ctrl_esc, View::Controller, false, true, false, true),
+            map(
+                ctrl_esc,
+                View::Controller,
+                false,
+                true,
+                false,
+                PaneId::ControllerSource
+            ),
             None
         );
         assert_eq!(
-            map(ctrl_n, View::Controller, false, true, false, true),
+            map(
+                ctrl_n,
+                View::Controller,
+                false,
+                true,
+                false,
+                PaneId::ControllerSource
+            ),
             None
         );
 
         // Reset dialog: same requirement.
         assert_eq!(
-            map(ctrl_enter, View::Controller, true, false, false, true),
+            map(
+                ctrl_enter,
+                View::Controller,
+                true,
+                false,
+                false,
+                PaneId::ControllerSource
+            ),
             None
         );
         assert_eq!(
-            map(ctrl_y, View::Controller, true, false, false, true),
+            map(
+                ctrl_y,
+                View::Controller,
+                true,
+                false,
+                false,
+                PaneId::ControllerSource
+            ),
             None
         );
         assert_eq!(
-            map(ctrl_esc, View::Controller, true, false, false, true),
+            map(
+                ctrl_esc,
+                View::Controller,
+                true,
+                false,
+                false,
+                PaneId::ControllerSource
+            ),
             None
         );
         assert_eq!(
-            map(ctrl_n, View::Controller, true, false, false, true),
+            map(
+                ctrl_n,
+                View::Controller,
+                true,
+                false,
+                false,
+                PaneId::ControllerSource
+            ),
             None
         );
     }
@@ -717,12 +851,26 @@ mod tests {
             let enter = key_with_modifiers(KeyCode::Enter, modifiers);
             let y = key_with_modifiers(KeyCode::Char('y'), modifiers);
             assert_eq!(
-                map(enter, View::Controller, false, true, false, true),
+                map(
+                    enter,
+                    View::Controller,
+                    false,
+                    true,
+                    false,
+                    PaneId::ControllerSource
+                ),
                 None,
                 "{modifiers:?}+Enter must not confirm quit"
             );
             assert_eq!(
-                map(y, View::Controller, true, false, false, true),
+                map(
+                    y,
+                    View::Controller,
+                    true,
+                    false,
+                    false,
+                    PaneId::ControllerSource
+                ),
                 None,
                 "{modifiers:?}+y must not confirm reset"
             );
@@ -738,7 +886,7 @@ mod tests {
                 true,
                 true,
                 false,
-                true
+                PaneId::ControllerSource
             ),
             Some(Msg::ConfirmQuit)
         );
@@ -748,7 +896,14 @@ mod tests {
     fn ctrl_q_quits_even_while_the_reset_dialog_is_open() {
         let quit = key_with_modifiers(KeyCode::Char('q'), KeyModifiers::CONTROL);
         assert_eq!(
-            map(quit, View::Controller, true, false, false, true),
+            map(
+                quit,
+                View::Controller,
+                true,
+                false,
+                false,
+                PaneId::ControllerSource
+            ),
             Some(Msg::RequestQuit)
         );
     }
@@ -757,7 +912,14 @@ mod tests {
     fn ctrl_q_quits_even_while_the_redeploy_dialog_is_open() {
         let quit = key_with_modifiers(KeyCode::Char('q'), KeyModifiers::CONTROL);
         assert_eq!(
-            map(quit, View::Operation, false, false, true, true),
+            map(
+                quit,
+                View::Operation,
+                false,
+                false,
+                true,
+                PaneId::ControllerSource
+            ),
             Some(Msg::RequestQuit)
         );
     }
@@ -825,6 +987,54 @@ mod tests {
         assert_eq!(
             map_in(key(KeyCode::F(8)), View::AfterAction),
             Some(Msg::FocusNextPane)
+        );
+    }
+
+    #[test]
+    fn after_action_scrolling_is_gated_on_the_report_pane_being_focused() {
+        assert_eq!(
+            map(
+                key(KeyCode::Up),
+                View::AfterAction,
+                false,
+                false,
+                false,
+                PaneId::Report
+            ),
+            Some(Msg::ScrollUp)
+        );
+        assert_eq!(
+            map(
+                key(KeyCode::Down),
+                View::AfterAction,
+                false,
+                false,
+                false,
+                PaneId::Report
+            ),
+            Some(Msg::ScrollDown)
+        );
+        assert_eq!(
+            map(
+                key(KeyCode::Up),
+                View::AfterAction,
+                false,
+                false,
+                false,
+                PaneId::FinalFrame
+            ),
+            None
+        );
+        assert_eq!(
+            map(
+                key(KeyCode::Down),
+                View::AfterAction,
+                false,
+                false,
+                false,
+                PaneId::FinalFrame
+            ),
+            None
         );
     }
 }

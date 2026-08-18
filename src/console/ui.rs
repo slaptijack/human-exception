@@ -326,17 +326,6 @@ fn draw_body(frame: &mut Frame, area: Rect, state: &AppState) {
     }
 }
 
-/// Whether Controller's source pane (rather than the Lua reference pane
-/// `F8` can swap in at 80-99 columns) is what's actually on screen for
-/// `frame_width`. Exposed so the event mapper can gate editing keys on it —
-/// typing while the reference pane is showing must not silently edit an
-/// invisible source (see `event::map`).
-pub(crate) fn controller_source_visible(state: &AppState, frame_width: u16) -> bool {
-    frame_width >= TWO_PANE_MIN_COLUMNS
-        || state.focused_pane(View::Controller) == PaneId::ControllerSource
-        || state.reset_confirmation_pending()
-}
-
 fn draw_controller(frame: &mut Frame, area: Rect, state: &AppState) {
     if area.width >= TWO_PANE_MIN_COLUMNS {
         let [left, right] =
