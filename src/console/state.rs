@@ -51,7 +51,7 @@ impl View {
     /// The pane focused in `self` by default, and whenever no explicit
     /// focus has been recorded yet (`docs/TUI_DESIGN.md`, "Pane focus" >
     /// "Default focus").
-    fn default_pane(self) -> PaneId {
+    pub(crate) fn default_pane(self) -> PaneId {
         match self {
             View::Help => PaneId::Help,
             View::Signals => PaneId::SignalsList,
