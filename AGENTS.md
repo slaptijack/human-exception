@@ -17,6 +17,7 @@ Every code or repository change must begin with an open GitHub issue.
 - Work only on the issue in scope.
 - Treat its acceptance criteria and explicit exclusions as the contract.
 - If the issue is ambiguous, internally inconsistent, or requires a product decision it does not make, stop and ask in the issue before implementing.
+- If a consequential product decision instead emerges *during* implementation (for example, which of several plausible states should carry a UI affordance), record the decision and its rationale in the issue or a linked design document before continuing — not only in the PR summary. Review should be able to trace a decision to where it was made, rather than trusting the PR's account of it.
 - Do not quietly expand scope or bundle unrelated cleanup.
 - If you discover unrelated work, propose a separate issue.
 - Check parent, child, and blocked-by relationships before starting. Do not implement a blocked issue.
@@ -100,6 +101,8 @@ CI runs the same tool and posts a coverage summary on pull requests; coverage is
 - Keep the Lua API small, intentional, documented, and compatible with deterministic replay.
 - Treat Lua programs as untrusted input. Do not expose host capabilities unless an approved issue explicitly requires them.
 - Keep presentation separate from simulation behavior. Terminal output and telemetry should observe state rather than define it.
+- When a rendered cue, an advertised shortcut, and the input handling that acts on it all describe the same capability, derive them from one shared availability rule where practical, so they cannot silently disagree about whether that capability is currently available. If they must intentionally differ, state the reason where the divergence is implemented.
+- Before a change to publicly reachable Rust symbols (anything reachable through `src/lib.rs`'s public surface) goes to review, assess and note its semver impact (patch, minor, or major) in the issue or PR. Most changes do not touch public API and need no such note.
 - Prefer clear Rust and simple data structures over premature abstractions.
 - Avoid new dependencies unless they materially simplify the issue. Explain the tradeoff in the PR.
 - Do not use `unsafe` Rust without explicit issue scope and a documented safety argument.
@@ -110,6 +113,8 @@ CI runs the same tool and posts a coverage summary on pull requests; coverage is
 - Add or update tests for every behavior change and bug fix.
 - Prefer unit tests for pure simulation rules and integration tests for player-visible flows and subsystem boundaries.
 - Test success, invalid input, and meaningful failure paths.
+- For state-dependent interaction work, define and verify the meaningful negative and inert states alongside the happy path — for example unfocused panes, narrow layouts, empty or placeholder surfaces, confirmation dialogs, and undersized terminals — not only the case where the interaction succeeds.
+- When a compact interaction-state matrix (visible affordance × advertised shortcut × accepted input × permitted state mutation) would materially clarify which combinations are intended, include one in the issue or PR. Simple changes with one obvious state do not need one.
 - Do not rely on real time, network access, nondeterministic ordering, or uncontrolled randomness in tests.
 - Assert structured state and events where possible; use exact terminal-output assertions only when the text itself is part of the interface.
 - A change is not complete while tests are skipped, flaky, or weakened to make the build pass.
@@ -126,7 +131,7 @@ CI runs the same tool and posts a coverage summary on pull requests; coverage is
 
 Work is complete when:
 
-- the issue's acceptance criteria are satisfied;
+- the issue's acceptance criteria are satisfied — before requesting review, trace each acceptance criterion to the specific code or test that demonstrates it, rather than relying on the PR summary's account of what was done;
 - exclusions and dependency boundaries are respected;
 - relevant tests cover the behavior;
 - formatting, Clippy, and all tests pass;
