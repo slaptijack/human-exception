@@ -357,10 +357,6 @@ impl AppState {
         self.selected_signal
     }
 
-    pub fn target_known(&self) -> bool {
-        self.target_known
-    }
-
     pub fn controller_source(&self) -> Option<&str> {
         self.controller.as_ref().map(Editor::source)
     }
@@ -1087,7 +1083,7 @@ mod tests {
 
         state.apply(Msg::Activate);
 
-        assert!(state.target_known());
+        assert!(state.target_known);
         assert_eq!(state.current_view(), View::Target);
     }
 
@@ -1104,7 +1100,7 @@ mod tests {
 
         state.apply(Msg::Activate);
 
-        assert!(!state.target_known());
+        assert!(!state.target_known);
         assert_eq!(state.current_view(), View::Signals);
     }
 
