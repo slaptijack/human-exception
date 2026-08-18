@@ -13,14 +13,23 @@ use crate::lua_controller::{self, ControllerError, LiveOperation, TickRecord};
 /// An upper bound on how far any scrollable pane can scroll. This exists
 /// only so `ScrollDown` can never run away toward `u16::MAX` and leave the
 /// player pressing `Up` an impractical number of times to recover — the
-/// real, content- and frame-size-aware bound is a per-view `*_max_scroll`
+/// real, content- and frame-size-aware bound is a per-pane `*_max_scroll`
 /// function (e.g. `ui::help_max_scroll`), which `console::should_redraw`
 /// re-clamps the stored offset against after every scroll key, so this only
-/// needs to be comfortably above any scrollable view's actual line count
+/// needs to be comfortably above any scrollable pane's actual line count
 /// (not tuned to match it), not an accurate ceiling in its own right. A
 /// ceiling tuned too close to that count silently caps scrolling below the
-/// real content height the next time a scrollable view's content grows.
+/// real content height the next time a scrollable pane's content grows.
 const MAX_PANE_SCROLL: u16 = 500;
+
+/// Whether `pane` can be scrolled at all. Only [`PaneId::Help`] and
+/// [`PaneId::Report`] have scrollable content today — every other pane must
+/// never accumulate a `scroll_offsets` entry. Kept in sync with the
+/// pane-to-max-scroll match in `console::pane_max_scroll`, which decides the
+/// same set of panes for render-time clamping.
+fn pane_is_scrollable(pane: PaneId) -> bool {
+    matches!(pane, PaneId::Help | PaneId::Report)
+}
 
 /// The result of the most recent `Msg::ValidateController`, or the fact
 /// that the current source hasn't been checked (or was edited since the
@@ -211,9 +220,9 @@ pub enum Msg {
     /// branches derive visibility from `AppState::focused_pane`); at 100+
     /// columns both panes stay visible and only focus itself moves.
     FocusNextPane,
-    /// Scrolls the current view's content pane up/down by one row, if it's
-    /// scrollable (see `event::view_is_scrollable`). Applies to whatever
-    /// view is current when the message is applied.
+    /// Scrolls the current view's focused pane up/down by one row, if it's
+    /// scrollable (see `event::scroll_focus_matches`). Applies to whichever
+    /// pane is focused when the message is applied.
     ScrollUp,
     ScrollDown,
     /// An editing/cursor-movement key applied to the current controller
@@ -291,10 +300,11 @@ pub struct AppState {
     /// `F6` was pressed while another run is still active; the player must
     /// confirm before it's replaced.
     redeploy_confirmation_pending: bool,
-    /// Scroll offset for each view's content pane, keyed by [`View`]. A
-    /// missing entry means an offset of 0 — only views a player has
-    /// actually scrolled ever get an entry.
-    scroll_offsets: HashMap<View, u16>,
+    /// Scroll offset for each scrollable pane, keyed by [`PaneId`]. A
+    /// missing entry means an offset of 0 — only panes a player has
+    /// actually scrolled ever get an entry; non-scrollable panes (see
+    /// `pane_is_scrollable`) never get one.
+    scroll_offsets: HashMap<PaneId, u16>,
     /// Focused pane for each view, keyed by [`View`]. A missing entry means
     /// that view's documented default pane ([`View::default_pane`]) — only
     /// views whose focus has actually diverged from the default get an
@@ -514,19 +524,19 @@ impl AppState {
         self.step_operation()
     }
 
-    /// The current scroll offset for `view`'s content pane, or 0 if it's
-    /// never been scrolled.
-    pub fn scroll_offset(&self, view: View) -> u16 {
-        self.scroll_offsets.get(&view).copied().unwrap_or(0)
+    /// The current scroll offset for `pane`, or 0 if it's never been
+    /// scrolled.
+    pub fn scroll_offset(&self, pane: PaneId) -> u16 {
+        self.scroll_offsets.get(&pane).copied().unwrap_or(0)
     }
 
-    /// Bounds `view`'s stored scroll offset itself against `max`, not just
+    /// Bounds `pane`'s stored scroll offset itself against `max`, not just
     /// the value used for a single render. Without this, repeated `Down`
     /// presses can advance the offset toward `MAX_PANE_SCROLL` even once
     /// the content is fully visible, and `Up` then appears to do nothing
     /// until the stored offset drops back below the real maximum.
-    pub fn clamp_scroll(&mut self, view: View, max: u16) {
-        if let Some(offset) = self.scroll_offsets.get_mut(&view) {
+    pub fn clamp_scroll(&mut self, pane: PaneId, max: u16) {
+        if let Some(offset) = self.scroll_offsets.get_mut(&pane) {
             *offset = (*offset).min(max);
         }
     }
@@ -608,7 +618,7 @@ impl AppState {
                 if self.current_view != View::Help {
                     self.help_return_view = Some(self.current_view);
                     self.current_view = View::Help;
-                    self.scroll_offsets.insert(View::Help, 0);
+                    self.scroll_offsets.insert(PaneId::Help, 0);
                 }
             }
             Msg::DismissHelp => {
@@ -626,12 +636,18 @@ impl AppState {
             Msg::Activate => self.activate(),
             Msg::FocusNextPane => self.focus_next_pane(),
             Msg::ScrollUp => {
-                let offset = self.scroll_offsets.entry(self.current_view).or_insert(0);
-                *offset = offset.saturating_sub(1);
+                let pane = self.focused_pane(self.current_view);
+                if pane_is_scrollable(pane) {
+                    let offset = self.scroll_offsets.entry(pane).or_insert(0);
+                    *offset = offset.saturating_sub(1);
+                }
             }
             Msg::ScrollDown => {
-                let offset = self.scroll_offsets.entry(self.current_view).or_insert(0);
-                *offset = offset.saturating_add(1).min(MAX_PANE_SCROLL);
+                let pane = self.focused_pane(self.current_view);
+                if pane_is_scrollable(pane) {
+                    let offset = self.scroll_offsets.entry(pane).or_insert(0);
+                    *offset = offset.saturating_add(1).min(MAX_PANE_SCROLL);
+                }
             }
             Msg::EditController(op) => {
                 if let Some(controller) = self.controller.as_mut()
@@ -778,7 +794,7 @@ impl AppState {
         // A fresh report may be shorter than whatever was last scrolled to,
         // so start it at the top rather than carrying over an offset from a
         // previous run's report — same reasoning as `OpenHelp`'s reset.
-        self.scroll_offsets.insert(View::AfterAction, 0);
+        self.scroll_offsets.insert(PaneId::Report, 0);
         // A fresh terminal result always focuses the report pane, so the
         // outcome hierarchy stays primary regardless of what was last
         // focused in After Action (`docs/TUI_DESIGN.md`, "Focus
@@ -811,7 +827,7 @@ impl AppState {
         // player moves from "watching it run" to "learning what happened."
         if op.is_finished() {
             self.current_view = View::AfterAction;
-            self.scroll_offsets.insert(View::AfterAction, 0);
+            self.scroll_offsets.insert(PaneId::Report, 0);
             self.set_focused_pane(View::AfterAction, PaneId::Report);
         }
         true
@@ -1330,12 +1346,12 @@ mod tests {
         state.apply(Msg::OpenHelp);
         state.apply(Msg::ScrollDown);
         state.apply(Msg::ScrollDown);
-        assert_eq!(state.scroll_offset(View::Help), 2);
+        assert_eq!(state.scroll_offset(PaneId::Help), 2);
 
         state.apply(Msg::ScrollUp);
         state.apply(Msg::ScrollUp);
         state.apply(Msg::ScrollUp);
-        assert_eq!(state.scroll_offset(View::Help), 0);
+        assert_eq!(state.scroll_offset(PaneId::Help), 0);
     }
 
     #[test]
@@ -1345,13 +1361,43 @@ mod tests {
         for _ in 0..1000 {
             state.apply(Msg::ScrollDown);
         }
-        let capped = state.scroll_offset(View::Help);
+        let capped = state.scroll_offset(PaneId::Help);
         assert!(capped < 1000);
 
         for _ in 0..capped {
             state.apply(Msg::ScrollUp);
         }
-        assert_eq!(state.scroll_offset(View::Help), 0);
+        assert_eq!(state.scroll_offset(PaneId::Help), 0);
+    }
+
+    #[test]
+    fn scroll_offsets_are_independent_per_pane() {
+        let mut state = AppState::new();
+
+        state.apply(Msg::OpenHelp);
+        state.apply(Msg::ScrollDown);
+        state.apply(Msg::ScrollDown);
+        state.apply(Msg::DismissHelp);
+
+        state.set_focused_pane(View::AfterAction, PaneId::Report);
+        state.apply(Msg::Navigate(View::AfterAction));
+        state.apply(Msg::ScrollDown);
+
+        assert_eq!(state.scroll_offset(PaneId::Help), 2);
+        assert_eq!(state.scroll_offset(PaneId::Report), 1);
+    }
+
+    #[test]
+    fn scrolling_a_non_scrollable_pane_is_a_no_op() {
+        let mut state = AppState::new();
+        state.set_focused_pane(View::AfterAction, PaneId::FinalFrame);
+        state.apply(Msg::Navigate(View::AfterAction));
+
+        state.apply(Msg::ScrollDown);
+        state.apply(Msg::ScrollDown);
+
+        assert_eq!(state.scroll_offset(PaneId::FinalFrame), 0);
+        assert!(!state.scroll_offsets.contains_key(&PaneId::FinalFrame));
     }
 
     #[test]
@@ -1474,6 +1520,32 @@ mod tests {
 
         assert_eq!(state.current_view(), View::AfterAction);
         assert_eq!(state.focused_pane(View::AfterAction), PaneId::Report);
+    }
+
+    #[test]
+    fn a_fresh_after_action_report_starts_scrolled_to_the_top() {
+        let mut state = working_state();
+        state.controller = Some(Editor::new("function on_tick("));
+        state.apply(Msg::RequestDeploy);
+        state.scroll_offsets.insert(PaneId::Report, 5);
+
+        // A load-error deploy finishes synchronously via `deploy()` itself.
+        state.apply(Msg::RequestDeploy);
+
+        assert_eq!(state.scroll_offset(PaneId::Report), 0);
+    }
+
+    #[test]
+    fn a_report_reached_by_stepping_a_running_operation_starts_scrolled_to_the_top() {
+        let mut state = working_state();
+        state.controller = Some(Editor::new(ALWAYS_ERRORS));
+        state.apply(Msg::RequestDeploy); // starter controller: running, unfinished
+        state.scroll_offsets.insert(PaneId::Report, 5);
+
+        state.advance_running_operation();
+
+        assert!(state.operation().unwrap().finished);
+        assert_eq!(state.scroll_offset(PaneId::Report), 0);
     }
 
     #[test]

@@ -32,7 +32,7 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
-use state::{AppState, Msg, PaneId, View};
+use state::{AppState, Msg, PaneId};
 
 type PanicHook = dyn Fn(&PanicHookInfo<'_>) + Sync + Send + 'static;
 
@@ -413,19 +413,37 @@ fn should_redraw(
             let is_pane_scroll = matches!(msg, Msg::ScrollUp | Msg::ScrollDown);
             state.apply(msg);
             if is_pane_scroll {
-                let view = state.current_view();
-                let max = match view {
-                    View::Help => ui::help_max_scroll(state, frame_size.0, frame_size.1),
-                    View::AfterAction => {
-                        ui::after_action_max_scroll(state, frame_size.0, frame_size.1)
-                    }
-                    _ => 0,
-                };
-                state.clamp_scroll(view, max);
+                let pane = state.focused_pane(state.current_view());
+                if let Some(max) = pane_max_scroll(pane, state, frame_size.0, frame_size.1) {
+                    state.clamp_scroll(pane, max);
+                }
             }
             true
         }
         None => false,
+    }
+}
+
+/// The content- and frame-size-aware maximum scroll offset for `pane`, or
+/// `None` if `pane` isn't scrollable at all. The single source of truth for
+/// which panes are scrollable at render time, kept in sync with
+/// `state::pane_is_scrollable`, which makes the same decision for dispatch
+/// (`Msg::ScrollUp`/`Msg::ScrollDown` themselves must never accumulate an
+/// offset for a pane this function would return `None` for).
+fn pane_max_scroll(
+    pane: PaneId,
+    state: &AppState,
+    frame_width: u16,
+    frame_height: u16,
+) -> Option<u16> {
+    match pane {
+        PaneId::Help => Some(ui::help_max_scroll(state, frame_width, frame_height)),
+        PaneId::Report => Some(ui::after_action_max_scroll(
+            state,
+            frame_width,
+            frame_height,
+        )),
+        _ => None,
     }
 }
 
@@ -434,6 +452,7 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::backend::TestBackend;
+    use state::View;
 
     fn press(code: KeyCode) -> Event {
         Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
@@ -1031,7 +1050,7 @@ mod tests {
                 &mut last_transition_press,
             );
         }
-        let bound = state.scroll_offset(View::Help);
+        let bound = state.scroll_offset(PaneId::Help);
         assert!(
             bound < 100,
             "offset should be clamped to the real content at this viewport, \
@@ -1046,7 +1065,7 @@ mod tests {
         );
 
         assert_eq!(
-            state.scroll_offset(View::Help),
+            state.scroll_offset(PaneId::Help),
             bound - 1,
             "Up should immediately move the stored offset, not appear stuck"
         );
@@ -1245,7 +1264,7 @@ mod tests {
         terminal
             .draw(|frame| ui::draw(frame, &state))
             .expect("redraw should succeed");
-        let scrolled_offset = state.scroll_offset(View::AfterAction);
+        let scrolled_offset = state.scroll_offset(PaneId::Report);
         assert!(scrolled_offset > 0, "report should have scrolled");
 
         // Moving focus to the final-frame satellite pane must stop further
@@ -1263,7 +1282,7 @@ mod tests {
             &mut last_transition_press,
         );
 
-        assert_eq!(state.scroll_offset(View::AfterAction), scrolled_offset);
+        assert_eq!(state.scroll_offset(PaneId::Report), scrolled_offset);
     }
 
     #[test]
