@@ -208,7 +208,7 @@ something to do.
 | Help | Up/Down scroll (its one pane) | — |
 | Signals | Up/Down select, Enter activate (Signals list); none (Selected signal) | — |
 | Target | none | Enter (work opportunity), Esc (back) |
-| Controller | Editing, cursor movement, typed text, paste (Controller source); none (Lua field reference) | F6 deploy, F7 reset |
+| Controller | Editing, cursor movement, typed text, paste (Controller source); none (Lua field reference) | Ctrl+V validate, F6 deploy, F7 reset |
 | Operation | none (either pane) | Space (pause/resume), Enter (step) |
 | After Action | Up/Down scroll (Report); none (Final satellite frame) | F2, F4, F5, F6 |
 
@@ -407,7 +407,7 @@ The editor owns most of the screen. API help is secondary.
 
 Product requirements:
 
-- the editor is focused when this view opens;
+- Controller source is the default focused pane the first time this view opens for a working set; returning to Controller later restores whichever pane was last focused there, per [Pane focus](#pane-focus);
 - line numbers are visible but not part of the source;
 - source survives navigation between views;
 - modified state is visible in the persistent header;
