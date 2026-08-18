@@ -1,16 +1,20 @@
 //! The persistent, full-screen resistance-console session.
 //!
 //! This module hosts the interactive shell described by
-//! `docs/TUI_DESIGN.md`: a session/state model ([`state`]), key-to-intent
-//! mapping ([`event`]), and rendering ([`ui`]). Signals, Target, Controller,
+//! `docs/TUI_DESIGN.md`: a session/state model (`state`), key-to-intent
+//! mapping (`event`), and rendering (`ui`). Signals, Target, Controller,
 //! Operation, and After Action are all populated, completing the
 //! edit-deploy-observe-retry loop.
+//!
+//! [`run`] is the only supported public API: these submodules are
+//! implementation details of the console session, not a supported
+//! embedding surface.
 
-pub mod editor;
-pub mod event;
-pub mod intel;
-pub mod state;
-pub mod ui;
+pub(crate) mod editor;
+pub(crate) mod event;
+pub(crate) mod intel;
+pub(crate) mod state;
+pub(crate) mod ui;
 
 use std::io;
 use std::panic::{self, PanicHookInfo};
