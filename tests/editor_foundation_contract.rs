@@ -206,16 +206,31 @@ fn missing_lua_grammar_falls_back_to_plain_text() {
 // the internal fallback kicks in; a local run does not) and not something
 // a test should be touching regardless.
 //
-// None of that matters for this repo's actual guarantee, which is
-// unchanged from the previous library and lives structurally in
-// `src/console/event.rs`'s `map` function: the Ctrl+V arm
-// (`event.rs:117-119`) is matched before the pane-local dispatch wildcard
-// arm (`event.rs:145`), so no Ctrl+V key event is ever passed to
-// `Editor::input` at all, regardless of what its keymap does with it or
-// what clipboard backend it reaches for. That guarantee is exercised
-// end-to-end by `event.rs`'s own tests
+// `docs/TUI_DESIGN.md`'s "Ctrl+V and the optional Ctrl+Enter alias"
+// section requires that whatever foundation #90 selects, "its default
+// keymap must not take ownership of Ctrl+V for its own purpose" -- and
+// taken literally, no candidate evaluated across this issue satisfies
+// that in isolation: `ratatui-textarea` claims it for PageDown, and
+// `ratatui-code-editor` claims it for Paste. Relying on the fact that
+// today's `src/console/event.rs` routing happens to run first is not a
+// substitute for that requirement, and repeating that substitution is
+// exactly the mistake #90 was reopened to correct the first time around.
+// The actual, binding resolution is architectural, not incidental:
+// Human Exception's own Controller integration (#93 onward) must never
+// call `Editor::input()` at all. It must dispatch through this crate's
+// granular `Action` types directly (`editor.apply(SomeAction)`, exactly
+// as every test in this file does), driven entirely by
+// `src/console/event.rs`'s own key-to-command mapping -- the same pattern
+// the current bespoke `src/console/editor.rs` already uses via
+// `map_controller_edit`. That *is* customizing the keymap: the library's
+// default one is simply never consulted, for Ctrl+V or anything else, at
+// any point before or after integration. `event.rs`'s Ctrl+V arm
+// (`event.rs:117-119`) already matches before the pane-local dispatch
+// wildcard arm (`event.rs:145`) and is exercised end-to-end by that
+// file's own tests
 // (`ctrl_v_also_validates_as_a_fallback_for_terminals_without_ctrl_enter`
-// and friends), not here. Likewise, #94's bracketed-paste integration
+// and friends); #93 must preserve that ordering rather than introduce a
+// call to `Editor::input()`. Likewise, #94's bracketed-paste integration
 // should insert pasted text via `InsertText` directly (as
 // `multiline_paste_via_insert_text` above does), not via this library's
 // `Paste` action -- bracketed paste delivers text the terminal already
