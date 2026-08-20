@@ -10,6 +10,7 @@
 //! implementation details of the console session, not a supported
 //! embedding surface.
 
+pub(crate) mod document;
 pub(crate) mod editor;
 pub(crate) mod event;
 pub(crate) mod intel;
@@ -714,7 +715,7 @@ mod tests {
 
         assert_eq!(
             state.controller_source(),
-            Some(format!("{}xx", intel::STARTER_CONTROLLER).as_str()),
+            Some(format!("{}xx", intel::STARTER_CONTROLLER)),
             "held-key Repeat events should insert just like Press, not be ignored"
         );
     }
@@ -733,13 +734,10 @@ mod tests {
 
         assert_eq!(
             state.controller_source(),
-            Some(
-                format!(
-                    "{}function on_tick()\n  return 1\nend\n",
-                    intel::STARTER_CONTROLLER
-                )
-                .as_str()
-            )
+            Some(format!(
+                "{}function on_tick()\n  return 1\nend\n",
+                intel::STARTER_CONTROLLER
+            ))
         );
     }
 
@@ -775,7 +773,7 @@ mod tests {
 
         assert_eq!(
             state.controller_source(),
-            Some(format!("{}abcZ", intel::STARTER_CONTROLLER).as_str())
+            Some(format!("{}abcZ", intel::STARTER_CONTROLLER))
         );
     }
 
@@ -787,7 +785,10 @@ mod tests {
             &[press(KeyCode::Enter), press(KeyCode::Enter), paste("")],
         );
 
-        assert_eq!(state.controller_source(), Some(intel::STARTER_CONTROLLER));
+        assert_eq!(
+            state.controller_source(),
+            Some(intel::STARTER_CONTROLLER.to_string())
+        );
     }
 
     #[test]
@@ -815,7 +816,7 @@ mod tests {
         assert!(state.reset_confirmation_pending());
         assert_eq!(
             state.controller_source(),
-            Some(format!("{}x", intel::STARTER_CONTROLLER).as_str())
+            Some(format!("{}x", intel::STARTER_CONTROLLER))
         );
     }
 
@@ -832,7 +833,10 @@ mod tests {
             ],
         );
 
-        assert_eq!(state.controller_source(), Some(intel::STARTER_CONTROLLER));
+        assert_eq!(
+            state.controller_source(),
+            Some(intel::STARTER_CONTROLLER.to_string())
+        );
     }
 
     #[test]
@@ -852,7 +856,10 @@ mod tests {
             ],
         );
 
-        assert_eq!(state.controller_source(), Some(intel::STARTER_CONTROLLER));
+        assert_eq!(
+            state.controller_source(),
+            Some(intel::STARTER_CONTROLLER.to_string())
+        );
     }
 
     #[test]
@@ -868,7 +875,10 @@ mod tests {
             ],
         );
 
-        assert_eq!(state.controller_source(), Some(intel::STARTER_CONTROLLER));
+        assert_eq!(
+            state.controller_source(),
+            Some(intel::STARTER_CONTROLLER.to_string())
+        );
     }
 
     #[test]
@@ -956,7 +966,7 @@ mod tests {
         assert!(!state.reset_confirmation_pending());
         assert_eq!(
             state.controller_source(),
-            Some(format!("{}x", intel::STARTER_CONTROLLER)).as_deref(),
+            Some(format!("{}x", intel::STARTER_CONTROLLER)),
             "the second, debounced n must not have been typed into the source"
         );
     }
@@ -982,7 +992,7 @@ mod tests {
 
         assert_eq!(
             state.controller_source(),
-            Some(format!("{}nn", intel::STARTER_CONTROLLER)).as_deref(),
+            Some(format!("{}nn", intel::STARTER_CONTROLLER)),
             "both n presses should have inserted; no dialog was ever open"
         );
     }
@@ -999,7 +1009,10 @@ mod tests {
             ],
         );
 
-        assert_eq!(state.controller_source(), Some(intel::STARTER_CONTROLLER));
+        assert_eq!(
+            state.controller_source(),
+            Some(intel::STARTER_CONTROLLER.to_string())
+        );
     }
 
     #[test]
@@ -1022,7 +1035,10 @@ mod tests {
             state.focused_pane(View::Controller),
             PaneId::LuaFieldReference
         );
-        assert_eq!(state.controller_source(), Some(intel::STARTER_CONTROLLER));
+        assert_eq!(
+            state.controller_source(),
+            Some(intel::STARTER_CONTROLLER.to_string())
+        );
     }
 
     #[test]
@@ -1298,7 +1314,10 @@ mod tests {
         events.push(press(KeyCode::F(4))); // back to Controller, edits intact
         let (state, _) = render(120, 40, &events);
         assert_eq!(state.current_view(), View::Controller);
-        assert_eq!(state.controller_source(), Some("function on_tick("));
+        assert_eq!(
+            state.controller_source(),
+            Some("function on_tick(".to_string())
+        );
 
         events.extend(clear_and_type(
             "function on_tick(observation) return \"wait\" end",

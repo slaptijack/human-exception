@@ -466,7 +466,7 @@ fn draw_controller_source(frame: &mut Frame, area: Rect, state: &AppState, focus
     // cursor disappear.
     let cursor_display_end = cursor_display_col + cursor_glyph_width - 1;
     let first_visible_cell = first_visible_offset(cursor_display_end, text_width);
-    let lines = controller_editor_lines(source, cursor_line, cursor_col, first_visible_cell);
+    let lines = controller_editor_lines(&source, cursor_line, cursor_col, first_visible_cell);
     let viewport_height = content_area.height as usize;
     let first_visible_row = first_visible_offset(cursor_line, viewport_height);
     // Clamp is separate from `first_visible_offset` itself so a document
