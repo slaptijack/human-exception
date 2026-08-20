@@ -6,7 +6,8 @@
 
 use std::collections::HashMap;
 
-use super::editor::{EditOp, Editor};
+use super::document::ControllerDocument;
+use super::editor::EditOp;
 use super::intel::authored_signals;
 use crate::lua_controller::{self, ControllerError, LiveOperation, TickRecord};
 
@@ -278,7 +279,7 @@ pub struct AppState {
     /// The player's current Lua source and cursor for the working set,
     /// seeded from the starter controller the first time an opportunity is
     /// committed to.
-    controller: Option<Editor>,
+    controller: Option<ControllerDocument>,
     /// The result of the most recent validation, reset to `Unchecked` by
     /// every edit or reset.
     validation: Validation,
@@ -357,14 +358,16 @@ impl AppState {
         self.selected_signal
     }
 
-    pub fn controller_source(&self) -> Option<&str> {
-        self.controller.as_ref().map(Editor::source)
+    pub fn controller_source(&self) -> Option<String> {
+        self.controller.as_ref().map(ControllerDocument::source)
     }
 
     /// 0-based `(line, column)` of the cursor in the current controller
     /// source, if a controller is loaded.
     pub fn controller_cursor(&self) -> Option<(usize, usize)> {
-        self.controller.as_ref().map(Editor::cursor_line_col)
+        self.controller
+            .as_ref()
+            .map(ControllerDocument::cursor_line_col)
     }
 
     /// Whether the current controller source differs from the starter
@@ -688,7 +691,7 @@ impl AppState {
             }
             Msg::ValidateController => {
                 if let Some(source) = self.controller_source() {
-                    self.validation = match lua_controller::validate(source) {
+                    self.validation = match lua_controller::validate(&source) {
                         Ok(()) => Validation::Valid,
                         Err(err) => Validation::Invalid(err.to_string()),
                     };
@@ -780,7 +783,6 @@ impl AppState {
         let Some(source) = self.controller_source() else {
             return;
         };
-        let source = source.to_string();
         let run_id = self.next_run_id;
         self.next_run_id += 1;
 
@@ -875,7 +877,8 @@ impl AppState {
             View::Target => {
                 if self.working_set != Some(WorkingSet::FirstContact) {
                     self.working_set = Some(WorkingSet::FirstContact);
-                    self.controller = Some(Editor::new(super::intel::STARTER_CONTROLLER));
+                    self.controller =
+                        Some(ControllerDocument::new(super::intel::STARTER_CONTROLLER));
                 }
                 self.current_view = View::Controller;
             }
@@ -1113,7 +1116,7 @@ mod tests {
         assert_eq!(state.working_set(), Some(WorkingSet::FirstContact));
         assert_eq!(
             state.controller_source(),
-            Some(super::super::intel::STARTER_CONTROLLER)
+            Some(super::super::intel::STARTER_CONTROLLER.to_string())
         );
         assert_eq!(state.current_view(), View::Controller);
     }
@@ -1130,7 +1133,7 @@ mod tests {
 
         assert_eq!(
             state.controller_source(),
-            Some(format!("{}!", super::super::intel::STARTER_CONTROLLER).as_str())
+            Some(format!("{}!", super::super::intel::STARTER_CONTROLLER))
         );
     }
 
@@ -1176,7 +1179,7 @@ mod tests {
 
         state.apply(Msg::PasteController(String::new()));
 
-        assert_eq!(state.controller_source(), Some(source_before.as_str()));
+        assert_eq!(state.controller_source(), Some(source_before.clone()));
         assert_eq!(state.validation(), &Validation::Valid);
     }
 
@@ -1217,8 +1220,8 @@ mod tests {
         assert_eq!(state.validation(), &Validation::Valid);
 
         // DeleteForward at the document's end and Backspace at its start
-        // are both no-ops (Editor::apply reports no mutation), so neither
-        // should invalidate a result that's still accurate.
+        // are both no-ops (ControllerDocument::apply reports no mutation),
+        // so neither should invalidate a result that's still accurate.
         state.apply(Msg::EditController(EditOp::DeleteForward));
         assert_eq!(
             state.validation(),
@@ -1281,7 +1284,7 @@ mod tests {
         assert!(!state.reset_confirmation_pending());
         assert_eq!(
             state.controller_source(),
-            Some(super::super::intel::STARTER_CONTROLLER)
+            Some(super::super::intel::STARTER_CONTROLLER.to_string())
         );
     }
 
@@ -1311,7 +1314,7 @@ mod tests {
         assert!(!state.reset_confirmation_pending());
         assert_eq!(
             state.controller_source(),
-            Some(super::super::intel::STARTER_CONTROLLER)
+            Some(super::super::intel::STARTER_CONTROLLER.to_string())
         );
     }
 
@@ -1596,7 +1599,7 @@ mod tests {
     #[test]
     fn deploying_a_script_with_a_load_error_surfaces_it_without_a_live_run() {
         let mut state = working_state();
-        state.controller = Some(Editor::new("function on_tick("));
+        state.controller = Some(ControllerDocument::new("function on_tick("));
 
         state.apply(Msg::RequestDeploy);
 
@@ -1612,7 +1615,7 @@ mod tests {
     fn deploying_a_fresh_run_focuses_the_after_action_report() {
         let mut state = working_state();
         state.set_focused_pane(View::AfterAction, PaneId::FinalFrame);
-        state.controller = Some(Editor::new("function on_tick("));
+        state.controller = Some(ControllerDocument::new("function on_tick("));
 
         state.apply(Msg::RequestDeploy);
 
@@ -1623,7 +1626,7 @@ mod tests {
     #[test]
     fn a_fresh_after_action_report_starts_scrolled_to_the_top() {
         let mut state = working_state();
-        state.controller = Some(Editor::new("function on_tick("));
+        state.controller = Some(ControllerDocument::new("function on_tick("));
         state.apply(Msg::RequestDeploy);
         state.scroll_offsets.insert(PaneId::Report, 5);
 
@@ -1636,7 +1639,7 @@ mod tests {
     #[test]
     fn a_report_reached_by_stepping_a_running_operation_starts_scrolled_to_the_top() {
         let mut state = working_state();
-        state.controller = Some(Editor::new(ALWAYS_ERRORS));
+        state.controller = Some(ControllerDocument::new(ALWAYS_ERRORS));
         state.apply(Msg::RequestDeploy); // starter controller: running, unfinished
         state.scroll_offsets.insert(PaneId::Report, 5);
 
@@ -1649,7 +1652,7 @@ mod tests {
     #[test]
     fn redeploying_a_finished_operation_needs_no_confirmation() {
         let mut state = working_state();
-        state.controller = Some(Editor::new(ALWAYS_ERRORS));
+        state.controller = Some(ControllerDocument::new(ALWAYS_ERRORS));
         state.apply(Msg::RequestDeploy);
         state.advance_running_operation();
         assert!(state.operation().unwrap().finished);
@@ -1667,7 +1670,7 @@ mod tests {
     #[test]
     fn finishing_a_running_operation_focuses_the_after_action_report() {
         let mut state = working_state();
-        state.controller = Some(Editor::new(ALWAYS_ERRORS));
+        state.controller = Some(ControllerDocument::new(ALWAYS_ERRORS));
         state.apply(Msg::RequestDeploy);
         state.set_focused_pane(View::AfterAction, PaneId::FinalFrame);
 
@@ -1737,7 +1740,7 @@ mod tests {
     #[test]
     fn step_operation_tick_advances_exactly_one_tick_and_stays_paused() {
         let mut state = working_state();
-        state.controller = Some(Editor::new(ROUTE_TO_UPLINK));
+        state.controller = Some(ControllerDocument::new(ROUTE_TO_UPLINK));
         state.apply(Msg::RequestDeploy);
         state.apply(Msg::TogglePauseOperation);
         assert!(state.operation().unwrap().paused);
@@ -1752,7 +1755,7 @@ mod tests {
     #[test]
     fn toggle_pause_flips_paused_and_is_a_no_op_once_finished() {
         let mut state = working_state();
-        state.controller = Some(Editor::new(ALWAYS_ERRORS));
+        state.controller = Some(ControllerDocument::new(ALWAYS_ERRORS));
         state.apply(Msg::RequestDeploy);
         state.advance_running_operation();
         assert!(state.operation().unwrap().finished);
@@ -1850,7 +1853,7 @@ mod tests {
     #[test]
     fn a_callback_error_finishes_the_operation_and_is_recorded() {
         let mut state = working_state();
-        state.controller = Some(Editor::new(ALWAYS_ERRORS));
+        state.controller = Some(ControllerDocument::new(ALWAYS_ERRORS));
         state.apply(Msg::RequestDeploy);
 
         state.advance_running_operation();
@@ -1864,7 +1867,7 @@ mod tests {
     #[test]
     fn running_a_route_to_completion_reaches_an_unambiguous_success() {
         let mut state = working_state();
-        state.controller = Some(Editor::new(ROUTE_TO_UPLINK));
+        state.controller = Some(ControllerDocument::new(ROUTE_TO_UPLINK));
         state.apply(Msg::RequestDeploy);
 
         for _ in 0..8 {
@@ -1895,7 +1898,7 @@ mod tests {
     #[test]
     fn a_successful_run_reaches_a_success_conclusion_with_matching_evidence() {
         let mut state = working_state();
-        state.controller = Some(Editor::new(ROUTE_TO_UPLINK));
+        state.controller = Some(ControllerDocument::new(ROUTE_TO_UPLINK));
         state.apply(Msg::RequestDeploy);
 
         for _ in 0..8 {
@@ -1919,7 +1922,7 @@ mod tests {
     #[test]
     fn exhausting_the_budget_reaches_a_budget_exhausted_conclusion() {
         let mut state = working_state();
-        state.controller = Some(Editor::new(ALWAYS_WAITS));
+        state.controller = Some(ControllerDocument::new(ALWAYS_WAITS));
         state.apply(Msg::RequestDeploy);
 
         for _ in 0..15 {
@@ -1936,7 +1939,7 @@ mod tests {
     #[test]
     fn a_deploy_time_load_failure_reaches_a_controller_error_conclusion() {
         let mut state = working_state();
-        state.controller = Some(Editor::new("function on_tick("));
+        state.controller = Some(ControllerDocument::new("function on_tick("));
 
         state.apply(Msg::RequestDeploy);
 
@@ -1951,7 +1954,7 @@ mod tests {
     #[test]
     fn a_callback_error_reaches_a_controller_error_conclusion() {
         let mut state = working_state();
-        state.controller = Some(Editor::new(ALWAYS_ERRORS));
+        state.controller = Some(ControllerDocument::new(ALWAYS_ERRORS));
         state.apply(Msg::RequestDeploy);
 
         state.advance_running_operation();
@@ -1967,7 +1970,7 @@ mod tests {
     #[test]
     fn a_missing_callback_reaches_a_controller_error_conclusion() {
         let mut state = working_state();
-        state.controller = Some(Editor::new("local x = 1"));
+        state.controller = Some(ControllerDocument::new("local x = 1"));
 
         state.apply(Msg::RequestDeploy);
 
@@ -1982,7 +1985,7 @@ mod tests {
     #[test]
     fn reviewing_a_finished_run_returns_to_operation_with_the_frozen_telemetry() {
         let mut state = working_state();
-        state.controller = Some(Editor::new(ROUTE_TO_UPLINK));
+        state.controller = Some(ControllerDocument::new(ROUTE_TO_UPLINK));
         state.apply(Msg::RequestDeploy);
         for _ in 0..8 {
             state.advance_running_operation();
@@ -2026,14 +2029,16 @@ mod tests {
     #[test]
     fn quitting_after_the_operation_finished_needs_no_confirmation_for_it() {
         let mut state = working_state();
-        state.controller = Some(Editor::new(ALWAYS_ERRORS));
+        state.controller = Some(ControllerDocument::new(ALWAYS_ERRORS));
         state.apply(Msg::RequestDeploy);
         state.advance_running_operation();
         assert!(state.operation().unwrap().finished);
         // Restore the controller to the unmodified starter so this test
         // isolates the finished operation's own contribution to the quit
         // gate from the (unrelated) modified-controller gate.
-        state.controller = Some(Editor::new(super::super::intel::STARTER_CONTROLLER));
+        state.controller = Some(ControllerDocument::new(
+            super::super::intel::STARTER_CONTROLLER,
+        ));
         assert!(!state.controller_modified());
 
         state.apply(Msg::RequestQuit);
