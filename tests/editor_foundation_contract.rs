@@ -14,26 +14,39 @@
 //! completing that comparison -- see the issue for the full record).
 //! `ratatui-code-editor` has a tree-sitter-backed highlighting story with
 //! real per-language grammars, not just a caller-owned range API without
-//! any grammar behind it. It's consumed here as a git dependency on
-//! `slaptijack/ratatui-code-editor`'s
-//! `feature-gate-languages` branch rather than the crates.io release,
-//! because the upstream crate (`vipmax/ratatui-code-editor`) bundles all
-//! 15 of its Tree-sitter grammars as mandatory dependencies with no way to
-//! opt out. The fork (proposed upstream as
-//! <https://github.com/vipmax/ratatui-code-editor/issues/14>) makes each
-//! grammar an optional `language-<name>` feature; this repo depends on it
-//! with `default-features = false` and only the `crossterm` feature
-//! enabled, so zero Tree-sitter grammars are pulled in. See the issue for
-//! the full comparison. If upstream accepts the fork's changes this
-//! dependency can move to a released crates.io version; if not, the fork
-//! remains the source for now.
+//! any grammar behind it. It's consumed here as the published
+//! `ratatui-code-editor = "0.0.6"` crate from crates.io -- not a git
+//! dependency -- because #91 will promote this from a
+//! `[dev-dependencies]` entry to a regular one, and crates.io does not
+//! accept published packages with non-dev git-only dependencies. The
+//! published crate bundles all 15 of its Tree-sitter grammars as
+//! mandatory, non-optional dependencies; that's accepted here as ordinary
+//! transitive compile cost rather than a reason to depend on a fork.
+//! `slaptijack/ratatui-code-editor`'s `feature-gate-languages` branch
+//! (proposed upstream as
+//! <https://github.com/vipmax/ratatui-code-editor/issues/14>) still
+//! exists and makes each grammar an optional `language-<name>` feature,
+//! but it's an independent, non-blocking contribution -- Human Exception's
+//! own dependency graph does not depend on it landing.
 //!
 //! Lua highlighting is not yet available: no `language-lua` feature exists
-//! on either upstream or the fork (see `missing_lua_grammar_falls_back_to_plain_text`
-//! below for what that means in practice today). Adding it is tracked as a
-//! follow-up in the same upstream issue and is not required for this
-//! decision, consistent with the epic's "highlighting is desirable but not
+//! upstream (see `missing_lua_grammar_falls_back_to_plain_text` below for
+//! what that means in practice today). Adding it is tracked as a follow-up
+//! in the same upstream issue and is not required for this decision,
+//! consistent with the epic's "highlighting is desirable but not
 //! required" scope.
+//!
+//! **Known limitation, accepted for this decision:** `Editor::focus()` can
+//! fail to keep the cursor visible on long lines made of wide (double-width)
+//! glyphs -- see `known_limitation_wide_glyph_line_can_leave_cursor_offscreen_after_focus`
+//! below and <https://github.com/vipmax/ratatui-code-editor/issues/15> for
+//! the confirmed root cause. Ordinary ASCII editing/scrolling and exact
+//! Unicode source round-tripping (including combining marks) are
+//! unaffected; only cursor-visibility-follows-viewport for sufficiently
+//! long wide-glyph lines is. This is accepted as a temporary limitation,
+//! tracked upstream independently of this repo, and does not block #91 or
+//! the epic. No Human-Exception-specific workaround should be added for it
+//! without a separate decision.
 //!
 //! This is not yet wired into the Controller (`src/console/editor.rs` is
 //! still the live implementation) -- that integration is #91 onward.
@@ -52,6 +65,25 @@ fn area() -> Rect {
 
 fn editor(text: &str) -> Editor {
     Editor::new("lua", text, vec![]).expect("editor construction must not fail")
+}
+
+/// The dependency-specific "replace the working source and reset editing
+/// state" strategy this issue was asked to prove: `Editor` has no
+/// in-place replacement API that also resets cursor/selection/viewport/
+/// history (see `source_replacement_resets_everything_and_history_cannot_restore_old_source`
+/// below for why `set_content` doesn't qualify), so replacement
+/// reconstructs a fresh `Editor` and positions it per
+/// `docs/TUI_DESIGN.md`'s "F7 reset" contract (cursor at the end,
+/// selection cleared, viewport scrolled to keep the cursor visible).
+/// Intentionally narrow and kept inside this test file: #91's
+/// `ControllerDocument` adapter is the real place this pattern belongs,
+/// and it should expose this as an application-level operation, not
+/// `Code`/`Rope`/history internals.
+fn replace_source(new_source: &str) -> Editor {
+    let mut ed = editor(new_source);
+    ed.set_cursor(new_source.chars().count());
+    ed.focus(&area());
+    ed
 }
 
 #[test]
@@ -147,11 +179,129 @@ fn unicode_combining_marks_and_wide_glyphs_round_trip() {
 }
 
 #[test]
+fn combining_marks_keep_cursor_visible_after_focus() {
+    // 20 "e + combining acute accent" graphemes: 40 characters, but each
+    // grapheme is a single display cell wide, so this is well within a
+    // 40-column viewport. `focus()`'s scroll decision uses the raw
+    // character count as a stand-in for visual width; because a
+    // combining-mark grapheme's character count is always >= its actual
+    // visual width, that stand-in over-scrolls rather than under-scrolls,
+    // so the cursor stays visible here (unlike the wide-glyph case below,
+    // where the stand-in under-scrolls).
+    let base = "e\u{0301}";
+    let line: String = std::iter::repeat_n(base, 20).collect();
+    let mut ed = editor(&line);
+    ed.set_cursor(line.chars().count());
+    ed.focus(&area());
+    assert!(
+        ed.get_visible_cursor(&area()).is_some(),
+        "combining-mark line should keep the cursor visible after focus()"
+    );
+}
+
+// Confirmed upstream bug, tracked at
+// <https://github.com/vipmax/ratatui-code-editor/issues/15>:
+// `Editor::focus()` (`src/editor.rs`) decides whether to scroll
+// horizontally by comparing the cursor's raw *character-count* column
+// against the viewport's *terminal-cell* width. For a line of wide
+// (double-width) glyphs, character count under-counts the true visual
+// width, so `focus()` can conclude no scroll is needed while the cursor is
+// actually off-screen. `get_visible_cursor()` computes the correct
+// grapheme-width-based visual column and (correctly) reports the cursor as
+// not visible in that case -- confirmed empirically (`offset_x` stays `0`;
+// `get_visible_cursor()` returns `None`) against both the published 0.0.6
+// crate and the fork, whose `focus()`/`get_visible_cursor()` are
+// byte-identical.
+//
+// This test intentionally asserts *today's actual, broken* behavior
+// (`is_none()`), not the desired one, so it stays green until the bug is
+// fixed rather than leaving CI red for a known, accepted limitation. When
+// `ratatui-code-editor` is upgraded to a version that fixes this, this
+// test is expected to start FAILING -- that failure is the signal to
+// replace it with the desired assertion (`is_some()`), not to delete or
+// weaken it. Ordinary ASCII editing/scrolling and exact Unicode source
+// round-tripping (including combining marks, see above) are unaffected;
+// this is a narrow, accepted, temporary limitation on cursor-visibility
+// for long wide-glyph lines specifically. No Human-Exception-specific
+// workaround should be added for it without a separate decision.
+#[test]
+fn known_limitation_wide_glyph_line_can_leave_cursor_offscreen_after_focus() {
+    let line: String = std::iter::repeat_n('界', 20).collect();
+    let mut ed = editor(&line);
+    ed.set_cursor(line.chars().count());
+    ed.focus(&area());
+    assert_eq!(
+        ed.get_offset_x(),
+        0,
+        "focus() does not scroll for this wide-glyph line (the bug)"
+    );
+    assert!(
+        ed.get_visible_cursor(&area()).is_none(),
+        "cursor is therefore off-screen -- if this now returns Some(_), \
+         the upstream bug is fixed: replace this assertion with is_some() \
+         and update the doc comment above"
+    );
+}
+
+#[test]
 fn exact_source_round_trip_including_empty_and_trailing_newline() {
     for src in ["", "a", "a\nb", "a\nb\n", "\n", "a\n\n"] {
         let ed = editor(src);
         assert_eq!(ed.get_content(), src, "round trip failed for {src:?}");
     }
+}
+
+#[test]
+fn source_replacement_resets_everything_and_history_cannot_restore_old_source() {
+    // Give the discarded editor real undo history, an active-then-cleared
+    // selection's worth of edits, and a scrolled viewport (a long line and
+    // many rows, matching the fixtures in the scrolling tests above), so
+    // replacement has something nontrivial to reset.
+    let lines: Vec<String> = (0..100).map(|i| format!("line {i}")).collect();
+    let mut source = lines.join("\n");
+    source.push_str(&"x".repeat(200));
+    let mut ed = editor(&source);
+    for _ in 0..5 {
+        ed.apply(MoveRight { shift: true });
+    }
+    ed.apply(InsertText {
+        text: "XXXXX".to_string(),
+    });
+    ed.set_cursor(ed.get_content().chars().count());
+    ed.focus(&area());
+    assert!(
+        ed.get_offset_x() > 0 || ed.get_offset_y() > 0,
+        "sanity check: the discarded editor should have scrolled"
+    );
+
+    let new_source = "starter\ntext\n"; // trailing newline included on purpose
+    ed = replace_source(new_source);
+
+    assert_eq!(
+        ed.get_content(),
+        new_source,
+        "replacement source must be exact, including the trailing newline"
+    );
+    assert_eq!(
+        ed.get_cursor(),
+        new_source.chars().count(),
+        "cursor must reset to the end of the replacement source"
+    );
+    assert!(
+        ed.get_selection().is_none(),
+        "replacement must clear any selection"
+    );
+    assert_eq!(ed.get_offset_x(), 0, "horizontal viewport must reset");
+    assert_eq!(ed.get_offset_y(), 0, "vertical viewport must reset");
+
+    // The discarded source must not be recoverable through undo -- this is
+    // a fresh Editor with fresh history, not an in-place edit.
+    ed.apply(Undo {});
+    assert_eq!(
+        ed.get_content(),
+        new_source,
+        "undo after replacement must not resurrect the discarded source"
+    );
 }
 
 #[test]

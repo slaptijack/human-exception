@@ -22,6 +22,4 @@ unicode-segmentation = "1.13"
 unicode-width = "0.2"
 
 [dev-dependencies]
-ratatui-code-editor = { git = "https://github.com/slaptijack/ratatui-code-editor", branch = "feature-gate-languages", default-features = false, features = [
-    "crossterm",
-] }
+ratatui-code-editor = "0.0.6"
