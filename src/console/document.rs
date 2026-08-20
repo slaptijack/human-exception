@@ -218,12 +218,33 @@ impl ControllerDocument {
         self.move_to(target_line, self.preferred_col);
     }
 
+    /// Moves the cursor to `target_col` chars into `target_line`, clamped
+    /// to the line's length and then snapped to the nearest grapheme
+    /// boundary at or before that column. A raw char-count clamp can land
+    /// inside a multi-codepoint grapheme (e.g. a base character plus a
+    /// combining mark) on a *different* line than `target_col` was
+    /// measured on, since line lengths and grapheme composition vary line
+    /// to line; landing there would violate the grapheme-safe movement
+    /// contract in `docs/TUI_DESIGN.md` ("Minimum editor experience") that
+    /// `MoveLeft`/`MoveRight` already honor via the library's own
+    /// grapheme-boundary movement.
     fn move_to(&mut self, target_line: usize, target_col: usize) {
         let code = self.editor.code_ref();
         let target_line_start = code.line_to_char(target_line);
         let target_line_len = code.line_len(target_line);
         let clamped_col = target_col.min(target_line_len);
-        self.editor.set_cursor(target_line_start + clamped_col);
+        let raw_offset = target_line_start + clamped_col;
+
+        let mut boundary = target_line_start;
+        loop {
+            let next = code.next_grapheme_boundary(boundary);
+            if next > raw_offset || next == boundary {
+                break;
+            }
+            boundary = next;
+        }
+
+        self.editor.set_cursor(boundary);
     }
 
     fn sync_preferred_col(&mut self) {
@@ -342,6 +363,23 @@ mod tests {
 
         doc.apply(EditOp::MoveDown); // back onto "ghijkl", remembers column 6
         assert_eq!(doc.cursor_line_col(), (2, 6));
+    }
+
+    #[test]
+    fn vertical_movement_snaps_the_target_column_to_a_grapheme_boundary() {
+        // "é" here is the base character `e` plus a combining acute accent
+        // — a two-`char` grapheme cluster. Column 1 sits between the two
+        // `char`s that make it up; landing there would split the cluster.
+        let mut doc = ControllerDocument::new("e\u{0301}y\nx");
+        assert_eq!(doc.cursor_line_col(), (1, 1)); // end of "x"
+
+        doc.apply(EditOp::MoveUp);
+        assert_eq!(
+            doc.cursor_line_col(),
+            (0, 0),
+            "column 1 falls inside the e+combining-accent grapheme; the \
+             cursor must snap back to its start (column 0), not split it"
+        );
     }
 
     #[test]
