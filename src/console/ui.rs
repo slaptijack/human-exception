@@ -18,7 +18,6 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use unicode_segmentation::UnicodeSegmentation;
 
 pub const MIN_COLUMNS: u16 = 80;
 pub const MIN_ROWS: u16 = 24;
@@ -431,57 +430,18 @@ fn draw_controller_source(frame: &mut Frame, area: Rect, state: &AppState, focus
         (inner, None)
     };
 
-    let source = state.controller_source().unwrap_or_default();
-    let (cursor_line, cursor_col) = state.controller_cursor().unwrap_or((0, 0));
-    let total_lines = source.split('\n').count();
-    let gutter_width = source_gutter_width(total_lines);
-    let text_width = (content_area.width as usize).saturating_sub(gutter_width);
-    // Scrolling is computed in terminal display cells, not `char`s: a
-    // double-width character (e.g. CJK text in a comment or string) still
-    // costs two columns on screen even though it's one `char`, so indexing
-    // by `char` count alone can leave the cursor's true screen column
-    // outside a narrow pane while this thinks it's still visible.
-    let cursor_line_text = source.split('\n').nth(cursor_line).unwrap_or("");
-    let cursor_line_chars: Vec<char> = cursor_line_text.chars().collect();
-    // The cursor's highlighted unit is a whole grapheme cluster (see
-    // `cursor_grapheme_char_range`), not necessarily the single `char` at
-    // `cursor_col` — `cursor_col` can land on a zero-width character (a
-    // combining mark, or a variation selector like U+FE0F) whose own
-    // `unicode-width` value says nothing about the *combined* cell width
-    // ratatui's `CellWidth` actually renders for the pair. Measuring only
-    // that one `char` could under-reserve scroll room for a wider unit,
-    // clipping it off the pane's edge entirely.
-    let (cursor_start_col, cursor_glyph_width) = if cursor_col < cursor_line_chars.len() {
-        let (at_start, at_end) = cursor_grapheme_char_range(cursor_line_text, cursor_col);
-        let glyph: String = cursor_line_chars[at_start..at_end].iter().collect();
-        (at_start, (glyph.as_str().cell_width() as usize).max(1))
-    } else {
-        (cursor_col, 1usize) // past the last character: the synthetic trailing cursor cell
-    };
-    let cursor_display_col = display_width_of_prefix(cursor_line_text, cursor_start_col);
-    // Scroll far enough to fit the cursor glyph's *far* edge, not just its
-    // start column: reserving only one cell for a double-width character
-    // (e.g. CJK) leaves it straddling the pane's right edge, and ratatui
-    // won't render a two-cell glyph that doesn't fully fit, making the
-    // cursor disappear.
-    let cursor_display_end = cursor_display_col + cursor_glyph_width - 1;
-    let first_visible_cell = first_visible_offset(cursor_display_end, text_width);
-    let lines = controller_editor_lines(&source, cursor_line, cursor_col, first_visible_cell);
-    let viewport_height = content_area.height as usize;
-    let first_visible_row = first_visible_offset(cursor_line, viewport_height);
-    // Clamp is separate from `first_visible_offset` itself so a document
-    // shorter than the viewport never scrolls past its own last line, which
-    // matters vertically (there's a fixed document length to respect) but
-    // not horizontally (each line has its own length, so there's no single
-    // "last column" to clamp against).
-    let max_first_row = total_lines.saturating_sub(viewport_height);
-    let first_visible_row = first_visible_row.min(max_first_row);
-    let visible_lines: Vec<Line<'static>> = lines
-        .into_iter()
-        .skip(first_visible_row)
-        .take(viewport_height)
-        .collect();
-    frame.render_widget(Paragraph::new(visible_lines), content_area);
+    // The editor foundation (issue #90) owns gutter, wrapping, and viewport
+    // scroll for its own widget; Controller only supplies the area and,
+    // when this pane is focused, forwards the widget's own cursor position
+    // to the real terminal cursor (`docs/TUI_DESIGN.md`'s "the cursor is
+    // visibly rendered whenever Controller source is the focused pane").
+    if let Some(document) = state.controller() {
+        let editor = document.sync_for_render(content_area);
+        frame.render_widget(&*editor, content_area);
+        if focused && let Some(cursor) = editor.get_visible_cursor(&content_area) {
+            frame.set_cursor_position(cursor);
+        }
+    }
 
     if let (Some(banner_area), Some(banner)) = (banner_area, banner) {
         frame.render_widget(
@@ -515,163 +475,6 @@ fn controller_banner(state: &AppState) -> Option<Line<'static>> {
             Style::default().add_modifier(Modifier::BOLD),
         ))),
     }
-}
-
-/// The gutter column width (digits plus one trailing space) for a document
-/// of `total_lines` lines. Shared between the line-rendering and the
-/// horizontal-viewport-width calculation so they can't drift apart.
-fn source_gutter_width(total_lines: usize) -> usize {
-    total_lines.to_string().len().max(2) + 1
-}
-
-/// Renders `source` as line-numbered rows with the cursor shown as a
-/// reversed-style character (or a reversed space at end-of-line/on an empty
-/// line), one [`Line`] per source line. `first_visible_col` horizontally
-/// scrolls every line together (the same offset for all of them, as
-/// ordinary editors do), so a line longer than the pane doesn't leave the
-/// cursor invisible off the right edge once it moves or types past it.
-fn controller_editor_lines(
-    source: &str,
-    cursor_line: usize,
-    cursor_col: usize,
-    first_visible_cell: usize,
-) -> Vec<Line<'static>> {
-    let raw_lines: Vec<&str> = source.split('\n').collect();
-    let gutter_width = source_gutter_width(raw_lines.len()) - 1;
-    raw_lines
-        .iter()
-        .enumerate()
-        .map(|(idx, text)| {
-            let number = Span::styled(
-                format!("{:>gutter_width$} ", idx + 1),
-                Style::default().add_modifier(Modifier::DIM),
-            );
-            let mut spans = vec![number];
-            let skip_chars = chars_to_skip_for_cell_offset(text, first_visible_cell);
-            let visible: String = text.chars().skip(skip_chars).collect();
-            if idx == cursor_line {
-                let visible_cursor_col = cursor_col.saturating_sub(skip_chars);
-                spans.extend(cursor_line_spans(&visible, visible_cursor_col));
-            } else {
-                spans.push(Span::raw(visible));
-            }
-            Line::from(spans)
-        })
-        .collect()
-}
-
-/// The display-cell width of the first `char_count` characters of `text`,
-/// computed via ratatui's own [`CellWidth`] — the exact same calculation
-/// `Buffer`/`Paragraph` use to lay out and clip rendered text — rather than
-/// summing each character's individual `unicode-width` value in isolation.
-/// Those can disagree: `CellWidth` applies a terminal-compatibility
-/// adjustment for a few grapheme-forming character combinations (e.g.
-/// halfwidth katakana dakuten/handakuten marks, which `unicode-width`
-/// reports as zero-width on their own but which terminals render as an
-/// extra occupied cell) that a naive per-character sum misses entirely,
-/// under- or over-counting exactly the columns this function's callers use
-/// to decide what's on screen and where the cursor cell actually falls.
-fn display_width_of_prefix(text: &str, char_count: usize) -> usize {
-    let prefix: String = text.chars().take(char_count).collect();
-    prefix.cell_width() as usize
-}
-
-/// How many leading characters of `text` to skip so that they, combined,
-/// consume at least `cells` display-cell columns — the character-count
-/// equivalent of a cell-based horizontal scroll offset, since `chars()`
-/// iterates by character, not display width. Uses the same [`CellWidth`]
-/// calculation as [`display_width_of_prefix`], for the same reason: it
-/// must agree with ratatui's own rendering, not an independent per-character
-/// unicode-width sum that can diverge from it.
-fn chars_to_skip_for_cell_offset(text: &str, cells: usize) -> usize {
-    let mut consumed = 0usize;
-    let mut skip = 0usize;
-    // Advances by whole extended grapheme clusters, not individual
-    // `char`s: `cells` can land partway through a multi-scalar cluster
-    // (e.g. a ZWJ sequence like "👩‍💻"), and skipping only the leading
-    // scalars of one would leave the visible line starting mid-cluster —
-    // a split glyph ratatui can't render as the single unit it actually
-    // is, at a horizontal-scroll offset the cursor's own grapheme-aware
-    // positioning (`cursor_grapheme_char_range`) assumes lines always
-    // start on a real boundary.
-    for grapheme in text.graphemes(true) {
-        if consumed >= cells {
-            break;
-        }
-        consumed += grapheme.cell_width() as usize;
-        skip += grapheme.chars().count();
-    }
-    skip
-}
-
-/// The char-index range `[at_start, at_end)` of the extended grapheme
-/// cluster (per Unicode's own segmentation rules, via `unicode-segmentation`
-/// — the same algorithm ratatui uses internally to lay out and measure
-/// text) containing `cursor_col` within `text`. Real terminals — and
-/// ratatui's own `CellWidth` — render a whole cluster as one visual unit,
-/// which is not always "a character plus its immediately adjacent
-/// zero-width neighbors": a zero-width joiner sequence (`👩‍💻`, where
-/// neither the woman nor the computer emoji is itself zero-width — only
-/// the joiner between them is) or a regional-indicator pair forming a flag
-/// (`🇺🇸`, where *neither* component is zero-width) both need real
-/// grapheme-boundary rules to group correctly. Treating each `char` as
-/// independent, or only merging zero-width neighbors, can split a cluster
-/// across a style boundary or under-measure its true rendered width.
-/// Shared by [`cursor_line_spans`] (which highlighting group to render as
-/// one reversed unit) and `draw_controller_source` (how many display cells
-/// that unit actually costs when deciding whether it fits the visible
-/// viewport).
-fn cursor_grapheme_char_range(text: &str, cursor_col: usize) -> (usize, usize) {
-    let mut char_idx = 0usize;
-    for grapheme in text.graphemes(true) {
-        let end = char_idx + grapheme.chars().count();
-        if cursor_col < end {
-            return (char_idx, end);
-        }
-        char_idx = end;
-    }
-    // `cursor_col` is at or past the end of `text`; callers handle the
-    // "past the last character" case themselves, but fall back to a
-    // single-position range just in case.
-    (cursor_col, cursor_col + 1)
-}
-
-fn cursor_line_spans(text: &str, cursor_col: usize) -> Vec<Span<'static>> {
-    let chars: Vec<char> = text.chars().collect();
-    let cursor_style = Style::default().add_modifier(Modifier::REVERSED);
-    if cursor_col >= chars.len() {
-        let mut spans = Vec::new();
-        if !chars.is_empty() {
-            spans.push(Span::raw(chars.iter().collect::<String>()));
-        }
-        spans.push(Span::styled(" ", cursor_style));
-        return spans;
-    }
-
-    let (at_start, at_end) = cursor_grapheme_char_range(text, cursor_col);
-
-    let before: String = chars[..at_start].iter().collect();
-    let at: String = chars[at_start..at_end].iter().collect();
-    let after: String = chars[at_end..].iter().collect();
-    vec![
-        Span::raw(before),
-        Span::styled(at, cursor_style),
-        Span::raw(after),
-    ]
-}
-
-/// The first line/column to render so that `cursor` stays within a
-/// `viewport_len`-cell window, scrolling only as far as needed. Used both
-/// vertically (rows) and horizontally (columns); the vertical caller
-/// additionally clamps against the document's total length (see
-/// `draw_controller_source`) so it never scrolls past a short document's
-/// last line — there's no equivalent "last column" to clamp against
-/// horizontally, since each line has its own length.
-fn first_visible_offset(cursor: usize, viewport_len: usize) -> usize {
-    if viewport_len == 0 {
-        return 0;
-    }
-    cursor.saturating_sub(viewport_len.saturating_sub(1))
 }
 
 /// A short, representative subset of the Lua contract shown as a cheat
@@ -2580,6 +2383,55 @@ mod tests {
     }
 
     #[test]
+    fn controller_source_renders_at_true_minimum_geometry() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+
+        assert!(buffer_contains(&terminal, "CAPTURED CONTROLLER"));
+        assert!(buffer_contains(&terminal, "function on_tick(observation)"));
+    }
+
+    #[test]
+    fn the_terminal_cursor_is_shown_inside_the_source_pane_when_it_is_focused() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        // Controller source is the default focused pane on first entry.
+        let terminal = render(120, 40, &state);
+
+        assert!(terminal.backend().cursor_visible());
+        let cursor = terminal.backend().cursor_position();
+        // The source pane occupies the left ~70% of the frame, below the
+        // header row and inside the bordered block — a loose bound is
+        // enough to prove the cursor lands inside the source content, not
+        // that it exactly reproduces the widget's own gutter math.
+        assert!(cursor.x > 0 && cursor.x < 90, "cursor.x = {}", cursor.x);
+        assert!(cursor.y > 1 && cursor.y < 40, "cursor.y = {}", cursor.y);
+    }
+
+    #[test]
+    fn the_terminal_cursor_is_hidden_when_the_reference_pane_is_focused_instead() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.apply(Msg::FocusNextPane); // source -> reference
+        let terminal = render(120, 40, &state);
+
+        assert!(
+            !terminal.backend().cursor_visible(),
+            "the source pane's cursor must not be shown while it isn't focused"
+        );
+    }
+
+    #[test]
     fn controller_status_stays_visible_after_navigating_away() {
         use super::super::state::Msg;
         use super::super::state::View;
@@ -2947,158 +2799,6 @@ mod tests {
     #[test]
     fn word_wrapped_row_count_treats_an_empty_line_as_one_row() {
         assert_eq!(word_wrapped_row_count("", 78), 1);
-    }
-
-    #[test]
-    fn display_width_of_prefix_counts_double_width_characters_as_two_cells() {
-        // "中" (CJK) occupies two terminal columns despite being one `char`;
-        // a scroll calculation based on `char` count alone would place the
-        // cursor two columns short of its true screen position.
-        assert_eq!(display_width_of_prefix("中文", 1), 2);
-        assert_eq!(display_width_of_prefix("中文", 2), 4);
-        assert_eq!(display_width_of_prefix("ab", 2), 2);
-    }
-
-    #[test]
-    fn cursor_on_a_combining_mark_is_highlighted_together_with_its_base_character() {
-        // "e" + U+0301 (combining acute accent) is a decomposed grapheme:
-        // the mark alone is zero-width, so highlighting it by itself would
-        // render no visible cursor cell at all.
-        let text = "e\u{0301}bc";
-        let cursor_span = |cursor_col: usize| {
-            cursor_line_spans(text, cursor_col)
-                .into_iter()
-                .find(|span| span.style.add_modifier.contains(Modifier::REVERSED))
-                .expect("one span should carry the cursor style")
-        };
-
-        // Cursor on the mark itself (col 1): the highlighted unit must
-        // include the base character before it.
-        assert_eq!(cursor_span(1).content, "e\u{0301}");
-        // Cursor on the base character (col 0): the highlighted unit must
-        // include the mark trailing it.
-        assert_eq!(cursor_span(0).content, "e\u{0301}");
-    }
-
-    #[test]
-    fn cursor_grapheme_range_spans_a_heart_and_its_variation_selector() {
-        // U+2764 (heavy black heart) + U+FE0F (variation selector-16,
-        // requesting emoji presentation) is a two-codepoint grapheme
-        // cluster ratatui renders as one unit — measuring only the `char`
-        // at the cursor (whichever of the two it lands on) misses the
-        // other codepoint's contribution to the unit's true display width.
-        let text = "a\u{2764}\u{fe0f}b";
-        let chars: Vec<char> = text.chars().collect();
-        assert_eq!(cursor_grapheme_char_range(text, 1), (1, 3));
-        assert_eq!(cursor_grapheme_char_range(text, 2), (1, 3));
-        let glyph: String = chars[1..3].iter().collect();
-        assert_eq!(
-            glyph.as_str().cell_width(),
-            2,
-            "ratatui renders heart+VS16 as 2 cells, not 1"
-        );
-    }
-
-    #[test]
-    fn cursor_grapheme_range_spans_a_zero_width_joiner_sequence() {
-        // "👩‍💻" is WOMAN (U+1F469) + ZWJ (U+200D) + COMPUTER (U+1F4BB) —
-        // one extended grapheme cluster, but neither the woman nor the
-        // computer emoji is itself zero-width (only the joiner between
-        // them is), so a heuristic that only merges *zero-width* neighbors
-        // stops right after the joiner and never reaches the trailing
-        // emoji.
-        let text = "a\u{1F469}\u{200D}\u{1F4BB}b";
-        let chars: Vec<char> = text.chars().collect();
-        assert_eq!(chars.len(), 5, "a, woman, zwj, computer, b");
-        assert_eq!(cursor_grapheme_char_range(text, 1), (1, 4));
-        assert_eq!(cursor_grapheme_char_range(text, 2), (1, 4));
-        assert_eq!(cursor_grapheme_char_range(text, 3), (1, 4));
-    }
-
-    #[test]
-    fn cursor_grapheme_range_spans_a_regional_indicator_flag_pair() {
-        // "🇺🇸" is REGIONAL INDICATOR SYMBOL LETTER U (U+1F1FA) + ... S
-        // (U+1F1F8) — two individually non-zero-width characters that form
-        // one flag grapheme together; nothing about either one alone marks
-        // them as needing to be grouped.
-        let text = "a\u{1F1FA}\u{1F1F8}b";
-        let chars: Vec<char> = text.chars().collect();
-        assert_eq!(chars.len(), 4, "a, U indicator, S indicator, b");
-        assert_eq!(cursor_grapheme_char_range(text, 1), (1, 3));
-        assert_eq!(cursor_grapheme_char_range(text, 2), (1, 3));
-    }
-
-    #[test]
-    fn chars_to_skip_for_cell_offset_accounts_for_double_width_characters() {
-        // Skipping 2 display cells must skip exactly one CJK character, not
-        // zero (which char-count-only scrolling would do, since 2 chars
-        // would be requested but only 1 exists at that cell offset).
-        assert_eq!(chars_to_skip_for_cell_offset("中文abc", 2), 1);
-        assert_eq!(chars_to_skip_for_cell_offset("中文abc", 4), 2);
-        assert_eq!(chars_to_skip_for_cell_offset("abc", 2), 2);
-    }
-
-    #[test]
-    fn chars_to_skip_for_cell_offset_treats_zero_width_marks_as_zero_cells() {
-        // Previously this function clamped every character's contribution
-        // to at least one cell, so three zero-width combining marks were
-        // (wrongly) treated as consuming three whole display columns —
-        // disagreeing with `display_width_of_prefix`'s accounting of the
-        // very same text and potentially leaving the cursor's true screen
-        // column outside the scrolled viewport.
-        let text = "\u{0301}\u{0301}\u{0301}X"; // three combining marks, then "X"
-        assert_eq!(
-            chars_to_skip_for_cell_offset(text, 0),
-            0,
-            "nothing needs skipping to reach the very first cell"
-        );
-        assert_eq!(
-            chars_to_skip_for_cell_offset(text, 1),
-            4,
-            "reaching cell 1 (where X starts) must skip past all three \
-             zero-width marks and X itself, not stop after the first mark"
-        );
-    }
-
-    #[test]
-    fn chars_to_skip_for_cell_offset_never_stops_mid_grapheme_cluster() {
-        // "a👩‍💻b": a (1 cell), then the woman-technologist ZWJ sequence
-        // (2 cells — see `cursor_grapheme_range_spans_a_zero_width_joiner_
-        // sequence`), then b (1 cell). Requesting a cell offset that lands
-        // *inside* that cluster (offset 2, one cell past "a") must still
-        // skip the whole cluster, not stop partway through it and leave a
-        // scrolled line starting on the ZWJ or the trailing emoji alone.
-        let text = "a\u{1F469}\u{200D}\u{1F4BB}b";
-        let chars: Vec<char> = text.chars().collect();
-        assert_eq!(chars.len(), 5, "a, woman, zwj, computer, b");
-        let skip = chars_to_skip_for_cell_offset(text, 2);
-        assert!(
-            skip == 1 || skip == 4,
-            "must land on a grapheme boundary (before or after the \
-             cluster), got skip={skip}"
-        );
-    }
-
-    #[test]
-    fn display_width_matches_ratatui_for_a_halfwidth_katakana_dakuten() {
-        // `unicode-width` alone reports U+FF9E (a halfwidth katakana
-        // voiced-sound mark) as zero-width, but ratatui's own `CellWidth`
-        // adds a terminal-compatibility +1 for it (real terminals render it
-        // as its own occupied cell) — a naive per-character sum disagrees
-        // with what actually gets rendered, exactly the class of mismatch
-        // that could clip the cursor off the edge of a scrolled line.
-        let text = "\u{FF76}\u{FF9E}"; // halfwidth カ + dakuten
-        assert_eq!(
-            display_width_of_prefix(text, 2),
-            2,
-            "ratatui renders the halfwidth katakana + dakuten pair as 2 cells"
-        );
-        assert_eq!(
-            chars_to_skip_for_cell_offset(text, 2),
-            2,
-            "reaching cell 2 must skip past both characters, not treat the \
-             dakuten as contributing zero cells"
-        );
     }
 
     #[test]

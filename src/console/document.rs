@@ -7,10 +7,14 @@
 //! authoritative Lua working buffer for the Controller view — no
 //! synchronized `String` mirror exists alongside it.
 //!
-//! Rendering (`super::ui::draw_controller_source`) still computes its own
-//! rows/gutter/viewport from [`ControllerDocument::source`] and
-//! [`ControllerDocument::cursor_line_col`], as it did against the previous
-//! bespoke editor; migrating rendering to the library's own widget is #92.
+//! Rendering (`super::ui::draw_controller_source`) draws the wrapped
+//! `Editor` directly, reached through [`ControllerDocument::sync_for_render`]
+//! — the only accessor that exposes the library's widget itself, for
+//! presentation purposes only. The `Editor` lives behind a `RefCell` so
+//! `Editor::focus` (which derives scroll offsets purely from cursor position
+//! and viewport area) can run from `ui.rs`'s otherwise-immutable `&AppState`
+//! render pass; that offset is a cache of a pure function, not new
+//! authoritative state.
 //!
 //! Vertical movement (`MoveUp`/`MoveDown`) is implemented directly against
 //! `code_ref()` rather than delegating to the library's own `MoveUp`/
@@ -23,6 +27,9 @@
 //! `preferred_col` — preserved here the same way, since #91 must not
 //! regress it.
 
+use std::cell::{Ref, RefCell};
+
+use ratatui::layout::Rect;
 use ratatui_code_editor::actions::{Delete, InsertText, MoveLeft, MoveRight};
 use ratatui_code_editor::editor::Editor;
 
@@ -40,7 +47,7 @@ const PAGE_LINES: usize = 10;
 /// derives it manually, describing only the application-level state
 /// `AppState`'s own `Debug` derive needs, not the wrapped library internals.
 pub(crate) struct ControllerDocument {
-    editor: Editor,
+    editor: RefCell<Editor>,
     /// The column (in chars) the last `MoveUp`/`MoveDown` tried to reach,
     /// so moving through a short line and back doesn't forget how far right
     /// the cursor used to be, matching ordinary editor behavior.
@@ -53,24 +60,43 @@ impl ControllerDocument {
     /// previous bespoke editor placed it at the end, and this preserves
     /// that).
     pub(crate) fn new(source: &str) -> Self {
-        let editor = Editor::new("lua", source, vec![]).expect("editor construction must not fail");
+        let mut editor =
+            Editor::new("lua", source, vec![]).expect("editor construction must not fail");
+        editor.set_cursor(source.chars().count());
+        // Neither feature is part of #92's contract (line numbers + cursor
+        // only) nor present in the editor it replaces; both default on in
+        // the library, so disable them explicitly rather than silently
+        // gaining unrequested visual behavior.
+        editor.set_code_folding_enabled(false);
+        editor.set_word_highlight_enabled(false);
         let mut doc = ControllerDocument {
-            editor,
+            editor: RefCell::new(editor),
             preferred_col: 0,
         };
-        doc.editor.set_cursor(source.chars().count());
         doc.sync_preferred_col();
         doc
     }
 
     /// The exact current working source, including any trailing newline.
     pub(crate) fn source(&self) -> String {
-        self.editor.get_content()
+        self.editor.borrow().get_content()
     }
 
     /// 0-based `(line, column)` of the cursor, both counted in `char`s.
     pub(crate) fn cursor_line_col(&self) -> (usize, usize) {
-        self.editor.code_ref().point(self.editor.get_cursor())
+        let editor = self.editor.borrow();
+        editor.code_ref().point(editor.get_cursor())
+    }
+
+    /// Updates the wrapped editor's scroll offsets so the cursor stays
+    /// visible in `area`, then returns a borrow of it for the caller to
+    /// render (`Widget for &Editor`) and to query cursor position from via
+    /// `Editor::get_visible_cursor`. Mutating through `&self` is safe here
+    /// because the offsets are a pure function of (cursor, area), cached
+    /// rather than authoritative — see the module doc comment.
+    pub(crate) fn sync_for_render(&self, area: Rect) -> Ref<'_, Editor> {
+        self.editor.borrow_mut().focus(&area);
+        self.editor.borrow()
     }
 
     /// Applies `op`, returning whether it actually changed the source (as
@@ -81,7 +107,7 @@ impl ControllerDocument {
     pub(crate) fn apply(&mut self, op: EditOp) -> bool {
         let changed = match op {
             EditOp::Insert(c) => {
-                self.editor.apply(InsertText {
+                self.editor.get_mut().apply(InsertText {
                     text: c.to_string(),
                 });
                 true
@@ -90,36 +116,37 @@ impl ControllerDocument {
             // that action auto-indents from the current line, a new
             // editing feature out of scope for this issue.
             EditOp::Newline => {
-                self.editor.apply(InsertText {
+                self.editor.get_mut().apply(InsertText {
                     text: "\n".to_string(),
                 });
                 true
             }
             EditOp::Backspace => {
-                if self.editor.get_cursor() == 0 {
+                if self.editor.get_mut().get_cursor() == 0 {
                     false
                 } else {
-                    self.editor.apply(Delete {});
+                    self.editor.get_mut().apply(Delete {});
                     true
                 }
             }
             EditOp::DeleteForward => {
-                let cursor = self.editor.get_cursor();
-                if cursor == self.editor.code_ref().len_chars() {
+                let editor = self.editor.get_mut();
+                let cursor = editor.get_cursor();
+                if cursor == editor.code_ref().len_chars() {
                     false
                 } else {
-                    let next = self.editor.code_ref().next_grapheme_boundary(cursor);
-                    self.editor.set_cursor(next);
-                    self.editor.apply(Delete {});
+                    let next = editor.code_ref().next_grapheme_boundary(cursor);
+                    editor.set_cursor(next);
+                    editor.apply(Delete {});
                     true
                 }
             }
             EditOp::MoveLeft => {
-                self.editor.apply(MoveLeft { shift: false });
+                self.editor.get_mut().apply(MoveLeft { shift: false });
                 false
             }
             EditOp::MoveRight => {
-                self.editor.apply(MoveRight { shift: false });
+                self.editor.get_mut().apply(MoveRight { shift: false });
                 false
             }
             EditOp::MoveUp => {
@@ -158,7 +185,7 @@ impl ControllerDocument {
         if text.is_empty() {
             return false;
         }
-        self.editor.apply(InsertText {
+        self.editor.get_mut().apply(InsertText {
             text: text.to_string(),
         });
         self.sync_preferred_col();
@@ -176,17 +203,19 @@ impl ControllerDocument {
     }
 
     fn move_line_start(&mut self) {
-        let code = self.editor.code_ref();
-        let line = code.char_to_line(self.editor.get_cursor());
+        let editor = self.editor.get_mut();
+        let code = editor.code_ref();
+        let line = code.char_to_line(editor.get_cursor());
         let start = code.line_to_char(line);
-        self.editor.set_cursor(start);
+        editor.set_cursor(start);
     }
 
     fn move_line_end(&mut self) {
-        let code = self.editor.code_ref();
-        let line = code.char_to_line(self.editor.get_cursor());
+        let editor = self.editor.get_mut();
+        let code = editor.code_ref();
+        let line = code.char_to_line(editor.get_cursor());
         let end = code.line_to_char(line) + code.line_len(line);
-        self.editor.set_cursor(end);
+        editor.set_cursor(end);
     }
 
     /// Moves the cursor one line up/down, landing as close as possible to
@@ -196,8 +225,9 @@ impl ControllerDocument {
     /// vertical moves through shorter lines still remember how far right
     /// the cursor started.
     fn move_vertical(&mut self, direction: Vertical) {
-        let code = self.editor.code_ref();
-        let line = code.char_to_line(self.editor.get_cursor());
+        let editor = self.editor.get_mut();
+        let code = editor.code_ref();
+        let line = code.char_to_line(editor.get_cursor());
         let target_line = match direction {
             Vertical::Up if line == 0 => return,
             Vertical::Up => line - 1,
@@ -208,8 +238,9 @@ impl ControllerDocument {
     }
 
     fn move_page(&mut self, direction: Vertical) {
-        let code = self.editor.code_ref();
-        let line = code.char_to_line(self.editor.get_cursor());
+        let editor = self.editor.get_mut();
+        let code = editor.code_ref();
+        let line = code.char_to_line(editor.get_cursor());
         let last_line = code.len_lines().saturating_sub(1);
         let target_line = match direction {
             Vertical::Up => line.saturating_sub(PAGE_LINES),
@@ -229,7 +260,8 @@ impl ControllerDocument {
     /// `MoveLeft`/`MoveRight` already honor via the library's own
     /// grapheme-boundary movement.
     fn move_to(&mut self, target_line: usize, target_col: usize) {
-        let code = self.editor.code_ref();
+        let editor = self.editor.get_mut();
+        let code = editor.code_ref();
         let target_line_start = code.line_to_char(target_line);
         let target_line_len = code.line_len(target_line);
         let clamped_col = target_col.min(target_line_len);
@@ -244,7 +276,7 @@ impl ControllerDocument {
             boundary = next;
         }
 
-        self.editor.set_cursor(boundary);
+        editor.set_cursor(boundary);
     }
 
     fn sync_preferred_col(&mut self) {
