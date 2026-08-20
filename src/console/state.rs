@@ -362,12 +362,11 @@ impl AppState {
         self.controller.as_ref().map(ControllerDocument::source)
     }
 
-    /// 0-based `(line, column)` of the cursor in the current controller
-    /// source, if a controller is loaded.
-    pub fn controller_cursor(&self) -> Option<(usize, usize)> {
-        self.controller
-            .as_ref()
-            .map(ControllerDocument::cursor_line_col)
+    /// The current controller document itself, for `ui.rs` to render
+    /// through the editor foundation's own widget (issue #92). `None` when
+    /// no working set has a controller loaded yet.
+    pub(crate) fn controller(&self) -> Option<&ControllerDocument> {
+        self.controller.as_ref()
     }
 
     /// Whether the current controller source differs from the starter
