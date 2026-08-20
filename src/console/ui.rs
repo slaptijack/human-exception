@@ -2757,6 +2757,39 @@ mod tests {
     }
 
     #[test]
+    fn growing_the_pane_after_a_scroll_reveals_the_top_of_the_document_again() {
+        // Scrolled to the bottom of a document taller than a short pane,
+        // then resized much taller without the cursor moving: the widget's
+        // own `focus()` only ever nudges an offset far enough to keep the
+        // cursor visible and never shrinks it back just because the
+        // viewport grew, so the offset must be recomputed from scratch each
+        // render (not left over from the smaller pane) or the top of the
+        // document stays hidden behind a blank margin even though the
+        // grown viewport can now show the whole thing.
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        for _ in 0..60 {
+            state.apply(Msg::EditController(super::super::editor::EditOp::Newline));
+        }
+
+        let short = render(120, MIN_ROWS, &state);
+        assert!(
+            !buffer_contains(&short, "function on_tick(observation)"),
+            "the short pane must have scrolled the starter's first lines off screen"
+        );
+
+        let tall = render(120, 90, &state);
+        assert!(
+            buffer_contains(&tall, "function on_tick(observation)"),
+            "growing the pane must reveal the top of the document again, not \
+             keep the short pane's scroll offset"
+        );
+    }
+
+    #[test]
     fn word_wrapped_row_count_matches_greedy_word_wrapping_not_total_width_division() {
         // Three 40-column words in a 78-column line: a naive
         // total-width/pane-width division sees 120/78 = 2 rows, but real

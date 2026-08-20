@@ -94,8 +94,21 @@ impl ControllerDocument {
     /// `Editor::get_visible_cursor`. Mutating through `&self` is safe here
     /// because the offsets are a pure function of (cursor, area), cached
     /// rather than authoritative — see the module doc comment.
+    ///
+    /// The offsets are reset to zero before `focus` runs so that function
+    /// always recomputes them from scratch against the *current* `area`,
+    /// rather than nudging over whatever offsets a previous, differently
+    /// sized `area` left behind. `Editor::focus` only ever grows an offset
+    /// far enough to bring the cursor back into view; it never shrinks one
+    /// just because the viewport grew, so without this reset, a pane that's
+    /// resized larger after being scrolled in a smaller one can leave a
+    /// wide blank margin even though the whole document would now fit.
     pub(crate) fn sync_for_render(&self, area: Rect) -> Ref<'_, Editor> {
-        self.editor.borrow_mut().focus(&area);
+        let mut editor = self.editor.borrow_mut();
+        editor.set_offset_x(0);
+        editor.set_offset_y(0);
+        editor.focus(&area);
+        drop(editor);
         self.editor.borrow()
     }
 
