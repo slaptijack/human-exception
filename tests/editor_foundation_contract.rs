@@ -1,39 +1,97 @@
 //! Retained evidence for issue #90's editor-foundation decision: proves
-//! `ratatui-textarea` against the repo's locked `ratatui`/`crossterm` stack
-//! and the editor contract in `docs/TUI_DESIGN.md` ("The editor contract").
+//! `ratatui-code-editor` against the repo's locked `ratatui`/`crossterm`
+//! stack and the editor contract in `docs/TUI_DESIGN.md` ("The editor
+//! contract").
 //!
-//! `ratatui-textarea` was adopted over `ratatui-code-editor` (heavy
-//! mandatory tree-sitter/clipboard dependencies, no Lua grammar, `Ctrl+V`
-//! hardwired to paste, 0.0.x maturity) and `edtui` (its only modeless
-//! keymap has no selection at all; selection only exists behind the modal
-//! Vim Normal/Visual flow the epic excludes) and over extending the
-//! bespoke `src/console/editor.rs`, which has neither selection nor
-//! undo/redo today. See the issue for the full comparison.
+//! `ratatui-code-editor` was adopted over the previously-adopted
+//! `ratatui-textarea` (proven against this same contract by an earlier
+//! version of this file, but with no highlighting support at all) and
+//! `tui-textarea-2` (confirmed to compile against this repo's locked
+//! stack and to expose the caller-owned `custom_highlight`/
+//! `selection_range`/`set_lines` API this decision needed, but not
+//! carried through this file's full behavioral contract, since the
+//! decision was made to proceed with `ratatui-code-editor` instead of
+//! completing that comparison -- see the issue for the full record).
+//! `ratatui-code-editor` has a tree-sitter-backed highlighting story with
+//! real per-language grammars, not just a caller-owned range API without
+//! any grammar behind it. It's consumed here as the published
+//! `ratatui-code-editor = "0.0.6"` crate from crates.io -- not a git
+//! dependency -- because #91 will promote this from a
+//! `[dev-dependencies]` entry to a regular one, and crates.io does not
+//! accept published packages with non-dev git-only dependencies. The
+//! published crate bundles all 15 of its Tree-sitter grammars as
+//! mandatory, non-optional dependencies; that's accepted here as ordinary
+//! transitive compile cost rather than a reason to depend on a fork.
+//! `slaptijack/ratatui-code-editor`'s `feature-gate-languages` branch
+//! (proposed upstream as
+//! <https://github.com/vipmax/ratatui-code-editor/issues/14>) still
+//! exists and makes each grammar an optional `language-<name>` feature,
+//! but it's an independent, non-blocking contribution -- Human Exception's
+//! own dependency graph does not depend on it landing.
+//!
+//! Lua highlighting is not yet available: no `language-lua` feature exists
+//! upstream (see `missing_lua_grammar_falls_back_to_plain_text` below for
+//! what that means in practice today). Adding it is tracked as a follow-up
+//! in the same upstream issue and is not required for this decision,
+//! consistent with the epic's "highlighting is desirable but not
+//! required" scope.
+//!
+//! **Known limitation, accepted for this decision:** `Editor::focus()` can
+//! fail to keep the cursor visible on long lines made of wide (double-width)
+//! glyphs -- see `known_limitation_wide_glyph_line_can_leave_cursor_offscreen_after_focus`
+//! below and <https://github.com/vipmax/ratatui-code-editor/issues/15> for
+//! the confirmed root cause. Ordinary ASCII editing/scrolling and exact
+//! Unicode source round-tripping (including combining marks) are
+//! unaffected; only cursor-visibility-follows-viewport for sufficiently
+//! long wide-glyph lines is. This is accepted as a temporary limitation,
+//! tracked upstream independently of this repo, and does not block #91 or
+//! the epic. No Human-Exception-specific workaround should be added for it
+//! without a separate decision.
 //!
 //! This is not yet wired into the Controller (`src/console/editor.rs` is
 //! still the live implementation) -- that integration is #91 onward.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
-use ratatui_textarea::TextArea;
+use ratatui::layout::Rect;
+use ratatui_code_editor::actions::{
+    Delete, InsertNewline, InsertText, MoveRight, Redo, SelectAll, Undo,
+};
+use ratatui_code_editor::editor::Editor;
 
-fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
-    KeyEvent::new(code, modifiers)
+fn area() -> Rect {
+    Rect::new(0, 0, 40, 10)
 }
 
-fn type_str(ta: &mut TextArea, s: &str) {
-    for c in s.chars() {
-        ta.input(key(KeyCode::Char(c), KeyModifiers::NONE));
-    }
+fn editor(text: &str) -> Editor {
+    Editor::new("lua", text, vec![]).expect("editor construction must not fail")
+}
+
+/// The dependency-specific "replace the working source and reset editing
+/// state" strategy this issue was asked to prove: `Editor` has no
+/// in-place replacement API that also resets cursor/selection/viewport/
+/// history (see `source_replacement_resets_everything_and_history_cannot_restore_old_source`
+/// below for why `set_content` doesn't qualify), so replacement
+/// reconstructs a fresh `Editor` and positions it per
+/// `docs/TUI_DESIGN.md`'s "F7 reset" contract (cursor at the end,
+/// selection cleared, viewport scrolled to keep the cursor visible).
+/// Intentionally narrow and kept inside this test file: #91's
+/// `ControllerDocument` adapter is the real place this pattern belongs,
+/// and it should expose this as an application-level operation, not
+/// `Code`/`Rope`/history internals.
+fn replace_source(new_source: &str) -> Editor {
+    let mut ed = editor(new_source);
+    ed.set_cursor(new_source.chars().count());
+    ed.focus(&area());
+    ed
 }
 
 #[test]
 fn renders_via_test_backend() {
-    let ta = TextArea::from(["fn on_tick() end"]);
+    let ed = editor("fn on_tick() end");
     let backend = TestBackend::new(40, 10);
     let mut terminal = Terminal::new(backend).unwrap();
-    terminal.draw(|f| f.render_widget(&ta, f.area())).unwrap();
+    terminal.draw(|f| f.render_widget(&ed, f.area())).unwrap();
     let buf = terminal.backend().buffer().clone();
     let rendered: String = buf.content().iter().map(|c| c.symbol()).collect();
     assert!(rendered.contains("fn on_tick"));
@@ -41,24 +99,29 @@ fn renders_via_test_backend() {
 
 #[test]
 fn selection_and_typed_replacement() {
-    let mut ta = TextArea::from(["hello world"]);
-    // Move to start, shift-select "hello", type replacement.
-    ta.input(key(KeyCode::Home, KeyModifiers::NONE));
+    let mut ed = editor("hello world");
+    // Shift-select "hello" from the start, then type a replacement.
     for _ in 0..5 {
-        ta.input(key(KeyCode::Right, KeyModifiers::SHIFT));
+        ed.apply(MoveRight { shift: true });
     }
-    assert!(ta.is_selecting());
-    ta.input(key(KeyCode::Char('h'), KeyModifiers::NONE));
-    ta.input(key(KeyCode::Char('i'), KeyModifiers::NONE));
-    assert_eq!(ta.lines(), ["hi world"]);
+    let sel = ed.get_selection().expect("selection must be active");
+    assert!(!sel.is_empty());
+    ed.apply(InsertText {
+        text: "hi".to_string(),
+    });
+    assert_eq!(ed.get_content(), "hi world");
+    assert!(
+        ed.get_selection().is_none(),
+        "typed replacement must clear the selection"
+    );
 }
 
 #[test]
-fn select_all_and_backspace_clears_buffer() {
-    let mut ta = TextArea::from(["line one", "line two"]);
-    ta.select_all();
-    ta.input(key(KeyCode::Backspace, KeyModifiers::NONE));
-    assert_eq!(ta.lines(), [""]);
+fn select_all_and_delete_clears_buffer() {
+    let mut ed = editor("line one\nline two");
+    ed.apply(SelectAll {});
+    ed.apply(Delete {});
+    assert_eq!(ed.get_content(), "");
 }
 
 #[test]
@@ -68,73 +131,278 @@ fn undo_redo_each_keystroke_is_its_own_step_but_paste_is_one_step() {
     // programmatic multi-char insert (paste), which undoes in one step.
     // Contract-relevant: whichever direction #91/#93 want, this library's
     // granularity is keystroke-level for typed input, not run-coalesced.
-    let mut ta = TextArea::from([""]);
-    type_str(&mut ta, "abc");
-    assert_eq!(ta.lines(), ["abc"]);
-    assert!(ta.undo());
+    let mut ed = editor("");
+    for c in "abc".chars() {
+        ed.apply(InsertText {
+            text: c.to_string(),
+        });
+    }
+    assert_eq!(ed.get_content(), "abc");
+    ed.apply(Undo {});
     assert_eq!(
-        ta.lines(),
-        ["ab"],
+        ed.get_content(),
+        "ab",
         "typed keystrokes undo one char at a time"
     );
-    assert!(ta.undo());
-    assert!(ta.undo());
-    assert_eq!(ta.lines(), [""]);
+    ed.apply(Undo {});
+    ed.apply(Undo {});
+    assert_eq!(ed.get_content(), "");
 
-    ta.insert_str("line one\nline two");
-    assert_eq!(ta.lines(), ["line one", "line two"]);
-    assert!(ta.undo());
+    ed.apply(InsertText {
+        text: "line one\nline two".to_string(),
+    });
+    assert_eq!(ed.get_content(), "line one\nline two");
+    ed.apply(Undo {});
     assert_eq!(
-        ta.lines(),
-        [""],
-        "multiline paste (insert_str) should undo as a single step"
+        ed.get_content(),
+        "",
+        "multiline paste (a single InsertText) should undo as one step"
     );
-    assert!(ta.redo());
-    assert_eq!(ta.lines(), ["line one", "line two"]);
+    ed.apply(Redo {});
+    assert_eq!(ed.get_content(), "line one\nline two");
 }
 
 #[test]
-fn multiline_paste_via_insert_str() {
-    let mut ta = TextArea::from([""]);
-    ta.insert_str("alpha\nbeta\ngamma");
-    assert_eq!(ta.lines(), ["alpha", "beta", "gamma"]);
+fn multiline_paste_via_insert_text() {
+    let mut ed = editor("");
+    ed.apply(InsertText {
+        text: "alpha\nbeta\ngamma".to_string(),
+    });
+    assert_eq!(ed.get_content(), "alpha\nbeta\ngamma");
 }
 
 #[test]
 fn unicode_combining_marks_and_wide_glyphs_round_trip() {
     let src = "e\u{0301}\u{4e16}\u{754c}"; // "é" (combining) + "世界"
-    let ta = TextArea::from([src]);
-    assert_eq!(ta.lines(), [src]);
+    let ed = editor(src);
+    assert_eq!(ed.get_content(), src);
+}
+
+#[test]
+fn combining_marks_keep_cursor_visible_after_focus() {
+    // 20 "e + combining acute accent" graphemes: 40 characters, but each
+    // grapheme is a single display cell wide, so this is well within a
+    // 40-column viewport. `focus()`'s scroll decision uses the raw
+    // character count as a stand-in for visual width; because a
+    // combining-mark grapheme's character count is always >= its actual
+    // visual width, that stand-in over-scrolls rather than under-scrolls,
+    // so the cursor stays visible here (unlike the wide-glyph case below,
+    // where the stand-in under-scrolls).
+    let base = "e\u{0301}";
+    let line: String = std::iter::repeat_n(base, 20).collect();
+    let mut ed = editor(&line);
+    ed.set_cursor(line.chars().count());
+    ed.focus(&area());
+    assert!(
+        ed.get_visible_cursor(&area()).is_some(),
+        "combining-mark line should keep the cursor visible after focus()"
+    );
+}
+
+// Confirmed upstream bug, tracked at
+// <https://github.com/vipmax/ratatui-code-editor/issues/15>:
+// `Editor::focus()` (`src/editor.rs`) decides whether to scroll
+// horizontally by comparing the cursor's raw *character-count* column
+// against the viewport's *terminal-cell* width. For a line of wide
+// (double-width) glyphs, character count under-counts the true visual
+// width, so `focus()` can conclude no scroll is needed while the cursor is
+// actually off-screen. `get_visible_cursor()` computes the correct
+// grapheme-width-based visual column and (correctly) reports the cursor as
+// not visible in that case -- confirmed empirically (`offset_x` stays `0`;
+// `get_visible_cursor()` returns `None`) against both the published 0.0.6
+// crate and the fork, whose `focus()`/`get_visible_cursor()` are
+// byte-identical.
+//
+// This test intentionally asserts *today's actual, broken* behavior
+// (`is_none()`), not the desired one, so it stays green until the bug is
+// fixed rather than leaving CI red for a known, accepted limitation. When
+// `ratatui-code-editor` is upgraded to a version that fixes this, this
+// test is expected to start FAILING -- that failure is the signal to
+// replace it with the desired assertion (`is_some()`), not to delete or
+// weaken it. Ordinary ASCII editing/scrolling and exact Unicode source
+// round-tripping (including combining marks, see above) are unaffected;
+// this is a narrow, accepted, temporary limitation on cursor-visibility
+// for long wide-glyph lines specifically. No Human-Exception-specific
+// workaround should be added for it without a separate decision.
+#[test]
+fn known_limitation_wide_glyph_line_can_leave_cursor_offscreen_after_focus() {
+    let line: String = std::iter::repeat_n('界', 20).collect();
+    let mut ed = editor(&line);
+    ed.set_cursor(line.chars().count());
+    ed.focus(&area());
+    assert_eq!(
+        ed.get_offset_x(),
+        0,
+        "focus() does not scroll for this wide-glyph line (the bug)"
+    );
+    assert!(
+        ed.get_visible_cursor(&area()).is_none(),
+        "cursor is therefore off-screen -- if this now returns Some(_), \
+         the upstream bug is fixed: replace this assertion with is_some() \
+         and update the doc comment above"
+    );
 }
 
 #[test]
 fn exact_source_round_trip_including_empty_and_trailing_newline() {
     for src in ["", "a", "a\nb", "a\nb\n", "\n", "a\n\n"] {
-        let ta = TextArea::from(src.split('\n'));
-        let extracted = ta.lines().join("\n");
-        assert_eq!(extracted, src, "round trip failed for {src:?}");
+        let ed = editor(src);
+        assert_eq!(ed.get_content(), src, "round trip failed for {src:?}");
     }
 }
 
 #[test]
-fn ctrl_v_is_not_claimed_by_default_keymap() {
-    let mut ta = TextArea::from(["unchanged"]);
-    ta.set_yank_text("PASTED");
-    let changed = ta.input(key(KeyCode::Char('v'), KeyModifiers::CONTROL));
+fn source_replacement_resets_everything_and_history_cannot_restore_old_source() {
+    // Give the discarded editor real undo history, an active-then-cleared
+    // selection's worth of edits, and a scrolled viewport (a long line and
+    // many rows, matching the fixtures in the scrolling tests above), so
+    // replacement has something nontrivial to reset.
+    let lines: Vec<String> = (0..100).map(|i| format!("line {i}")).collect();
+    let mut source = lines.join("\n");
+    source.push_str(&"x".repeat(200));
+    let mut ed = editor(&source);
+    for _ in 0..5 {
+        ed.apply(MoveRight { shift: true });
+    }
+    ed.apply(InsertText {
+        text: "XXXXX".to_string(),
+    });
+    ed.set_cursor(ed.get_content().chars().count());
+    ed.focus(&area());
     assert!(
-        !changed,
-        "default keymap must not consume Ctrl+V (reserved for validate); got lines: {:?}",
-        ta.lines()
+        ed.get_offset_x() > 0 || ed.get_offset_y() > 0,
+        "sanity check: the discarded editor should have scrolled"
     );
-    assert_eq!(ta.lines(), ["unchanged"]);
+
+    let new_source = "starter\ntext\n"; // trailing newline included on purpose
+    ed = replace_source(new_source);
+
+    assert_eq!(
+        ed.get_content(),
+        new_source,
+        "replacement source must be exact, including the trailing newline"
+    );
+    assert_eq!(
+        ed.get_cursor(),
+        new_source.chars().count(),
+        "cursor must reset to the end of the replacement source"
+    );
+    assert!(
+        ed.get_selection().is_none(),
+        "replacement must clear any selection"
+    );
+    assert_eq!(ed.get_offset_x(), 0, "horizontal viewport must reset");
+    assert_eq!(ed.get_offset_y(), 0, "vertical viewport must reset");
+
+    // The discarded source must not be recoverable through undo -- this is
+    // a fresh Editor with fresh history, not an in-place edit.
+    ed.apply(Undo {});
+    assert_eq!(
+        ed.get_content(),
+        new_source,
+        "undo after replacement must not resurrect the discarded source"
+    );
 }
 
 #[test]
-fn text_area_state_is_send_but_not_sync() {
-    // TextArea caches an internal `Cell<Rect>` for its last-rendered layout,
-    // which makes it Send but not Sync. Fine for this single-threaded TUI
-    // app (no thread::spawn/Sync requirement found in src/console/*.rs),
-    // but worth recording as an ownership constraint.
-    fn assert_send<T: Send>() {}
-    assert_send::<TextArea>();
+fn long_line_scrolling_follows_the_cursor() {
+    let long_line = "x".repeat(200);
+    let mut ed = editor(&long_line);
+    ed.set_cursor(long_line.chars().count());
+    ed.focus(&area());
+    assert!(
+        ed.get_offset_x() > 0,
+        "horizontal viewport must scroll to keep a far-right cursor visible"
+    );
 }
+
+#[test]
+fn vertical_scrolling_follows_the_cursor_down_a_tall_buffer() {
+    let lines: Vec<String> = (0..100).map(|i| format!("line {i}")).collect();
+    let mut ed = editor(&lines.join("\n"));
+    ed.set_cursor(ed.get_content().chars().count());
+    ed.focus(&area());
+    assert!(
+        ed.get_offset_y() > 0,
+        "vertical viewport must scroll to keep the last line visible"
+    );
+}
+
+#[test]
+fn missing_lua_grammar_falls_back_to_plain_text() {
+    // No `language-lua` feature exists yet on the fork this repo depends
+    // on (see the file-level doc comment). `Editor::new` falls back to the
+    // "text" language rather than failing, so the editor is fully usable
+    // -- just without Lua syntax highlighting -- until that follow-up
+    // lands upstream.
+    let ed = Editor::new("lua", "function f() end", vec![])
+        .expect("missing grammar must fall back, not error");
+    assert_eq!(ed.get_content(), "function f() end");
+}
+
+// `Editor::input`'s convenience keymap hardwires Ctrl+V to its `Paste`
+// action (src/editor_crossterm.rs), matching the finding recorded for
+// `ratatui-textarea` 0.9.2 in the previous version of this file (which
+// turned out to be true there too: Ctrl+V mapped to PageDown, not
+// "unclaimed"). Unlike `ratatui-textarea`'s Ctrl+V (a harmless no-op
+// PageDown against an in-memory buffer), this library's `Paste` action
+// reads the real OS clipboard via `arboard::Clipboard` first and only
+// falls back to an internal buffer if that fails (`Editor::get_clipboard`,
+// `src/editor.rs`) -- confirmed empirically while writing this test, which
+// is why there is no runtime test here exercising `input()` with Ctrl+V:
+// doing so reads (and `Copy`/`Cut` would write) the *host's actual system
+// clipboard*, which is both nondeterministic across environments (CI runs
+// headless on ubuntu-latest, where `arboard::Clipboard::new()` fails and
+// the internal fallback kicks in; a local run does not) and not something
+// a test should be touching regardless.
+//
+// `docs/TUI_DESIGN.md`'s "Ctrl+V and the optional Ctrl+Enter alias"
+// section requires that whatever foundation #90 selects, "its default
+// keymap must not take ownership of Ctrl+V for its own purpose" -- and
+// taken literally, no candidate evaluated across this issue satisfies
+// that in isolation: `ratatui-textarea` claims it for PageDown, and
+// `ratatui-code-editor` claims it for Paste. Relying on the fact that
+// today's `src/console/event.rs` routing happens to run first is not a
+// substitute for that requirement, and repeating that substitution is
+// exactly the mistake #90 was reopened to correct the first time around.
+// The actual, binding resolution is architectural, not incidental:
+// Human Exception's own Controller integration (#93 onward) must never
+// call `Editor::input()` at all. It must dispatch through this crate's
+// granular `Action` types directly (`editor.apply(SomeAction)`, exactly
+// as every test in this file does), driven entirely by
+// `src/console/event.rs`'s own key-to-command mapping -- the same pattern
+// the current bespoke `src/console/editor.rs` already uses via
+// `map_controller_edit`. That *is* customizing the keymap: the library's
+// default one is simply never consulted, for Ctrl+V or anything else, at
+// any point before or after integration. `event.rs`'s Ctrl+V arm
+// (`event.rs:117-119`) already matches before the pane-local dispatch
+// wildcard arm (`event.rs:145`) and is exercised end-to-end by that
+// file's own tests
+// (`ctrl_v_also_validates_as_a_fallback_for_terminals_without_ctrl_enter`
+// and friends); #93 must preserve that ordering rather than introduce a
+// call to `Editor::input()`. Likewise, #94's bracketed-paste integration
+// should insert pasted text via `InsertText` directly (as
+// `multiline_paste_via_insert_text` above does), not via this library's
+// `Paste` action -- bracketed paste delivers text the terminal already
+// captured, and has no business reading the OS clipboard a second time.
+
+#[test]
+fn insert_newline_auto_indents_from_the_current_line() {
+    let mut ed = editor("  a");
+    ed.set_cursor(ed.get_content().chars().count());
+    ed.apply(InsertNewline {});
+    assert_eq!(ed.get_content(), "  a\n  ");
+}
+
+// `Editor` is neither `Send` nor `Sync`: its `Code` caches a per-language
+// `Rc<RefCell<tree_sitter::Parser>>` and holds a boxed `dyn Fn` change
+// callback, neither of which is `Send`. (Confirmed empirically: a
+// `fn assert_send<T: Send>() { assert_send::<Editor>(); }` here fails to
+// compile with exactly those two non-Send types named in the error.) This
+// is a stronger constraint than `ratatui-textarea` 0.9.2, which was `Send`
+// (just not `Sync`). Fine for this single-threaded TUI app -- no
+// `thread::spawn`/`Send`/`Sync` requirement found in `src/console/*.rs` --
+// but worth recording accurately rather than assuming parity with the
+// previously-evaluated library. There's no first-party way to assert a
+// *negative* trait bound as a passing `#[test]` without a compile-fail
+// testing crate, so this is recorded as a comment rather than a test.
