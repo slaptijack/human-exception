@@ -1791,6 +1791,10 @@ fn view_specific_help(view: View) -> Vec<Line<'static>> {
         ],
         View::Controller => vec![
             Line::from("Type to edit; arrows/Home/End/PageUp/PageDown move the cursor"),
+            Line::from(
+                "Shift+move select, Ctrl+A select all, Ctrl+Z/Ctrl+Y undo/redo, Ctrl+Left/Right by word",
+            ),
+            Line::from("Tab/Shift+Tab indent/unindent"),
             Line::from("F7          reset to the starter controller (confirms if modified)"),
             Line::from("Ctrl+V      load the source and check for on_tick, without calling it"),
             Line::from(
