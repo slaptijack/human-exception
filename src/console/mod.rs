@@ -889,6 +889,64 @@ mod tests {
     }
 
     #[test]
+    fn pasting_over_a_selection_replaces_it() {
+        let (state, _) = render(
+            120,
+            40,
+            &[
+                press(KeyCode::Enter),
+                press(KeyCode::Enter),
+                press_ctrl(KeyCode::Char('a')), // select the entire starter source
+                paste("function on_tick()\nend\n"),
+            ],
+        );
+
+        assert_eq!(
+            state.controller_source(),
+            Some("function on_tick()\nend\n".to_string()),
+            "paste should replace the selected starter source, not insert alongside it"
+        );
+    }
+
+    #[test]
+    fn undo_after_paste_reverses_the_whole_paste_and_redo_reapplies_it() {
+        let (state, _) = render(
+            120,
+            40,
+            &[
+                press(KeyCode::Enter),
+                press(KeyCode::Enter),
+                paste("multi\nline\ntext\n"),
+                press_ctrl(KeyCode::Char('z')), // undo
+            ],
+        );
+
+        assert_eq!(
+            state.controller_source(),
+            Some(intel::STARTER_CONTROLLER.to_string()),
+            "one undo should reverse the entire paste in a single step, \
+             not partially"
+        );
+
+        let (state, _) = render(
+            120,
+            40,
+            &[
+                press(KeyCode::Enter),
+                press(KeyCode::Enter),
+                paste("multi\nline\ntext\n"),
+                press_ctrl(KeyCode::Char('z')), // undo
+                press_ctrl(KeyCode::Char('y')), // redo
+            ],
+        );
+
+        assert_eq!(
+            state.controller_source(),
+            Some(format!("{}multi\nline\ntext\n", intel::STARTER_CONTROLLER))
+        );
+    }
+
+    #[test]
     fn a_held_enter_key_does_not_cascade_through_activate_and_newline() {
         // Reproduces the exact scenario a terminal-generated Repeat stream
         // can produce: a Press that opens Target, then Repeat events that
