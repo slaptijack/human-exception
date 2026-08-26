@@ -676,6 +676,25 @@ mod tests {
     }
 
     #[test]
+    fn insert_text_preserves_multibyte_unicode_and_leaves_a_valid_cursor() {
+        let mut doc = ControllerDocument::new("");
+        assert!(doc.insert_text("caf\u{e9} \u{1f600} \u{4f60}\u{597d}\n"));
+        assert_eq!(doc.source(), "caf\u{e9} \u{1f600} \u{4f60}\u{597d}\n");
+
+        let (line, col) = doc.cursor_line_col();
+        assert_eq!(
+            line, 1,
+            "trailing newline should leave the cursor on line 1"
+        );
+        assert_eq!(col, 0);
+
+        // A boundary-safe cursor is one further edit at the cursor succeeds
+        // without panicking on a split multibyte character.
+        assert!(doc.insert_text("more"));
+        assert_eq!(doc.source(), "caf\u{e9} \u{1f600} \u{4f60}\u{597d}\nmore");
+    }
+
+    #[test]
     fn reset_replaces_source_and_places_cursor_at_the_end() {
         let mut doc = ControllerDocument::new("abc");
         doc.apply(EditOp::MoveLineStart(false));
