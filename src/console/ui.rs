@@ -2793,6 +2793,395 @@ mod tests {
         );
     }
 
+    // A hand-authored, realistically sized Lua controller for issue #96's
+    // "large representative Lua programs remain responsive" and viewport
+    // coverage: several helper functions, a persistent state table, loops,
+    // and comments — well past `STARTER_CONTROLLER`'s ~13 lines, and taller
+    // than any supported pane can show at once. Decision recorded on issue
+    // #96: this lives as a test-only constant rather than a new
+    // `tests/fixtures/*.lua` file, matching how `STARTER_CONTROLLER` itself
+    // is just a Rust string constant.
+    const LARGE_REPRESENTATIVE_CONTROLLER: &str = r#"-- A more complete resistance controller than the starter: it remembers
+-- which tiles it has already visited, prefers unexplored ground, and only
+-- falls back to scanning once every reachable neighbor has been seen.
+--
+-- observation.drone     -- { x = <int>, y = <int> }
+-- observation.discovered -- array of { x, y, traversable, uplink }
+
+local visited = {}
+
+local function tile_key(x, y)
+  return x .. "," .. y
+end
+
+local function mark_visited(x, y)
+  visited[tile_key(x, y)] = true
+end
+
+local function was_visited(x, y)
+  return visited[tile_key(x, y)] == true
+end
+
+local function find_tile(observation, x, y)
+  for _, tile in ipairs(observation.discovered) do
+    if tile.x == x and tile.y == y then
+      return tile
+    end
+  end
+  return nil
+end
+
+local function is_open(observation, x, y)
+  local tile = find_tile(observation, x, y)
+  return tile ~= nil and tile.traversable
+end
+
+local function find_uplink(observation)
+  for _, tile in ipairs(observation.discovered) do
+    if tile.uplink then
+      return tile
+    end
+  end
+  return nil
+end
+
+-- Walks the four cardinal neighbors of (x, y) in a fixed, predictable
+-- order and returns the first one that is open and not yet visited, or
+-- nil if every open neighbor has already been visited.
+local function unvisited_open_neighbor(observation, x, y)
+  local candidates = {
+    { dx = 0, dy = -1, action = "north" },
+    { dx = 0, dy = 1, action = "south" },
+    { dx = 1, dy = 0, action = "east" },
+    { dx = -1, dy = 0, action = "west" },
+  }
+
+  for _, candidate in ipairs(candidates) do
+    local nx, ny = x + candidate.dx, y + candidate.dy
+    if is_open(observation, nx, ny) and not was_visited(nx, ny) then
+      return candidate.action
+    end
+  end
+
+  return nil
+end
+
+-- Same walk, but accepts any open neighbor regardless of whether it has
+-- already been visited — used once every unvisited option is exhausted so
+-- the drone keeps moving rather than idling next to the uplink forever.
+local function any_open_neighbor(observation, x, y)
+  local candidates = {
+    { dx = 0, dy = -1, action = "north" },
+    { dx = 0, dy = 1, action = "south" },
+    { dx = 1, dy = 0, action = "east" },
+    { dx = -1, dy = 0, action = "west" },
+  }
+
+  for _, candidate in ipairs(candidates) do
+    local nx, ny = x + candidate.dx, y + candidate.dy
+    if is_open(observation, nx, ny) then
+      return candidate.action
+    end
+  end
+
+  return nil
+end
+
+local function direction_towards_uplink(observation, uplink, x, y)
+  if y > uplink.y and is_open(observation, x, y - 1) then
+    return "north"
+  end
+  if y < uplink.y and is_open(observation, x, y + 1) then
+    return "south"
+  end
+  if x > uplink.x and is_open(observation, x - 1, y) then
+    return "west"
+  end
+  if x < uplink.x and is_open(observation, x + 1, y) then
+    return "east"
+  end
+  return nil
+end
+
+function on_tick(observation)
+  local x, y = observation.drone.x, observation.drone.y
+  mark_visited(x, y)
+
+  local uplink = find_uplink(observation)
+  if uplink ~= nil then
+    if x == uplink.x and y == uplink.y then
+      return "wait"
+    end
+
+    local towards = direction_towards_uplink(observation, uplink, x, y)
+    if towards ~= nil then
+      return towards
+    end
+  end
+
+  local unvisited = unvisited_open_neighbor(observation, x, y)
+  if unvisited ~= nil then
+    return unvisited
+  end
+
+  local anywhere = any_open_neighbor(observation, x, y)
+  if anywhere ~= nil then
+    return anywhere
+  end
+
+  -- Nowhere new or already-open to go: scan to reveal more of the map.
+  return "scan"
+end
+"#;
+
+    #[test]
+    fn a_large_representative_controller_renders_correctly_at_every_supported_size() {
+        use super::super::state::Msg;
+
+        for (width, height) in [
+            (120, 40),
+            (MIN_COLUMNS, MIN_ROWS),
+            (TWO_PANE_MIN_COLUMNS, 30),
+        ] {
+            let mut state = AppState::new();
+            state.apply(Msg::Activate);
+            state.apply(Msg::Activate);
+            state.apply(Msg::EditController(super::super::editor::EditOp::SelectAll));
+            state.apply(Msg::PasteController(
+                LARGE_REPRESENTATIVE_CONTROLLER.to_string(),
+            ));
+            state.apply(Msg::ValidateController);
+            assert_eq!(
+                state.validation(),
+                &Validation::Valid,
+                "the large representative fixture itself must be valid Lua"
+            );
+
+            let terminal = render(width, height, &state);
+            assert!(
+                buffer_contains(&terminal, "CAPTURED CONTROLLER"),
+                "failed at {width}x{height}"
+            );
+            // Paste leaves the cursor at the end of the document, so the
+            // viewport follows it there — assert on content near the tail,
+            // not the (now likely scrolled-off) top of the program.
+            assert!(
+                buffer_contains(&terminal, "return \"scan\""),
+                "failed at {width}x{height}"
+            );
+        }
+    }
+
+    #[test]
+    fn vertical_scrolling_follows_the_cursor_through_a_tall_document() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.apply(Msg::EditController(super::super::editor::EditOp::SelectAll));
+        state.apply(Msg::PasteController(
+            LARGE_REPRESENTATIVE_CONTROLLER.to_string(),
+        ));
+        // Paste leaves the cursor at the end of the pasted text, i.e. the
+        // last line of the program.
+
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+        assert!(
+            !buffer_contains(&terminal, "A more complete resistance controller"),
+            "the top of a document this much taller than the pane must have \
+             scrolled off screen once the cursor is at the end"
+        );
+        assert!(
+            buffer_contains(&terminal, "return \"scan\""),
+            "the cursor's line, near the end of the document, must be visible"
+        );
+
+        // Move back to the very top and confirm the viewport follows the
+        // cursor back up again.
+        for _ in 0..LARGE_REPRESENTATIVE_CONTROLLER.lines().count() {
+            state.apply(Msg::EditController(super::super::editor::EditOp::MoveUp(
+                false,
+            )));
+        }
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+        assert!(
+            buffer_contains(&terminal, "A more complete resistance controller"),
+            "moving the cursor back to the top must scroll the viewport back up"
+        );
+    }
+
+    #[test]
+    fn a_banner_shrinking_the_pane_does_not_strand_the_cursor() {
+        use super::super::editor::EditOp;
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.apply(Msg::EditController(EditOp::SelectAll));
+        state.apply(Msg::PasteController(
+            LARGE_REPRESENTATIVE_CONTROLLER.to_string(),
+        ));
+        // Corrupt the tail with an unbalanced syntax error, appended at the
+        // cursor (already at the end of the pasted program from the paste
+        // above), so the document stays exactly as tall as the large
+        // fixture and the cursor stays on its very last, deeply scrolled
+        // line.
+        state.apply(Msg::PasteController("\nfunction broken(\n".to_string()));
+
+        // Before any banner exists, the cursor is already at the bottom of
+        // a document far taller than the pane, so the viewport has already
+        // had to scroll all the way down to keep it visible.
+        let before_banner = render(MIN_COLUMNS, MIN_ROWS, &state);
+        assert!(
+            before_banner.backend().cursor_visible(),
+            "the cursor must be visible before any banner exists"
+        );
+        let cursor_before = before_banner.backend().cursor_position();
+
+        state.apply(Msg::ValidateController);
+        assert!(matches!(state.validation(), Validation::Invalid(_)));
+
+        // At the supported minimum, a wrapped invalid-syntax banner can
+        // claim several rows out of the source pane's height — rows taken
+        // directly from where this already-scrolled-to-the-bottom cursor
+        // was sitting.
+        let after_banner = render(MIN_COLUMNS, MIN_ROWS, &state);
+        assert!(
+            buffer_contains(&after_banner, "INVALID"),
+            "the validation banner must be shown"
+        );
+        assert!(
+            after_banner.backend().cursor_visible(),
+            "the cursor must remain reachable even though the banner has \
+             shrunk the editor's available height"
+        );
+        let cursor_after = after_banner.backend().cursor_position();
+        assert!(
+            cursor_after.y < MIN_ROWS,
+            "the reported cursor position must fall inside the frame, not \
+             behind the banner: cursor.y = {}",
+            cursor_after.y
+        );
+        assert!(
+            cursor_after.y < cursor_before.y,
+            "the banner claiming rows must have actually shrunk the \
+             content area the cursor was refocused against — otherwise the \
+             cursor's row would be unchanged, not moved up: before = {}, \
+             after = {}",
+            cursor_before.y,
+            cursor_after.y
+        );
+    }
+
+    #[test]
+    fn the_cursor_stays_visible_while_editing_at_the_two_pane_threshold() {
+        use super::super::editor::EditOp;
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        // At 100 columns the source pane's bordered editor content area is
+        // well under 100 columns wide (it shares the frame with the Lua
+        // reference pane and loses 2 more to its own border) — 120 `Z`s is
+        // comfortably longer than that, so the line can only fit by
+        // actually scrolling horizontally, not merely by shrinking to fit.
+        let long_marker = "Z".repeat(120);
+        for c in long_marker.chars() {
+            state.apply(Msg::EditController(EditOp::Insert(c)));
+        }
+
+        let terminal = render(TWO_PANE_MIN_COLUMNS, MIN_ROWS, &state);
+        assert!(terminal.backend().cursor_visible());
+        assert!(
+            !buffer_contains(&terminal, &long_marker),
+            "the full 120-character line must not fit unscrolled in the \
+             two-pane threshold's narrower source pane"
+        );
+        assert!(
+            buffer_contains(&terminal, "ZZZZZZZZZZ"),
+            "the tail of the long line, where the cursor now is, must still \
+             be on screen at the two-pane threshold width"
+        );
+    }
+
+    #[test]
+    fn unicode_wide_glyphs_and_combining_marks_render_with_a_visible_cursor() {
+        use super::super::editor::EditOp;
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.apply(Msg::EditController(EditOp::SelectAll));
+        // "-- 你好 café" — a double-width CJK run and an "é" built from a
+        // combining acute accent, kept short enough to stay within one
+        // viewport width per docs/TUI_DESIGN.md and the accepted upstream
+        // limitation pinned by
+        // `known_limitation_wide_glyph_line_can_leave_cursor_offscreen_after_focus`
+        // in tests/editor_foundation_contract.rs.
+        state.apply(Msg::PasteController(
+            "-- \u{4f60}\u{597d} cafe\u{0301}\nfunction on_tick(observation)\n  return \"wait\"\nend\n".to_string(),
+        ));
+        // The trailing newline leaves the cursor on the blank line after
+        // "end", nowhere near the Unicode content. Walk it back up onto
+        // the Unicode line and rightward to land it between the two wide
+        // CJK glyphs — precisely where a display-width-to-column
+        // miscalculation would misplace it.
+        for _ in 0..4 {
+            state.apply(Msg::EditController(EditOp::MoveUp(false)));
+        }
+        for _ in 0..4 {
+            state.apply(Msg::EditController(EditOp::MoveRight(false)));
+        }
+        assert_eq!(
+            state.controller_source().unwrap().lines().next(),
+            Some("-- \u{4f60}\u{597d} cafe\u{0301}"),
+            "the cursor walk above must land back on the Unicode line \
+             without having altered it"
+        );
+
+        for (width, height) in [(120, 40), (MIN_COLUMNS, MIN_ROWS)] {
+            let terminal = render(width, height, &state);
+            // Checked individually, not as one contiguous substring: a
+            // double-width glyph's trailing cell renders as a padding
+            // placeholder, not an empty string, so two adjacent wide
+            // glyphs are not adjacent in the flattened buffer text.
+            assert!(
+                buffer_contains(&terminal, "\u{4f60}"),
+                "the first wide CJK glyph must render at {width}x{height}"
+            );
+            assert!(
+                buffer_contains(&terminal, "\u{597d}"),
+                "the second wide CJK glyph must render at {width}x{height}"
+            );
+            assert!(
+                buffer_contains(&terminal, "cafe\u{0301}"),
+                "the combining-mark grapheme must render at {width}x{height}"
+            );
+            assert!(
+                terminal.backend().cursor_visible(),
+                "the cursor, positioned between the two wide CJK glyphs, \
+                 must be visible at {width}x{height}"
+            );
+        }
+
+        // Move onto the combining-mark grapheme itself (the end of the
+        // line, right after "café") and confirm the cursor is still
+        // correctly placed and visible there too.
+        state.apply(Msg::EditController(EditOp::MoveLineEnd(false)));
+        for (width, height) in [(120, 40), (MIN_COLUMNS, MIN_ROWS)] {
+            let terminal = render(width, height, &state);
+            assert!(
+                terminal.backend().cursor_visible(),
+                "the cursor, positioned after the combining-mark grapheme, \
+                 must be visible at {width}x{height}"
+            );
+        }
+    }
+
     #[test]
     fn word_wrapped_row_count_matches_greedy_word_wrapping_not_total_width_division() {
         // Three 40-column words in a 78-column line: a naive

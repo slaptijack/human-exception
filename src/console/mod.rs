@@ -1118,6 +1118,137 @@ mod tests {
     }
 
     #[test]
+    fn a_wide_to_narrow_to_wide_resize_preserves_source_selection_and_undo_history() {
+        // Source, cursor, selection, and undo/redo history are
+        // `ControllerDocument` state; `sync_for_render`'s scroll-offset
+        // recompute (the only thing a resize actually touches) must never
+        // disturb any of it. Driven end to end through real key/resize
+        // events rather than direct `Msg`/`EditOp` calls, matching issue
+        // #96's dominant review question. `AppState`'s public surface
+        // exposes no direct cursor/selection accessor, so a still-active
+        // selection is observed indirectly: typing over it must replace it,
+        // not insert alongside it.
+        //
+        // Every event, resize included, is actually drawn (resizing the
+        // backend first, exactly as the real event loop does) rather than
+        // only fed to `should_redraw` — otherwise `sync_for_render` never
+        // runs at the resized geometries at all, and a regression specific
+        // to rendering at a resized viewport would go undetected.
+        fn drive(
+            state: &mut AppState,
+            terminal: &mut Terminal<TestBackend>,
+            event: Event,
+            size: (u16, u16),
+            last_transition_press: &mut TransitionKeyDebounce,
+        ) {
+            if should_redraw(state, event, size, last_transition_press) {
+                terminal
+                    .draw(|frame| ui::draw(frame, state))
+                    .expect("redraw should succeed");
+            }
+        }
+
+        let shift_left = || Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT));
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("test backend should initialize");
+        let mut state = AppState::new();
+        let mut last_transition_press: TransitionKeyDebounce = None;
+        terminal
+            .draw(|frame| ui::draw(frame, &state))
+            .expect("initial draw should succeed");
+
+        for event in [
+            press(KeyCode::Enter), // inspect the actionable signal, opening Target
+            press(KeyCode::Enter), // commit, opening Controller
+            press(KeyCode::Char('h')),
+            press(KeyCode::Char('i')),
+        ] {
+            drive(
+                &mut state,
+                &mut terminal,
+                event,
+                (120, 40),
+                &mut last_transition_press,
+            );
+        }
+        let before_edit = state.controller_source().unwrap();
+        assert!(before_edit.ends_with("hi"));
+
+        for event in [shift_left(), shift_left()] {
+            drive(
+                &mut state,
+                &mut terminal,
+                event,
+                (120, 40),
+                &mut last_transition_press,
+            );
+        }
+
+        // Wide -> narrow -> the two-pane threshold -> wide again — none of
+        // which is a key event, and so must leave the selection untouched.
+        for (width, height) in [(80, 24), (100, 24), (120, 40)] {
+            terminal.backend_mut().resize(width, height);
+            drive(
+                &mut state,
+                &mut terminal,
+                Event::Resize(width, height),
+                (width, height),
+                &mut last_transition_press,
+            );
+        }
+
+        drive(
+            &mut state,
+            &mut terminal,
+            press(KeyCode::Char('Z')),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        let after_replace = state.controller_source().unwrap();
+        assert!(
+            after_replace.ends_with('Z') && !after_replace.ends_with("hiZ"),
+            "a selection that survived the resizes must be replaced, not \
+             typed alongside it: {after_replace:?}"
+        );
+
+        // Undo/redo across another resize must round-trip exactly, too.
+        terminal.backend_mut().resize(80, 24);
+        drive(
+            &mut state,
+            &mut terminal,
+            Event::Resize(80, 24),
+            (80, 24),
+            &mut last_transition_press,
+        );
+        drive(
+            &mut state,
+            &mut terminal,
+            press_ctrl(KeyCode::Char('z')),
+            (80, 24),
+            &mut last_transition_press,
+        );
+        assert_eq!(state.controller_source().unwrap(), before_edit);
+
+        terminal.backend_mut().resize(120, 40);
+        drive(
+            &mut state,
+            &mut terminal,
+            Event::Resize(120, 40),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        drive(
+            &mut state,
+            &mut terminal,
+            press_ctrl(KeyCode::Char('y')),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        assert_eq!(state.controller_source().unwrap(), after_replace);
+    }
+
+    #[test]
     fn help_scroll_offset_stays_bounded_to_the_viewport_not_just_the_render() {
         let (mut state, _) = render(120, 40, &[press(KeyCode::F(1))]);
         let mut last_transition_press: TransitionKeyDebounce = None;

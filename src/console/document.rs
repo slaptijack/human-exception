@@ -1039,4 +1039,91 @@ mod tests {
         doc.apply(EditOp::MoveWordRight(true));
         assert_eq!(doc.selected_text().as_deref(), Some("foo"));
     }
+
+    #[test]
+    fn sync_for_render_never_mutates_source_cursor_or_selection() {
+        // `sync_for_render` recomputes scroll offsets for a given viewport;
+        // it must never touch the rope, cursor position, or an active
+        // selection — a resize (rendering the same document at a new area)
+        // must not disturb any of that authoritative state (issue #96).
+        let mut doc = ControllerDocument::new("line one\nline two\nline three");
+        doc.apply(EditOp::MoveLineStart(false));
+        doc.apply(EditOp::MoveRight(true));
+        doc.apply(EditOp::MoveRight(true));
+        doc.apply(EditOp::MoveRight(true));
+        assert_eq!(doc.selected_text().as_deref(), Some("lin"));
+
+        let before_source = doc.source();
+        let before_cursor = doc.cursor_line_col();
+
+        // 120x40, 80x24, the two-pane threshold width, and back to 120x40.
+        for area in [
+            Rect::new(0, 0, 120, 40),
+            Rect::new(0, 0, 80, 24),
+            Rect::new(0, 0, 100, 30),
+            Rect::new(0, 0, 120, 40),
+        ] {
+            let _ = doc.sync_for_render(area);
+            assert_eq!(doc.source(), before_source);
+            assert_eq!(doc.cursor_line_col(), before_cursor);
+            assert_eq!(doc.selected_text().as_deref(), Some("lin"));
+        }
+    }
+
+    #[test]
+    fn undo_and_redo_survive_renders_at_multiple_sizes() {
+        // Rendering (via `sync_for_render`) between an edit and its undo, or
+        // between an undo and its redo, must not disturb the undo history —
+        // a resize sits exactly there in real play.
+        let mut doc = ControllerDocument::new("abc");
+        doc.apply(EditOp::Insert('!'));
+        assert_eq!(doc.source(), "abc!");
+
+        let _ = doc.sync_for_render(Rect::new(0, 0, 80, 24));
+        assert!(doc.apply(EditOp::Undo));
+        assert_eq!(doc.source(), "abc");
+
+        let _ = doc.sync_for_render(Rect::new(0, 0, 120, 40));
+        assert!(doc.apply(EditOp::Redo));
+        assert_eq!(doc.source(), "abc!");
+    }
+
+    #[test]
+    fn a_select_all_selection_survives_being_rendered_in_a_pane_too_short_to_show_it_all() {
+        // The document model has no notion of "on screen": selecting the
+        // whole document must stay intact even when rendered into a
+        // viewport far shorter than the document (issue #96: "selection
+        // can extend across off-screen content"). 80x22 shows at most ~22
+        // source rows, far fewer than the document's 40 lines.
+        let lines: Vec<String> = (0..40).map(|i| format!("line {i}")).collect();
+        let source = lines.join("\n");
+        let mut doc = ControllerDocument::new(&source);
+
+        assert!(!doc.apply(EditOp::SelectAll));
+        assert_eq!(doc.selected_text().as_deref(), Some(source.as_str()));
+
+        let _ = doc.sync_for_render(Rect::new(0, 0, 80, 22));
+        assert_eq!(
+            doc.selected_text().as_deref(),
+            Some(source.as_str()),
+            "rendering into a short viewport must not truncate the selection"
+        );
+    }
+
+    #[test]
+    fn selecting_and_deleting_a_combining_mark_grapheme_removes_it_atomically() {
+        // "é" here is "e" plus a combining acute accent — a two-`char`
+        // grapheme cluster, the same construction used by the
+        // vertical-movement and word-movement grapheme tests above.
+        // Shift-selecting it and deleting must remove the whole cluster,
+        // not split it in two.
+        let mut doc = ControllerDocument::new("e\u{0301}bc");
+        doc.apply(EditOp::MoveLineStart(false));
+        doc.apply(EditOp::MoveRight(true));
+        assert_eq!(doc.selected_text().as_deref(), Some("e\u{0301}"));
+
+        assert!(doc.apply(EditOp::Backspace));
+        assert_eq!(doc.source(), "bc");
+        assert_eq!(doc.cursor_line_col(), (0, 0));
+    }
 }
