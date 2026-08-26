@@ -1389,4 +1389,81 @@ mod tests {
             "function on_tick(observation) return \"wait\" end"
         );
     }
+
+    #[test]
+    fn validating_deploying_editing_reviewing_and_retrying_preserves_provenance_end_to_end() {
+        // Reach the Controller with a scripted route in place of the
+        // starter, and confirm it validates.
+        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
+        events.extend(clear_and_type(ROUTE_TO_UPLINK));
+        events.push(press_ctrl(KeyCode::Char('v')));
+        let (state, _) = render(120, 40, &events);
+        assert_eq!(state.validation(), &state::Validation::Valid);
+
+        // Deploy, pause, and step every tick so the run finishes
+        // deterministically, exactly as
+        // `completing_a_scripted_route_lands_on_after_action_with_recognizable_text`
+        // does above.
+        events.push(press(KeyCode::F(6)));
+        events.push(press(KeyCode::Char(' '))); // pause
+        events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
+        let (state, _) = render(120, 40, &events);
+        assert_eq!(state.current_view(), View::AfterAction);
+        assert!(state.operation().unwrap().finished);
+        let deployed_before = state.operation().unwrap().deployed_source.to_string();
+
+        // Back to the Controller, edit further, then open Review Run
+        // (`F5`, the finished operation's `View::Operation`) without
+        // redeploying: the source it shows must still be the source that
+        // was actually deployed, not whatever was just typed.
+        events.push(press(KeyCode::F(4)));
+        events.extend(clear_and_type(
+            "function on_tick(observation) return \"wait\" end",
+        ));
+        events.push(press(KeyCode::F(5)));
+        let (state, terminal) = render(120, 40, &events);
+        assert_eq!(state.current_view(), View::Operation);
+        assert!(buffer_contains(&terminal, "DEPLOYED SOURCE"));
+        assert!(
+            buffer_contains(&terminal, "local route"),
+            "Review Run must render the deployed route script, not the \
+             replacement source the player has since typed"
+        );
+        assert!(
+            !buffer_contains(&terminal, "return \"wait\""),
+            "the newly typed replacement source must not appear under \
+             Review Run's DEPLOYED SOURCE heading"
+        );
+        assert_eq!(
+            state.operation().unwrap().deployed_source,
+            deployed_before,
+            "Review Run must keep showing the frozen deploy snapshot, not \
+             the source the player has since typed"
+        );
+
+        // Retry: redeploying from the finished run needs no confirmation,
+        // and provenance now updates to the newly typed source — it only
+        // ever changes on an explicit new deploy, never implicitly.
+        events.push(press(KeyCode::F(6)));
+        let (state, _) = render(120, 40, &events);
+        assert_eq!(state.current_view(), View::Operation);
+        assert_eq!(
+            state.operation().unwrap().deployed_source,
+            "function on_tick(observation) return \"wait\" end"
+        );
+
+        // Quit safety still gates on the new, unfinished run after this
+        // whole sequence, and cancelling leaves it running.
+        events.push(press_ctrl(KeyCode::Char('q')));
+        let (state, _) = render(120, 40, &events);
+        assert!(state.quit_confirmation_pending());
+
+        events.push(press(KeyCode::Esc));
+        let (state, _) = render(120, 40, &events);
+        assert!(!state.quit_confirmation_pending());
+        assert_eq!(
+            state.operation().unwrap().deployed_source,
+            "function on_tick(observation) return \"wait\" end"
+        );
+    }
 }
