@@ -1118,6 +1118,91 @@ mod tests {
     }
 
     #[test]
+    fn a_wide_to_narrow_to_wide_resize_preserves_source_selection_and_undo_history() {
+        // Source, cursor, selection, and undo/redo history are
+        // `ControllerDocument` state; `sync_for_render`'s scroll-offset
+        // recompute (the only thing a resize actually touches) must never
+        // disturb any of it. Driven end to end through real key/resize
+        // events rather than direct `Msg`/`EditOp` calls, matching issue
+        // #96's dominant review question. `AppState`'s public surface
+        // exposes no direct cursor/selection accessor, so a still-active
+        // selection is observed indirectly: typing over it must replace it,
+        // not insert alongside it.
+        let shift_left = || Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT));
+
+        let (mut state, _) = render(
+            120,
+            40,
+            &[
+                press(KeyCode::Enter), // inspect the actionable signal, opening Target
+                press(KeyCode::Enter), // commit, opening Controller
+                press(KeyCode::Char('h')),
+                press(KeyCode::Char('i')),
+            ],
+        );
+        let before_edit = state.controller_source().unwrap();
+        assert!(before_edit.ends_with("hi"));
+
+        let mut last_transition_press: TransitionKeyDebounce = None;
+        for event in [shift_left(), shift_left()] {
+            should_redraw(&mut state, event, (120, 40), &mut last_transition_press);
+        }
+
+        // Wide -> narrow -> the two-pane threshold -> wide again — none of
+        // which is a key event, and so must leave the selection untouched.
+        for (width, height) in [(80, 24), (100, 24), (120, 40)] {
+            should_redraw(
+                &mut state,
+                Event::Resize(width, height),
+                (width, height),
+                &mut last_transition_press,
+            );
+        }
+
+        should_redraw(
+            &mut state,
+            press(KeyCode::Char('Z')),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        let after_replace = state.controller_source().unwrap();
+        assert!(
+            after_replace.ends_with('Z') && !after_replace.ends_with("hiZ"),
+            "a selection that survived the resizes must be replaced, not \
+             typed alongside it: {after_replace:?}"
+        );
+
+        // Undo/redo across another resize must round-trip exactly, too.
+        should_redraw(
+            &mut state,
+            Event::Resize(80, 24),
+            (80, 24),
+            &mut last_transition_press,
+        );
+        should_redraw(
+            &mut state,
+            press_ctrl(KeyCode::Char('z')),
+            (80, 24),
+            &mut last_transition_press,
+        );
+        assert_eq!(state.controller_source().unwrap(), before_edit);
+
+        should_redraw(
+            &mut state,
+            Event::Resize(120, 40),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        should_redraw(
+            &mut state,
+            press_ctrl(KeyCode::Char('y')),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        assert_eq!(state.controller_source().unwrap(), after_replace);
+    }
+
+    #[test]
     fn help_scroll_offset_stays_bounded_to_the_viewport_not_just_the_render() {
         let (mut state, _) = render(120, 40, &[press(KeyCode::F(1))]);
         let mut last_transition_press: TransitionKeyDebounce = None;
