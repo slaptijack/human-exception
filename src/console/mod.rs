@@ -1424,6 +1424,16 @@ mod tests {
         let (state, terminal) = render(120, 40, &events);
         assert_eq!(state.current_view(), View::Operation);
         assert!(buffer_contains(&terminal, "DEPLOYED SOURCE"));
+        assert!(
+            buffer_contains(&terminal, "local route"),
+            "Review Run must render the deployed route script, not the \
+             replacement source the player has since typed"
+        );
+        assert!(
+            !buffer_contains(&terminal, "return \"wait\""),
+            "the newly typed replacement source must not appear under \
+             Review Run's DEPLOYED SOURCE heading"
+        );
         assert_eq!(
             state.operation().unwrap().deployed_source,
             deployed_before,
