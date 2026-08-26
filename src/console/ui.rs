@@ -3019,33 +3019,59 @@ end
         let mut state = AppState::new();
         state.apply(Msg::Activate);
         state.apply(Msg::Activate);
-        // Deliberately invalid Lua (unbalanced parenthesis) so validation
-        // reports a real, non-trivial diagnostic banner.
         state.apply(Msg::EditController(EditOp::SelectAll));
         state.apply(Msg::PasteController(
-            "function on_tick(observation\n  return \"wait\"\nend\n".to_string(),
+            LARGE_REPRESENTATIVE_CONTROLLER.to_string(),
         ));
+        // Corrupt the tail with an unbalanced syntax error, appended at the
+        // cursor (already at the end of the pasted program from the paste
+        // above), so the document stays exactly as tall as the large
+        // fixture and the cursor stays on its very last, deeply scrolled
+        // line.
+        state.apply(Msg::PasteController("\nfunction broken(\n".to_string()));
+
+        // Before any banner exists, the cursor is already at the bottom of
+        // a document far taller than the pane, so the viewport has already
+        // had to scroll all the way down to keep it visible.
+        let before_banner = render(MIN_COLUMNS, MIN_ROWS, &state);
+        assert!(
+            before_banner.backend().cursor_visible(),
+            "the cursor must be visible before any banner exists"
+        );
+        let cursor_before = before_banner.backend().cursor_position();
+
         state.apply(Msg::ValidateController);
         assert!(matches!(state.validation(), Validation::Invalid(_)));
 
         // At the supported minimum, a wrapped invalid-syntax banner can
-        // claim several rows out of the source pane's height.
-        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+        // claim several rows out of the source pane's height — rows taken
+        // directly from where this already-scrolled-to-the-bottom cursor
+        // was sitting.
+        let after_banner = render(MIN_COLUMNS, MIN_ROWS, &state);
         assert!(
-            buffer_contains(&terminal, "INVALID"),
-            "the validation banner must still be shown"
+            buffer_contains(&after_banner, "INVALID"),
+            "the validation banner must be shown"
         );
         assert!(
-            terminal.backend().cursor_visible(),
+            after_banner.backend().cursor_visible(),
             "the cursor must remain reachable even though the banner has \
              shrunk the editor's available height"
         );
-        let cursor = terminal.backend().cursor_position();
+        let cursor_after = after_banner.backend().cursor_position();
         assert!(
-            cursor.y < MIN_ROWS,
+            cursor_after.y < MIN_ROWS,
             "the reported cursor position must fall inside the frame, not \
              behind the banner: cursor.y = {}",
-            cursor.y
+            cursor_after.y
+        );
+        assert!(
+            cursor_after.y < cursor_before.y,
+            "the banner claiming rows must have actually shrunk the \
+             content area the cursor was refocused against — otherwise the \
+             cursor's row would be unchanged, not moved up: before = {}, \
+             after = {}",
+            cursor_before.y,
+            cursor_after.y
         );
     }
 
@@ -3057,13 +3083,23 @@ end
         let mut state = AppState::new();
         state.apply(Msg::Activate);
         state.apply(Msg::Activate);
-        let long_marker = "Z".repeat(60);
+        // At 100 columns the source pane's bordered editor content area is
+        // well under 100 columns wide (it shares the frame with the Lua
+        // reference pane and loses 2 more to its own border) — 120 `Z`s is
+        // comfortably longer than that, so the line can only fit by
+        // actually scrolling horizontally, not merely by shrinking to fit.
+        let long_marker = "Z".repeat(120);
         for c in long_marker.chars() {
             state.apply(Msg::EditController(EditOp::Insert(c)));
         }
 
         let terminal = render(TWO_PANE_MIN_COLUMNS, MIN_ROWS, &state);
         assert!(terminal.backend().cursor_visible());
+        assert!(
+            !buffer_contains(&terminal, &long_marker),
+            "the full 120-character line must not fit unscrolled in the \
+             two-pane threshold's narrower source pane"
+        );
         assert!(
             buffer_contains(&terminal, "ZZZZZZZZZZ"),
             "the tail of the long line, where the cursor now is, must still \
@@ -3089,6 +3125,23 @@ end
         state.apply(Msg::PasteController(
             "-- \u{4f60}\u{597d} cafe\u{0301}\nfunction on_tick(observation)\n  return \"wait\"\nend\n".to_string(),
         ));
+        // The trailing newline leaves the cursor on the blank line after
+        // "end", nowhere near the Unicode content. Walk it back up onto
+        // the Unicode line and rightward to land it between the two wide
+        // CJK glyphs — precisely where a display-width-to-column
+        // miscalculation would misplace it.
+        for _ in 0..4 {
+            state.apply(Msg::EditController(EditOp::MoveUp(false)));
+        }
+        for _ in 0..4 {
+            state.apply(Msg::EditController(EditOp::MoveRight(false)));
+        }
+        assert_eq!(
+            state.controller_source().unwrap().lines().next(),
+            Some("-- \u{4f60}\u{597d} cafe\u{0301}"),
+            "the cursor walk above must land back on the Unicode line \
+             without having altered it"
+        );
 
         for (width, height) in [(120, 40), (MIN_COLUMNS, MIN_ROWS)] {
             let terminal = render(width, height, &state);
@@ -3108,10 +3161,25 @@ end
                 buffer_contains(&terminal, "cafe\u{0301}"),
                 "the combining-mark grapheme must render at {width}x{height}"
             );
+            assert!(
+                terminal.backend().cursor_visible(),
+                "the cursor, positioned between the two wide CJK glyphs, \
+                 must be visible at {width}x{height}"
+            );
         }
 
-        let terminal = render(120, 40, &state);
-        assert!(terminal.backend().cursor_visible());
+        // Move onto the combining-mark grapheme itself (the end of the
+        // line, right after "café") and confirm the cursor is still
+        // correctly placed and visible there too.
+        state.apply(Msg::EditController(EditOp::MoveLineEnd(false)));
+        for (width, height) in [(120, 40), (MIN_COLUMNS, MIN_ROWS)] {
+            let terminal = render(width, height, &state);
+            assert!(
+                terminal.backend().cursor_visible(),
+                "the cursor, positioned after the combining-mark grapheme, \
+                 must be visible at {width}x{height}"
+            );
+        }
     }
 
     #[test]
