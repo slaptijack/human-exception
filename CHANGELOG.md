@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1](https://github.com/slaptijack/human-exception/compare/v0.4.0...v0.4.1) - 2026-08-26
+
+### Added
+
+- *(controller)* route focused Controller commands into the editor ([#118](https://github.com/slaptijack/human-exception/pull/118))
+- *(controller)* render Controller source through the editor widget ([#117](https://github.com/slaptijack/human-exception/pull/117))
+- *(controller)* introduce the authoritative Controller document adapter ([#116](https://github.com/slaptijack/human-exception/pull/116))
+- *(controller)* adopt ratatui-code-editor as the editor foundation ([#115](https://github.com/slaptijack/human-exception/pull/115))
+
+### Fixed
+
+- *(controller)* sanitize control characters before they reach ratatui ([#123](https://github.com/slaptijack/human-exception/pull/123))
+
+### Other
+
+- *(tui)* describe the editor contract as shipped, not pending ([#124](https://github.com/slaptijack/human-exception/pull/124))
+- *(controller)* prove comfortable editing at supported terminal sizes ([#121](https://github.com/slaptijack/human-exception/pull/121))
+- *(controller)* prove the editor swap preserves gameplay and provenance ([#120](https://github.com/slaptijack/human-exception/pull/120))
+- *(controller)* close bracketed-paste acceptance-criteria gaps ([#119](https://github.com/slaptijack/human-exception/pull/119))
+- prove and select ratatui-textarea as the editor foundation ([#114](https://github.com/slaptijack/human-exception/pull/114))
+- define the integrated Controller editor contract ([#113](https://github.com/slaptijack/human-exception/pull/113))
+- move LCOV reporting out of the blocking CI check ([#111](https://github.com/slaptijack/human-exception/pull/111))
+
 ## [0.4.0](https://github.com/slaptijack/human-exception/compare/v0.3.0...v0.4.0) - 2026-08-18
 
 ### Added
