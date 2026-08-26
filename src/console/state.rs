@@ -1396,6 +1396,55 @@ mod tests {
     }
 
     #[test]
+    fn undoing_back_to_the_starter_text_clears_modified_and_needs_no_reset_confirmation() {
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        assert!(!state.controller_modified());
+
+        state.apply(Msg::EditController(EditOp::Insert('x')));
+        assert!(state.controller_modified());
+
+        state.apply(Msg::EditController(EditOp::Undo));
+
+        assert!(
+            !state.controller_modified(),
+            "undoing back to exactly the starter text should clear \"modified\", \
+             since it is a content comparison rather than an undo-depth flag"
+        );
+        assert_eq!(
+            state.validation(),
+            &Validation::Unchecked,
+            "the undo did change content, so any prior validation is invalidated"
+        );
+
+        state.apply(Msg::RequestResetController);
+
+        assert!(!state.reset_confirmation_pending());
+        assert_eq!(
+            state.controller_source(),
+            Some(super::super::intel::STARTER_CONTROLLER.to_string())
+        );
+    }
+
+    #[test]
+    fn undoing_partway_back_still_leaves_the_controller_modified() {
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+
+        state.apply(Msg::EditController(EditOp::Insert('x')));
+        state.apply(Msg::EditController(EditOp::Insert('y')));
+        state.apply(Msg::EditController(EditOp::Undo));
+
+        assert!(
+            state.controller_modified(),
+            "one undo removed only the second insert; the first still \
+             differs from the starter text"
+        );
+    }
+
+    #[test]
     fn focus_next_pane_advances_through_a_views_panes_and_wraps_around() {
         let mut state = AppState::new();
         assert_eq!(state.focused_pane(View::Signals), PaneId::SignalsList);
@@ -1657,6 +1706,74 @@ mod tests {
         assert!(!op.finished);
         assert!(op.records.is_empty());
         assert_eq!(op.deployed_source, super::super::intel::STARTER_CONTROLLER);
+    }
+
+    #[test]
+    fn editing_the_controller_after_deploying_does_not_change_the_deployed_source() {
+        let mut state = working_state();
+        state.controller = Some(ControllerDocument::new(ALWAYS_ERRORS));
+
+        state.apply(Msg::RequestDeploy);
+        let deployed = state
+            .operation()
+            .expect("a deploy just happened")
+            .deployed_source
+            .to_string();
+        assert_eq!(deployed, ALWAYS_ERRORS);
+
+        state.apply(Msg::EditController(EditOp::Insert('x')));
+        state.apply(Msg::EditController(EditOp::Insert('y')));
+
+        assert_eq!(
+            state.controller_source().unwrap(),
+            format!("{ALWAYS_ERRORS}xy"),
+            "the working copy did change"
+        );
+        assert_eq!(
+            state.operation().unwrap().deployed_source,
+            deployed,
+            "the frozen deploy snapshot must be unreachable from later edits \
+             to the separate, still-mutable controller document"
+        );
+
+        // The provenance guarantee must also hold once the run has actually
+        // finished and the player is looking at Review Run — reached here
+        // by navigating back to `View::Operation` once `finished`, exactly
+        // as `F5` does.
+        state.advance_running_operation();
+        assert!(state.operation().unwrap().finished);
+        assert_eq!(state.operation().unwrap().deployed_source, deployed);
+
+        state.apply(Msg::Navigate(View::Operation));
+        assert_eq!(state.current_view(), View::Operation);
+        assert_eq!(state.operation().unwrap().deployed_source, deployed);
+    }
+
+    #[test]
+    fn undoing_after_deploy_does_not_change_the_deployed_source() {
+        let mut state = working_state();
+
+        state.apply(Msg::RequestDeploy);
+        let deployed = state
+            .operation()
+            .expect("a deploy just happened")
+            .deployed_source
+            .to_string();
+
+        state.apply(Msg::EditController(EditOp::Insert('x')));
+        state.apply(Msg::EditController(EditOp::Undo));
+
+        assert_eq!(
+            state.controller_source().unwrap(),
+            deployed,
+            "undo restored the working copy to the deployed text"
+        );
+        assert_eq!(
+            state.operation().unwrap().deployed_source,
+            deployed,
+            "undo/redo on the working copy must never reach the frozen \
+             deploy snapshot either"
+        );
     }
 
     #[test]
