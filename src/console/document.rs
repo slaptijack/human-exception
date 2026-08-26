@@ -126,23 +126,30 @@ impl ControllerDocument {
     /// active selection when applied, so those ops need no special-casing
     /// here beyond routing selection-aware deletion (see `has_selection`
     /// use in `Backspace`/`DeleteForward` below) — typing or deleting over
-    /// a selection "just works" via the library's own behavior.
+    /// a selection "just works" via the library's own behavior. `Insert`
+    /// and `Newline` compare source before/after rather than assuming a
+    /// change, because replacing an active selection with identical
+    /// content (typing the same character back over it, `Enter` over an
+    /// already-selected lone newline) is a real case now that selection
+    /// exists, and must not spuriously invalidate an accurate validation.
     pub(crate) fn apply(&mut self, op: EditOp) -> bool {
         let changed = match op {
             EditOp::Insert(c) => {
+                let before = self.source();
                 self.editor.get_mut().apply(InsertText {
                     text: c.to_string(),
                 });
-                true
+                self.source() != before
             }
             // A bare newline, not the library's `InsertNewline` action:
             // that action auto-indents from the current line, a new
             // editing feature out of scope for this issue.
             EditOp::Newline => {
+                let before = self.source();
                 self.editor.get_mut().apply(InsertText {
                     text: "\n".to_string(),
                 });
-                true
+                self.source() != before
             }
             EditOp::Backspace => {
                 let editor = self.editor.get_mut();
@@ -254,16 +261,18 @@ impl ControllerDocument {
 
     /// Inserts `text` verbatim at the cursor as a single operation, used for
     /// pasted content. Returns whether the source actually changed (`false`
-    /// for empty `text`).
+    /// for empty `text`, or for a paste that replaces an active selection
+    /// with identical content).
     pub(crate) fn insert_text(&mut self, text: &str) -> bool {
         if text.is_empty() {
             return false;
         }
+        let before = self.source();
         self.editor.get_mut().apply(InsertText {
             text: text.to_string(),
         });
         self.sync_preferred_col();
-        true
+        self.source() != before
     }
 
     /// Replaces the working source with `source`, discarding cursor
@@ -298,17 +307,27 @@ impl ControllerDocument {
     /// `sync_preferred_col` via an early `return` in `apply`) so repeated
     /// vertical moves through shorter lines still remember how far right
     /// the cursor started.
+    ///
+    /// At the first/last line there is no line to move to, but an
+    /// unshifted move must still clear any active selection — matching
+    /// every other unshifted movement key — rather than silently leaving a
+    /// stale selection behind for the next keystroke to replace.
     fn move_vertical(&mut self, direction: Direction, shift: bool) {
         let editor = self.editor.get_mut();
         let code = editor.code_ref();
         let line = code.char_to_line(editor.get_cursor());
+        let last_line = code.len_lines();
         let target_line = match direction {
-            Direction::Backward if line == 0 => return,
-            Direction::Backward => line - 1,
-            Direction::Forward if line + 1 >= code.len_lines() => return,
-            Direction::Forward => line + 1,
+            Direction::Backward if line == 0 => None,
+            Direction::Backward => Some(line - 1),
+            Direction::Forward if line + 1 >= last_line => None,
+            Direction::Forward => Some(line + 1),
         };
-        self.move_to(target_line, self.preferred_col, shift);
+        match target_line {
+            Some(target_line) => self.move_to(target_line, self.preferred_col, shift),
+            None if !shift => self.editor.get_mut().clear_selection(),
+            None => {}
+        }
     }
 
     fn move_page(&mut self, direction: Direction, shift: bool) {
@@ -362,7 +381,11 @@ impl ControllerDocument {
     /// following run of same-kind characters (word characters — alphanumeric
     /// or `_`, matching `Code::word_boundaries` — versus punctuation are
     /// each their own kind, so e.g. `foo.bar` stops at `.` as well as at
-    /// each identifier).
+    /// each identifier). Steps by `next`/`prev_grapheme_boundary`, not raw
+    /// char indices, so a multi-`char` grapheme (a base character plus a
+    /// combining mark) is classified and crossed as one unit rather than
+    /// leaving the cursor split partway through it — the same grapheme-safe
+    /// contract `move_to` already honors for vertical movement.
     fn move_word(&mut self, direction: Direction, shift: bool) {
         let editor = self.editor.get_mut();
         let code = editor.code_ref();
@@ -391,15 +414,26 @@ impl ControllerDocument {
 
     fn word_left(code: &ratatui_code_editor::code::Code, cursor: usize) -> usize {
         let mut pos = cursor;
-        while pos > 0 && Self::char_kind(code, pos - 1) == CharKind::Whitespace {
-            pos -= 1;
+        loop {
+            if pos == 0 {
+                return 0;
+            }
+            let prev = code.prev_grapheme_boundary(pos);
+            if Self::char_kind(code, prev) != CharKind::Whitespace {
+                break;
+            }
+            pos = prev;
         }
-        if pos == 0 {
-            return 0;
-        }
-        let kind = Self::char_kind(code, pos - 1);
-        while pos > 0 && Self::char_kind(code, pos - 1) == kind {
-            pos -= 1;
+        let kind = Self::char_kind(code, code.prev_grapheme_boundary(pos));
+        loop {
+            if pos == 0 {
+                break;
+            }
+            let prev = code.prev_grapheme_boundary(pos);
+            if Self::char_kind(code, prev) != kind {
+                break;
+            }
+            pos = prev;
         }
         pos
     }
@@ -407,14 +441,14 @@ impl ControllerDocument {
     fn word_right(code: &ratatui_code_editor::code::Code, cursor: usize, len: usize) -> usize {
         let mut pos = cursor;
         while pos < len && Self::char_kind(code, pos) == CharKind::Whitespace {
-            pos += 1;
+            pos = code.next_grapheme_boundary(pos);
         }
-        if pos == len {
+        if pos >= len {
             return len;
         }
         let kind = Self::char_kind(code, pos);
         while pos < len && Self::char_kind(code, pos) == kind {
-            pos += 1;
+            pos = code.next_grapheme_boundary(pos);
         }
         pos
     }
@@ -696,6 +730,66 @@ mod tests {
     }
 
     #[test]
+    fn replacing_a_selection_with_identical_content_reports_no_change() {
+        // Typing the same character back over a selected one, or pasting
+        // identical text over an identical selection, leaves the final
+        // source unchanged even though a mutation happened in between —
+        // that must not spuriously invalidate an otherwise-accurate
+        // validation result (`docs/TUI_DESIGN.md`, "Modified state and
+        // validation invalidation").
+        let mut doc = ControllerDocument::new("abc");
+        doc.apply(EditOp::MoveLineStart(false));
+        doc.apply(EditOp::MoveRight(true));
+        assert_eq!(doc.selected_text().as_deref(), Some("a"));
+        assert!(!doc.apply(EditOp::Insert('a')));
+        assert_eq!(doc.source(), "abc");
+
+        let mut newline_doc = ControllerDocument::new("a\nb");
+        newline_doc.apply(EditOp::MoveLineStart(false));
+        newline_doc.apply(EditOp::MoveLeft(true));
+        assert_eq!(newline_doc.selected_text().as_deref(), Some("\n"));
+        assert!(!newline_doc.apply(EditOp::Newline));
+        assert_eq!(newline_doc.source(), "a\nb");
+
+        let mut paste_doc = ControllerDocument::new("abc");
+        paste_doc.apply(EditOp::MoveLineStart(false));
+        paste_doc.apply(EditOp::MoveRight(true));
+        assert_eq!(paste_doc.selected_text().as_deref(), Some("a"));
+        assert!(!paste_doc.insert_text("a"));
+        assert_eq!(paste_doc.source(), "abc");
+    }
+
+    #[test]
+    fn unshifted_vertical_movement_at_a_document_boundary_still_clears_a_selection() {
+        // MoveUp/MoveDown return early at the first/last line without
+        // moving the cursor, but an unshifted move must still clear any
+        // active selection there, matching every other unshifted movement
+        // key — otherwise the next typed character or deletion would still
+        // replace a selection the player believes they've backed out of.
+        let mut doc = ControllerDocument::new("abc");
+        doc.apply(EditOp::MoveLineStart(false));
+        doc.apply(EditOp::MoveRight(true));
+        assert_eq!(doc.selected_text().as_deref(), Some("a"));
+
+        doc.apply(EditOp::MoveUp(false)); // already at the first line
+        assert_eq!(
+            doc.selected_text(),
+            None,
+            "MoveUp at line 0 must clear the selection"
+        );
+
+        doc.apply(EditOp::MoveLineEnd(false));
+        doc.apply(EditOp::MoveLeft(true));
+        assert!(doc.selected_text().is_some());
+        doc.apply(EditOp::MoveDown(false)); // "abc" is a single line, so this is also the last line
+        assert_eq!(
+            doc.selected_text(),
+            None,
+            "MoveDown at the last line must clear the selection"
+        );
+    }
+
+    #[test]
     fn backspace_and_delete_forward_remove_an_active_selection() {
         let mut doc = ControllerDocument::new("abcdef");
         doc.apply(EditOp::MoveLineStart(false));
@@ -870,6 +964,44 @@ mod tests {
         doc.apply(EditOp::MoveLineEnd(false));
         doc.apply(EditOp::MoveWordRight(false));
         assert_eq!(doc.cursor_line_col(), (0, 4), "already at the end");
+    }
+
+    #[test]
+    fn word_movement_treats_a_combining_mark_as_part_of_its_base_characters_grapheme() {
+        // "é" here is the base character `e` plus a combining acute accent
+        // — a two-`char` grapheme cluster, the same construction used by
+        // `vertical_movement_snaps_the_target_column_to_a_grapheme_boundary`
+        // above. Classifying each `char` on its own (rather than stepping
+        // by grapheme boundaries) would treat the combining mark as its
+        // own non-word "kind" and stop word movement between the two
+        // `char`s, splitting the grapheme in two; word movement must
+        // instead cross "é" and the following "f" as one unbroken word.
+        let mut doc = ControllerDocument::new("e\u{0301}f bar");
+        doc.apply(EditOp::MoveLineStart(false));
+
+        doc.apply(EditOp::MoveWordRight(false));
+        assert_eq!(
+            doc.cursor_line_col(),
+            (0, 3),
+            "lands right after \"f\", never between \"e\" and its combining accent"
+        );
+
+        doc.apply(EditOp::MoveWordRight(false));
+        assert_eq!(doc.cursor_line_col(), (0, 7), "stops after \"bar\"");
+
+        doc.apply(EditOp::MoveWordLeft(false));
+        assert_eq!(
+            doc.cursor_line_col(),
+            (0, 4),
+            "back to the start of \"bar\""
+        );
+
+        doc.apply(EditOp::MoveWordLeft(false));
+        assert_eq!(
+            doc.cursor_line_col(),
+            (0, 0),
+            "back to the start of the grapheme cluster, not split partway through it"
+        );
     }
 
     #[test]
