@@ -440,16 +440,15 @@ Product requirements:
 ### The editor contract
 
 This section is the interaction contract for the Controller source editor
-itself — the successor to today's single-cursor bespoke editor
-(`src/console/editor.rs`), which epic #88 will replace with a real terminal
-code-editor foundation. It governs *player-visible behavior only*: which
-keys do what, in what priority, and what state survives which action. It
-does not prescribe a `TextArea`/`Rope`/widget type, an undo-stack
-representation, or any other implementation mechanism — that is left to #90
-and later issues. Where this section states a rule the current bespoke
-editor already satisfies, it is being carried forward as a requirement, not
-newly invented; where it describes a capability the current editor does not
-have (selection, undo/redo, word movement), it is new.
+itself: which keys do what, in what priority, and what state survives which
+action. The editor is backed by an embedded terminal code-editor foundation
+(`ratatui-code-editor`, selected in #90) wrapped by the authoritative
+`ControllerDocument` adapter (`src/console/document.rs`); `EditOp`
+(`src/console/editor.rs`) is the shared vocabulary of edit operations the
+Controller input handling dispatches onto it. This section governs
+*player-visible behavior only* — it does not prescribe an undo-stack
+representation or other implementation detail beyond what
+`ControllerDocument` already exposes.
 
 #### Minimum editor experience
 
@@ -474,16 +473,14 @@ have (selection, undo/redo, word movement), it is new.
   the point `Shift` was first held; `Ctrl+A` selects the whole document.
   Typing a character, `Tab`, or pressing `Backspace`/`Delete` while a
   selection is active replaces the selection rather than acting at the
-  cursor alone. This is new relative to today's editor, which has no
-  selection concept at all.
+  cursor alone.
 - **Undo/redo:** `Ctrl+Z` undoes and `Ctrl+Y` redoes, stepping backward and
   forward through discrete edits — typed insertion, `Backspace`/`Delete`, a
   pasted block, and a selection replacement each count as one undoable
   step. `Ctrl+Shift+Z` is not bound: without an extended keyboard protocol
   it can arrive indistinguishable from plain `Ctrl+Z` and silently undo
   instead of redo, the same reasoning that keeps `Ctrl+V` (not
-  `Ctrl+Enter`) as validate's advertised binding. This is new; today's
-  editor has no undo history.
+  `Ctrl+Enter`) as validate's advertised binding.
 - `Tab` indents the current line, or every line an active selection
   touches, by one language-appropriate unit as ordinary space characters —
   two spaces for Lua — never a literal tab byte in the source;
