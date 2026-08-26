@@ -1200,8 +1200,8 @@ mod tests {
         state.apply(Msg::ValidateController);
         assert_eq!(state.validation(), &Validation::Valid);
 
-        state.apply(Msg::EditController(EditOp::MoveLeft));
-        state.apply(Msg::EditController(EditOp::MoveDown));
+        state.apply(Msg::EditController(EditOp::MoveLeft(false)));
+        state.apply(Msg::EditController(EditOp::MoveDown(false)));
 
         assert_eq!(
             state.validation(),
@@ -1228,14 +1228,78 @@ mod tests {
             "DeleteForward at the end of the document didn't change anything"
         );
 
-        state.apply(Msg::EditController(EditOp::PageUp));
-        state.apply(Msg::EditController(EditOp::PageUp));
-        state.apply(Msg::EditController(EditOp::MoveLineStart));
+        state.apply(Msg::EditController(EditOp::PageUp(false)));
+        state.apply(Msg::EditController(EditOp::PageUp(false)));
+        state.apply(Msg::EditController(EditOp::MoveLineStart(false)));
         state.apply(Msg::EditController(EditOp::Backspace));
         assert_eq!(
             state.validation(),
             &Validation::Valid,
             "Backspace at the start of the document didn't change anything either"
+        );
+    }
+
+    #[test]
+    fn creating_a_selection_without_mutating_preserves_a_prior_validation() {
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.apply(Msg::ValidateController);
+        assert_eq!(state.validation(), &Validation::Valid);
+
+        state.apply(Msg::EditController(EditOp::MoveLineStart(true)));
+        state.apply(Msg::EditController(EditOp::SelectAll));
+
+        assert_eq!(
+            state.validation(),
+            &Validation::Valid,
+            "creating a selection doesn't change the source, so a prior validation is still accurate"
+        );
+    }
+
+    #[test]
+    fn undo_that_actually_changes_content_invalidates_a_prior_validation() {
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.apply(Msg::ValidateController);
+        assert_eq!(state.validation(), &Validation::Valid);
+
+        // Appending 'x' at the end of the starter breaks its syntax, but
+        // that doesn't matter here — either result (`Valid` or `Invalid`)
+        // is something a subsequent undo must invalidate back to
+        // `Unchecked`, since undo is itself a content-changing edit.
+        state.apply(Msg::EditController(EditOp::Insert('x')));
+        state.apply(Msg::ValidateController);
+        assert_ne!(
+            state.validation(),
+            &Validation::Unchecked,
+            "sanity: validating the edited script must produce a result to invalidate"
+        );
+
+        state.apply(Msg::EditController(EditOp::Undo));
+
+        assert_eq!(
+            state.validation(),
+            &Validation::Unchecked,
+            "undo restores the pre-'x' source, which is still a real content change"
+        );
+    }
+
+    #[test]
+    fn undo_with_no_history_preserves_a_prior_validation() {
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.apply(Msg::ValidateController);
+        assert_eq!(state.validation(), &Validation::Valid);
+
+        state.apply(Msg::EditController(EditOp::Undo));
+
+        assert_eq!(
+            state.validation(),
+            &Validation::Valid,
+            "there's nothing to undo yet, so nothing changed"
         );
     }
 

@@ -153,7 +153,8 @@ pub fn map(
             // input here, never a real control binding, and must still be
             // inserted rather than silently dropped.
             let altgr = ctrl && key.modifiers.contains(KeyModifiers::ALT);
-            map_controller_edit(key.code, ctrl, altgr)
+            let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+            map_controller_edit(key.code, ctrl, shift, altgr)
         }
         _ => None,
     }
@@ -162,25 +163,45 @@ pub fn map(
 /// Ordinary editing/cursor-movement keys, only reachable once Controller is
 /// showing and neither confirmation dialog is open (see [`map`]). `altgr`
 /// is set when `ctrl` is only true because of an AltGr chord (`CONTROL |
-/// ALT` together), which must still type its printable character.
-fn map_controller_edit(code: KeyCode, ctrl: bool, altgr: bool) -> Option<Msg> {
+/// ALT` together), which must still type its printable character. `shift`
+/// extends the active selection for movement keys (`docs/TUI_DESIGN.md`,
+/// "Minimum editor experience"); it is ignored by non-movement keys.
+fn map_controller_edit(code: KeyCode, ctrl: bool, shift: bool, altgr: bool) -> Option<Msg> {
     let op = match code {
         KeyCode::Char(c) if !ctrl || altgr => EditOp::Insert(c),
-        // A single space keeps indentation as ordinary printable characters
-        // (no literal tab byte in the source) without pretending to be a
-        // real indent-width-aware editor.
-        KeyCode::Tab => EditOp::Insert(' '),
+        // Real Ctrl chords (never AltGr, which the arm above already
+        // consumed) for select-all and undo/redo. `Ctrl+Y` is the redo
+        // binding, not `Ctrl+Shift+Z`: it's an ordinary control character
+        // every terminal reports correctly, whereas `Ctrl+Shift+Z` can
+        // arrive indistinguishable from plain `Ctrl+Z` without an extended
+        // keyboard protocol, which would silently undo instead of redo.
+        KeyCode::Char('a') if ctrl => EditOp::SelectAll,
+        KeyCode::Char('z') if ctrl => EditOp::Undo,
+        KeyCode::Char('y') if ctrl => EditOp::Redo,
+        // `Tab`/`Shift+Tab` indent/unindent the current line, or every
+        // line an active selection touches, by one language-appropriate
+        // unit (two spaces for Lua, never a literal tab byte) — see
+        // `ControllerDocument::apply`'s `EditOp::Indent`/`UnIndent`.
+        // Crossterm reports Shift+Tab as the distinct `BackTab` key code
+        // rather than `Tab` with a Shift modifier bit.
+        KeyCode::Tab => EditOp::Indent,
+        KeyCode::BackTab => EditOp::UnIndent,
         KeyCode::Enter => EditOp::Newline,
         KeyCode::Backspace => EditOp::Backspace,
         KeyCode::Delete => EditOp::DeleteForward,
-        KeyCode::Left => EditOp::MoveLeft,
-        KeyCode::Right => EditOp::MoveRight,
-        KeyCode::Up => EditOp::MoveUp,
-        KeyCode::Down => EditOp::MoveDown,
-        KeyCode::Home => EditOp::MoveLineStart,
-        KeyCode::End => EditOp::MoveLineEnd,
-        KeyCode::PageUp => EditOp::PageUp,
-        KeyCode::PageDown => EditOp::PageDown,
+        // `Ctrl+Left`/`Ctrl+Right` jump by word; plain arrows move one
+        // grapheme. Both forms carry `shift` through to extend or clear
+        // the active selection, matching every other movement key here.
+        KeyCode::Left if ctrl => EditOp::MoveWordLeft(shift),
+        KeyCode::Right if ctrl => EditOp::MoveWordRight(shift),
+        KeyCode::Left => EditOp::MoveLeft(shift),
+        KeyCode::Right => EditOp::MoveRight(shift),
+        KeyCode::Up => EditOp::MoveUp(shift),
+        KeyCode::Down => EditOp::MoveDown(shift),
+        KeyCode::Home => EditOp::MoveLineStart(shift),
+        KeyCode::End => EditOp::MoveLineEnd(shift),
+        KeyCode::PageUp => EditOp::PageUp(shift),
+        KeyCode::PageDown => EditOp::PageDown(shift),
         _ => return None,
     };
     Some(Msg::EditController(op))
@@ -515,20 +536,117 @@ mod tests {
         let cases = [
             (KeyCode::Backspace, EditOp::Backspace),
             (KeyCode::Delete, EditOp::DeleteForward),
-            (KeyCode::Left, EditOp::MoveLeft),
-            (KeyCode::Right, EditOp::MoveRight),
-            (KeyCode::Up, EditOp::MoveUp),
-            (KeyCode::Down, EditOp::MoveDown),
-            (KeyCode::Home, EditOp::MoveLineStart),
-            (KeyCode::End, EditOp::MoveLineEnd),
-            (KeyCode::PageUp, EditOp::PageUp),
-            (KeyCode::PageDown, EditOp::PageDown),
+            (KeyCode::Left, EditOp::MoveLeft(false)),
+            (KeyCode::Right, EditOp::MoveRight(false)),
+            (KeyCode::Up, EditOp::MoveUp(false)),
+            (KeyCode::Down, EditOp::MoveDown(false)),
+            (KeyCode::Home, EditOp::MoveLineStart(false)),
+            (KeyCode::End, EditOp::MoveLineEnd(false)),
+            (KeyCode::PageUp, EditOp::PageUp(false)),
+            (KeyCode::PageDown, EditOp::PageDown(false)),
+            (KeyCode::Tab, EditOp::Indent),
+            (KeyCode::BackTab, EditOp::UnIndent),
         ];
         for (code, op) in cases {
             assert_eq!(
                 map_in(key(code), View::Controller),
                 Some(Msg::EditController(op)),
                 "{code:?} should map to {op:?} in Controller"
+            );
+        }
+    }
+
+    #[test]
+    fn shift_movement_keys_extend_selection_in_controller() {
+        let cases = [
+            (KeyCode::Left, EditOp::MoveLeft(true)),
+            (KeyCode::Right, EditOp::MoveRight(true)),
+            (KeyCode::Up, EditOp::MoveUp(true)),
+            (KeyCode::Down, EditOp::MoveDown(true)),
+            (KeyCode::Home, EditOp::MoveLineStart(true)),
+            (KeyCode::End, EditOp::MoveLineEnd(true)),
+            (KeyCode::PageUp, EditOp::PageUp(true)),
+            (KeyCode::PageDown, EditOp::PageDown(true)),
+        ];
+        for (code, op) in cases {
+            let shifted = key_with_modifiers(code, KeyModifiers::SHIFT);
+            assert_eq!(
+                map_in(shifted, View::Controller),
+                Some(Msg::EditController(op)),
+                "Shift+{code:?} should map to {op:?} in Controller"
+            );
+        }
+    }
+
+    #[test]
+    fn ctrl_left_and_right_move_by_word_in_controller() {
+        let ctrl_left = key_with_modifiers(KeyCode::Left, KeyModifiers::CONTROL);
+        let ctrl_right = key_with_modifiers(KeyCode::Right, KeyModifiers::CONTROL);
+        assert_eq!(
+            map_in(ctrl_left, View::Controller),
+            Some(Msg::EditController(EditOp::MoveWordLeft(false)))
+        );
+        assert_eq!(
+            map_in(ctrl_right, View::Controller),
+            Some(Msg::EditController(EditOp::MoveWordRight(false)))
+        );
+
+        let ctrl_shift_left =
+            key_with_modifiers(KeyCode::Left, KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        assert_eq!(
+            map_in(ctrl_shift_left, View::Controller),
+            Some(Msg::EditController(EditOp::MoveWordLeft(true)))
+        );
+    }
+
+    #[test]
+    fn ctrl_a_selects_all_in_controller() {
+        let ctrl_a = key_with_modifiers(KeyCode::Char('a'), KeyModifiers::CONTROL);
+        assert_eq!(
+            map_in(ctrl_a, View::Controller),
+            Some(Msg::EditController(EditOp::SelectAll))
+        );
+    }
+
+    #[test]
+    fn ctrl_z_undoes_and_ctrl_y_redoes_in_controller() {
+        let ctrl_z = key_with_modifiers(KeyCode::Char('z'), KeyModifiers::CONTROL);
+        let ctrl_y = key_with_modifiers(KeyCode::Char('y'), KeyModifiers::CONTROL);
+        assert_eq!(
+            map_in(ctrl_z, View::Controller),
+            Some(Msg::EditController(EditOp::Undo))
+        );
+        assert_eq!(
+            map_in(ctrl_y, View::Controller),
+            Some(Msg::EditController(EditOp::Redo))
+        );
+    }
+
+    #[test]
+    fn new_rich_editing_keys_are_inert_while_the_reference_pane_is_focused() {
+        let reference_focused = PaneId::LuaFieldReference;
+        let cases = [
+            key_with_modifiers(KeyCode::Left, KeyModifiers::SHIFT),
+            key_with_modifiers(KeyCode::Left, KeyModifiers::CONTROL),
+            key_with_modifiers(KeyCode::Char('a'), KeyModifiers::CONTROL),
+            key_with_modifiers(KeyCode::Char('z'), KeyModifiers::CONTROL),
+            key_with_modifiers(KeyCode::Char('y'), KeyModifiers::CONTROL),
+            key(KeyCode::Tab),
+            key(KeyCode::BackTab),
+        ];
+        for k in cases {
+            assert_eq!(
+                map(
+                    k,
+                    View::Controller,
+                    false,
+                    false,
+                    false,
+                    reference_focused,
+                    true
+                ),
+                None,
+                "{k:?} should be inert while the reference pane is focused"
             );
         }
     }

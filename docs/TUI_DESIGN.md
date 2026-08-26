@@ -228,7 +228,7 @@ something to do.
 | Help | Up/Down scroll (its one pane) | — |
 | Signals | Up/Down select, Enter activate (Signals list); none (Selected signal) | — |
 | Target | none | Enter (work opportunity), Esc (back) |
-| Controller | Editing, cursor movement, typed text, paste (Controller source); none (Lua field reference) | Ctrl+V validate, F6 deploy, F7 reset |
+| Controller | Editing, cursor movement, selection, undo/redo, indent/unindent, typed text, paste (Controller source); none (Lua field reference) | Ctrl+V validate, F6 deploy, F7 reset |
 | Operation | none (either pane) | Space (pause/resume), Enter (step) |
 | After Action | Up/Down scroll (Report); none (Final satellite frame) | F2, F4, F5, F6 |
 
@@ -454,7 +454,7 @@ have (selection, undo/redo, word movement), it is new.
 #### Minimum editor experience
 
 - Grapheme-safe cursor movement: `Left`/`Right`/`Up`/`Down`, `Home`/`End`,
-  `PageUp`/`PageDown`, and a word-movement pair (e.g. `Ctrl+Left`/`Ctrl+Right`).
+  `PageUp`/`PageDown`, and a word-movement pair, `Ctrl+Left`/`Ctrl+Right`.
   Vertical movement remembers the column the player last moved to
   horizontally, so moving through a shorter line and back doesn't forget how
   far right the cursor was.
@@ -471,20 +471,25 @@ have (selection, undo/redo, word movement), it is new.
   pane.
 - **Selection:** `Shift`+any cursor-movement key (arrows, `Home`/`End`,
   `PageUp`/`PageDown`, word movement) extends a selection from an anchor at
-  the point `Shift` was first held; a documented select-all binding (e.g.
-  `Ctrl+A`) selects the whole document. Typing a character, `Tab`, or
-  pressing `Backspace`/`Delete` while a selection is active replaces the
-  selection rather than acting at the cursor alone. This is new relative to
-  today's editor, which has no selection concept at all.
-- **Undo/redo:** a documented pair of bindings (e.g. `Ctrl+Z` to undo,
-  `Ctrl+Shift+Z` or `Ctrl+Y` to redo) steps backward and forward through
-  discrete edits — typed insertion, `Backspace`/`Delete`, a pasted block, and
-  a selection replacement each count as one undoable step. This is new;
-  today's editor has no undo history.
-- `Tab` inserts an indentation appropriate for Lua as ordinary space
-  characters, never a literal tab byte in the source — preserving today's
+  the point `Shift` was first held; `Ctrl+A` selects the whole document.
+  Typing a character, `Tab`, or pressing `Backspace`/`Delete` while a
+  selection is active replaces the selection rather than acting at the
+  cursor alone. This is new relative to today's editor, which has no
+  selection concept at all.
+- **Undo/redo:** `Ctrl+Z` undoes and `Ctrl+Y` redoes, stepping backward and
+  forward through discrete edits — typed insertion, `Backspace`/`Delete`, a
+  pasted block, and a selection replacement each count as one undoable
+  step. `Ctrl+Shift+Z` is not bound: without an extended keyboard protocol
+  it can arrive indistinguishable from plain `Ctrl+Z` and silently undo
+  instead of redo, the same reasoning that keeps `Ctrl+V` (not
+  `Ctrl+Enter`) as validate's advertised binding. This is new; today's
+  editor has no undo history.
+- `Tab` indents the current line, or every line an active selection
+  touches, by one language-appropriate unit as ordinary space characters —
+  two spaces for Lua — never a literal tab byte in the source;
+  `Shift+Tab` removes one indent unit the same way. This preserves today's
   decision to avoid mixing tabs and spaces in player-visible source, while
-  allowing a real indent width rather than exactly one space.
+  moving from exactly one space to a real indent width.
 - Comfortable editing of long lines and of programs larger than the starter:
   no arbitrary line-length or document-size cap.
 - Lua syntax highlighting is desirable but is **not required** for this
