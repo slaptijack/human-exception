@@ -409,8 +409,8 @@ const MAX_BANNER_ROWS: u16 = 4;
 /// clipping a message that runs past one row — a Lua syntax error easily
 /// exceeds the supported 80-column pane's width, and clipping it can lose
 /// the `:line:` location `docs/TUI_DESIGN.md` requires stay visible.
-fn banner_height(banner: &Line<'static>, width: u16) -> u16 {
-    (wrapped_row_count(std::slice::from_ref(banner), width) as u16).clamp(1, MAX_BANNER_ROWS)
+fn banner_height(banner: &[Line<'static>], width: u16) -> u16 {
+    (wrapped_row_count(banner, width) as u16).clamp(1, MAX_BANNER_ROWS)
 }
 
 fn draw_controller_source(frame: &mut Frame, area: Rect, state: &AppState, focused: bool) {
@@ -452,28 +452,42 @@ fn draw_controller_source(frame: &mut Frame, area: Rect, state: &AppState, focus
 }
 
 /// The confirmation prompt or validation result shown as a fixed last row
-/// under the source, or `None` when there's nothing to say (an unmodified,
-/// unchecked controller keeps the full pane for source).
-fn controller_banner(state: &AppState) -> Option<Line<'static>> {
+/// (or rows) under the source, or `None` when there's nothing to say (an
+/// unmodified, unchecked controller keeps the full pane for source).
+fn controller_banner(state: &AppState) -> Option<Vec<Line<'static>>> {
     // The quit-confirmation prompt is drawn globally by `draw` (it can be
     // triggered from any view), so it isn't handled here even though it's
     // Controller-adjacent state.
     if state.reset_confirmation_pending() {
-        return Some(Line::from(Span::styled(
+        return Some(vec![Line::from(Span::styled(
             "Reset controller? Edits will be lost. Enter/y confirm  Esc/n cancel",
             Style::default().add_modifier(Modifier::BOLD),
-        )));
+        ))]);
     }
     match state.validation() {
         Validation::Unchecked => None,
-        Validation::Valid => Some(Line::from(Span::styled(
+        Validation::Valid => Some(vec![Line::from(Span::styled(
             "READY: controller loads and defines on_tick",
             Style::default().add_modifier(Modifier::BOLD),
-        ))),
-        Validation::Invalid(message) => Some(Line::from(Span::styled(
-            format!("INVALID: {message}"),
-            Style::default().add_modifier(Modifier::BOLD),
-        ))),
+        ))]),
+        // A load/runtime error message is player-influenced Lua text (see
+        // `strip_control_characters`) and can legitimately contain raw
+        // newlines/tabs (e.g. a stack traceback). Splitting on the embedded
+        // newlines first, rather than only stripping them, keeps the
+        // `:line:` location `docs/TUI_DESIGN.md` requires on its own first
+        // row instead of merging it into one wrapped line with whatever
+        // traceback text follows it.
+        Validation::Invalid(message) => Some(
+            format!("INVALID: {message}")
+                .lines()
+                .map(|line| {
+                    Line::from(Span::styled(
+                        strip_control_characters(line),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ))
+                })
+                .collect(),
+        ),
     }
 }
 
@@ -699,6 +713,20 @@ fn draw_after_action_report_pane(
 const MAX_DETAIL_LINES: usize = 8;
 const MAX_DETAIL_LINE_CHARS: usize = 120;
 
+/// Replaces any control character (e.g. a tab from a Lua stack traceback)
+/// with a space. Lua error messages are player-influenced text and can
+/// legitimately contain raw control characters; `ratatui`'s `CellWidth`
+/// panics if one ever reaches its width calculations unfiltered, so every
+/// Lua-derived string must pass through this before becoming `Line`
+/// content — splitting on embedded newlines first (`str::lines`) rather
+/// than replacing them too, so multi-line text becomes separate `Line`s
+/// instead of one line with the break turned into a plain space.
+fn strip_control_characters(line: &str) -> String {
+    line.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
 /// Renders `text` capped to [`MAX_DETAIL_LINES`]/[`MAX_DETAIL_LINE_CHARS`],
 /// with a trailing `…` marker whenever something was cut off, so the rest
 /// of whatever pane called this always has room for its own content.
@@ -706,6 +734,7 @@ fn bounded_detail_lines(text: &str) -> Vec<Line<'static>> {
     let total_lines = text.lines().count();
     let mut lines: Vec<Line<'static>> = text
         .lines()
+        .map(strip_control_characters)
         .take(MAX_DETAIL_LINES)
         .map(|line| {
             let char_count = line.chars().count();
@@ -713,7 +742,7 @@ fn bounded_detail_lines(text: &str) -> Vec<Line<'static>> {
                 let truncated: String = line.chars().take(MAX_DETAIL_LINE_CHARS).collect();
                 Line::from(format!("{truncated}…"))
             } else {
-                Line::from(line.to_string())
+                Line::from(line)
             }
         })
         .collect();
@@ -3076,6 +3105,73 @@ end
     }
 
     #[test]
+    fn a_top_level_error_with_an_embedded_newline_does_not_crash_the_banner() {
+        // Regression test for issue #122: `load_controller` executes the
+        // player's top-level source, so a bare top-level `error(...)` call
+        // produces an `mlua::Error` whose message embeds a literal newline
+        // (and, via its stack traceback, tabs) — text `controller_banner`
+        // used to embed verbatim into a single `Line`, which crashed
+        // `word_wrapped_row_count`'s `cell_width()` call the next time the
+        // Controller view rendered. Not panicking here is the point of
+        // this test; the buffer assertions confirm the banner still shows
+        // something useful.
+        use super::super::editor::EditOp;
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.apply(Msg::EditController(EditOp::SelectAll));
+        state.apply(Msg::PasteController(
+            "error(\"line one\\nline two\")\nfunction on_tick(observation) return \"wait\" end"
+                .to_string(),
+        ));
+        state.apply(Msg::ValidateController);
+        assert!(matches!(state.validation(), Validation::Invalid(_)));
+
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+        assert!(
+            buffer_contains(&terminal, "INVALID"),
+            "the validation banner must still be shown"
+        );
+        assert!(
+            buffer_contains(&terminal, "controller.lua"),
+            "the :line: location on the message's first line must remain visible"
+        );
+    }
+
+    #[test]
+    fn a_runtime_error_containing_a_tab_does_not_crash_the_report_pane() {
+        // Regression test for issue #122's second reproduction: the
+        // AfterAction/report pane's `bounded_detail_lines` shares the same
+        // `error.to_string()` text (via `controller_error_detail`) and the
+        // same `wrapped_row_count` measurement, but only split on `\n` —
+        // a literal tab (as a real Lua stack traceback would contain) hit
+        // the identical `cell_width()` panic there. Not panicking is the
+        // point of this test.
+        use super::super::editor::EditOp;
+        use super::super::state::Msg;
+
+        let mut state = working_state();
+        for _ in 0..500 {
+            state.apply(Msg::EditController(EditOp::Backspace));
+        }
+        state.apply(Msg::PasteController(
+            "function on_tick(observation)\n  error(\"bad state:\\tmore info\", 0)\nend\n"
+                .to_string(),
+        ));
+        state.apply(Msg::RequestDeploy);
+        state.advance_running_operation();
+
+        assert_eq!(state.current_view(), View::AfterAction);
+        assert!(state.operation().unwrap().finished);
+
+        let terminal = render(TWO_PANE_MIN_COLUMNS, MIN_ROWS, &state);
+        assert!(buffer_contains(&terminal, "OPERATION FAILED"));
+        assert!(buffer_contains(&terminal, "bad state:"));
+    }
+
+    #[test]
     fn the_cursor_stays_visible_while_editing_at_the_two_pane_threshold() {
         use super::super::editor::EditOp;
         use super::super::state::Msg;
@@ -3779,6 +3875,35 @@ end
         assert!(buffer_contains(&terminal, "FOOTHOLD ESTABLISHED"));
         assert!(buffer_contains(&terminal, "DEPLOYED SOURCE"));
         assert!(buffer_contains(&terminal, "deployed rev  run-01"));
+    }
+
+    #[test]
+    fn strip_control_characters_replaces_control_characters_with_spaces() {
+        assert_eq!(
+            strip_control_characters("bad state:\tmore info"),
+            "bad state: more info"
+        );
+        assert_eq!(
+            strip_control_characters("no control chars here"),
+            "no control chars here"
+        );
+        // Ordinary text and Unicode (including a combining-mark grapheme,
+        // which is not a control character) must pass through untouched.
+        assert_eq!(
+            strip_control_characters("caf\u{e9} \u{4f60}\u{597d}"),
+            "caf\u{e9} \u{4f60}\u{597d}"
+        );
+    }
+
+    #[test]
+    fn bounded_detail_lines_strips_control_characters_from_each_line() {
+        // Issue #122: a Lua stack traceback's tab-indented lines must not
+        // reach `wrapped_row_count`'s `cell_width()` call unsanitized.
+        let text = "first line\nsecond\tline\twith\ttabs";
+        let lines = bounded_detail_lines(text);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].to_string(), "first line");
+        assert_eq!(lines[1].to_string(), "second line with tabs");
     }
 
     #[test]
