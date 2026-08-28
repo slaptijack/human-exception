@@ -19,8 +19,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
-pub const MIN_COLUMNS: u16 = 80;
-pub const MIN_ROWS: u16 = 24;
+pub const MIN_COLUMNS: u16 = 120;
+pub const MIN_ROWS: u16 = 40;
 
 /// Below this width, every two-pane view falls back to rendering only its
 /// currently focused pane (`AppState::focused_pane`), with `F8` moving focus
@@ -37,7 +37,7 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
     // Checked before the undersized-geometry return, and drawn without the
     // header/body/footer layout that return skips past: `Ctrl+Q` is global
     // and the confirmation must stay reachable at any size (`docs/
-    // TUI_DESIGN.md`, "Below 80 columns" — "Quitting remains available,
+    // TUI_DESIGN.md`, "Below 120 columns" — "Quitting remains available,
     // subject to the same modified-source confirmation rule"). Rendering it
     // only after the geometry check would make it swallow input invisibly
     // whenever a modified session got resized below the minimum.
@@ -51,6 +51,16 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
         return;
     }
 
+    draw_console(frame, area, state);
+}
+
+/// The header/body/footer layout `draw` renders once the quit-confirmation
+/// and minimum-geometry checks above have both passed. Factored out so
+/// narrow-layout rendering (`TWO_PANE_MIN_COLUMNS` and below) stays directly
+/// testable at its own widths even though the console's enforced minimum
+/// (#126) now makes those widths unreachable through `draw` itself — that
+/// narrow-layout code is deliberately retained, not removed, by #126.
+fn draw_console(frame: &mut Frame, area: Rect, state: &AppState) {
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(3),
         Constraint::Min(1),
@@ -2005,6 +2015,23 @@ mod tests {
         terminal
     }
 
+    /// Like [`render`], but calls [`draw_console`] directly, skipping
+    /// `draw`'s minimum-geometry gate. Narrow-layout tests use this at
+    /// widths/heights below the console's enforced minimum (#126) to keep
+    /// exercising that retained-but-currently-unreachable rendering code
+    /// directly, instead of the full app entry point.
+    fn render_narrow(width: u16, height: u16, state: &AppState) -> Terminal<TestBackend> {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test backend should initialize");
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                draw_console(frame, area, state);
+            })
+            .expect("draw should succeed");
+        terminal
+    }
+
     fn buffer_contains(terminal: &Terminal<TestBackend>, needle: &str) -> bool {
         terminal
             .backend()
@@ -2115,7 +2142,7 @@ mod tests {
     #[test]
     fn narrow_signals_view_shows_one_pane_until_f8_moves_focus() {
         let state = AppState::new();
-        let terminal = render(90, 30, &state);
+        let terminal = render_narrow(90, 30, &state);
 
         assert!(buffer_contains(&terminal, "SIGNALS"));
         assert!(!buffer_contains(&terminal, "SELECTED SIGNAL"));
@@ -2128,7 +2155,7 @@ mod tests {
 
         let mut state = AppState::new();
         state.apply(Msg::FocusNextPane);
-        let terminal = render(90, 30, &state);
+        let terminal = render_narrow(90, 30, &state);
 
         assert!(buffer_contains(&terminal, "SELECTED SIGNAL"));
         assert!(buffer_contains(&terminal, "> SELECTED SIGNAL"));
@@ -2153,7 +2180,7 @@ mod tests {
         assert!(buffer_contains(&wide, "> SELECTED SIGNAL"));
         assert!(!buffer_contains(&wide, "> SIGNALS"));
 
-        let narrow = render(90, 30, &state);
+        let narrow = render_narrow(90, 30, &state);
         assert!(buffer_contains(&narrow, "SELECTED SIGNAL"));
         assert!(buffer_contains(&narrow, "> SELECTED SIGNAL"));
         assert!(!buffer_contains(&narrow, "> 11:42"));
@@ -2185,7 +2212,7 @@ mod tests {
         // first thing pushed off-screen if it weren't pinned separately.
         let mut state = AppState::new();
         state.apply(Msg::Activate);
-        let terminal = render(TWO_PANE_MIN_COLUMNS, MIN_ROWS, &state);
+        let terminal = render_narrow(TWO_PANE_MIN_COLUMNS, MIN_ROWS, &state);
 
         assert!(buffer_contains(&terminal, "work this opportunity"));
         assert!(buffer_contains(&terminal, "back to signals"));
@@ -2210,7 +2237,7 @@ mod tests {
         assert!(buffer_contains(&wide, "> PROVENANCE / ACCESS"));
         assert!(!buffer_contains(&wide, "> TARGET INTELLIGENCE"));
 
-        let narrow = render(90, 30, &state);
+        let narrow = render_narrow(90, 30, &state);
         assert!(buffer_contains(&narrow, "PROVENANCE / ACCESS"));
         assert!(buffer_contains(&narrow, "> PROVENANCE / ACCESS"));
         assert!(!buffer_contains(&narrow, "TARGET INTELLIGENCE"));
@@ -2223,7 +2250,7 @@ mod tests {
     #[test]
     fn signal_detail_pane_at_the_two_pane_threshold_still_shows_the_pinned_action() {
         let state = AppState::new();
-        let terminal = render(TWO_PANE_MIN_COLUMNS, MIN_ROWS, &state);
+        let terminal = render_narrow(TWO_PANE_MIN_COLUMNS, MIN_ROWS, &state);
 
         assert!(buffer_contains(&terminal, "inspect opportunity"));
     }
@@ -2484,6 +2511,12 @@ mod tests {
         );
     }
 
+    // These two tests exercise narrow-width header candidate selection via
+    // `render_narrow`, bypassing `draw`'s top-level minimum-geometry gate:
+    // 80 columns is below the console's enforced minimum (#126) and so can
+    // no longer be reached through `draw` itself, but the candidate-fitting
+    // logic these tests cover is retained code (removing it is out of scope
+    // for #126) and still deserves direct coverage.
     #[test]
     fn controller_status_stays_visible_from_signals_at_eighty_columns() {
         use super::super::state::Msg;
@@ -2496,7 +2529,7 @@ mod tests {
             'x',
         )));
         state.apply(Msg::Navigate(View::Signals));
-        let terminal = render(80, 30, &state);
+        let terminal = render_narrow(80, 30, &state);
 
         assert!(
             buffer_contains(&terminal, "CONTROLLER: modified"),
@@ -2518,7 +2551,7 @@ mod tests {
             'x',
         )));
         state.apply(Msg::Navigate(View::Target));
-        let terminal = render(80, 30, &state);
+        let terminal = render_narrow(80, 30, &state);
 
         assert!(
             buffer_contains(&terminal, "CONTROLLER: modified"),
@@ -2629,7 +2662,7 @@ mod tests {
         )));
         state.apply(Msg::FocusNextPane); // move focus to the Lua reference pane
         state.apply(Msg::RequestResetController);
-        let terminal = render(90, 30, &state);
+        let terminal = render_narrow(90, 30, &state);
 
         assert_eq!(
             state.focused_pane(View::Controller),
@@ -2649,7 +2682,7 @@ mod tests {
         assert!(!buffer_contains(&terminal, "> CAPTURED CONTROLLER"));
 
         state.apply(Msg::CancelResetController);
-        let after_cancel = render(90, 30, &state);
+        let after_cancel = render_narrow(90, 30, &state);
         assert!(buffer_contains(&after_cancel, "> LUA FIELD REFERENCE"));
         assert_eq!(
             state.focused_pane(View::Controller),
@@ -2671,7 +2704,7 @@ mod tests {
         assert!(state.reset_confirmation_pending());
 
         for (width, height) in [(120, 40), (90, 30)] {
-            let terminal = render(width, height, &state);
+            let terminal = render_narrow(width, height, &state);
             assert!(!buffer_contains(&terminal, "F8 Next Pane"));
             assert!(!buffer_contains(&terminal, "F8 Pane"));
         }
@@ -2692,7 +2725,7 @@ mod tests {
         assert!(buffer_contains(&wide, "> LUA FIELD REFERENCE"));
         assert!(!buffer_contains(&wide, "> CAPTURED CONTROLLER"));
 
-        let narrow = render(90, 30, &state);
+        let narrow = render_narrow(90, 30, &state);
         assert!(buffer_contains(&narrow, "LUA FIELD REFERENCE"));
         assert!(buffer_contains(&narrow, "> LUA FIELD REFERENCE"));
         assert!(!buffer_contains(&narrow, "CAPTURED CONTROLLER"));
@@ -2726,7 +2759,7 @@ mod tests {
         // The narrow render shows exactly the reference pane, marked
         // focused — and typing must not reach the (currently hidden)
         // source, matching `event::map`'s pane-local routing.
-        let narrow = render(90, 30, &state);
+        let narrow = render_narrow(90, 30, &state);
         assert!(buffer_contains(&narrow, "> LUA FIELD REFERENCE"));
 
         let msg = event::map(
@@ -2747,7 +2780,7 @@ mod tests {
             state.focused_pane(View::Controller),
             PaneId::ControllerSource
         );
-        let narrow = render(90, 30, &state);
+        let narrow = render_narrow(90, 30, &state);
         assert!(buffer_contains(&narrow, "> CAPTURED CONTROLLER"));
 
         let msg = event::map(
@@ -2766,7 +2799,7 @@ mod tests {
             )))
         );
         state.apply(msg.unwrap());
-        let narrow = render(90, 30, &state);
+        let narrow = render_narrow(90, 30, &state);
         assert!(buffer_contains(&narrow, "z"));
     }
 
@@ -2967,11 +3000,12 @@ end
     fn a_large_representative_controller_renders_correctly_at_every_supported_size() {
         use super::super::state::Msg;
 
-        for (width, height) in [
-            (120, 40),
-            (MIN_COLUMNS, MIN_ROWS),
-            (TWO_PANE_MIN_COLUMNS, 30),
-        ] {
+        // The first two are genuinely supported sizes, driven through the
+        // real `draw` gate. The third, `TWO_PANE_MIN_COLUMNS` at 30 rows, is
+        // below the console's enforced minimum (#126) and so is driven
+        // through `render_narrow` instead, to keep proving the retained
+        // narrow-layout rendering handles this fixture too.
+        for (width, height) in [(120, 40), (150, 50), (TWO_PANE_MIN_COLUMNS, 30)] {
             let mut state = AppState::new();
             state.apply(Msg::Activate);
             state.apply(Msg::Activate);
@@ -2986,7 +3020,11 @@ end
                 "the large representative fixture itself must be valid Lua"
             );
 
-            let terminal = render(width, height, &state);
+            let terminal = if width >= MIN_COLUMNS && height >= MIN_ROWS {
+                render(width, height, &state)
+            } else {
+                render_narrow(width, height, &state)
+            };
             assert!(
                 buffer_contains(&terminal, "CAPTURED CONTROLLER"),
                 "failed at {width}x{height}"
@@ -3166,7 +3204,7 @@ end
         assert_eq!(state.current_view(), View::AfterAction);
         assert!(state.operation().unwrap().finished);
 
-        let terminal = render(TWO_PANE_MIN_COLUMNS, MIN_ROWS, &state);
+        let terminal = render_narrow(TWO_PANE_MIN_COLUMNS, MIN_ROWS, &state);
         assert!(buffer_contains(&terminal, "OPERATION FAILED"));
         assert!(buffer_contains(&terminal, "bad state:"));
     }
@@ -3189,7 +3227,7 @@ end
             state.apply(Msg::EditController(EditOp::Insert(c)));
         }
 
-        let terminal = render(TWO_PANE_MIN_COLUMNS, MIN_ROWS, &state);
+        let terminal = render_narrow(TWO_PANE_MIN_COLUMNS, MIN_ROWS, &state);
         assert!(terminal.backend().cursor_visible());
         assert!(
             !buffer_contains(&terminal, &long_marker),
@@ -3564,7 +3602,7 @@ end
         // satellite pane — the compact failure report must be what's
         // visible by default, not an empty grid the player has to know to
         // toggle away from.
-        let terminal = render(90, 30, &state);
+        let terminal = render_narrow(90, 30, &state);
         assert!(buffer_contains(&terminal, "AFTER-ACTION REPORT"));
         assert!(buffer_contains(
             &terminal,
@@ -3591,7 +3629,7 @@ end
         assert!(buffer_contains(&wide, "> FINAL SATELLITE FRAME"));
         assert!(!buffer_contains(&wide, "> AFTER-ACTION REPORT"));
 
-        let narrow = render(90, 30, &state);
+        let narrow = render_narrow(90, 30, &state);
         assert!(buffer_contains(&narrow, "FINAL SATELLITE FRAME"));
         assert!(buffer_contains(&narrow, "> FINAL SATELLITE FRAME"));
         assert!(!buffer_contains(&narrow, "AFTER-ACTION REPORT"));
@@ -3622,7 +3660,7 @@ end
         // hint was pinned to a fixed last row (`draw_pane_with_pinned_action`
         // via `draw_after_action_report_pane`), that wrapped content could
         // push it below the pane's visible rows.
-        let terminal = render(TWO_PANE_MIN_COLUMNS, MIN_ROWS, &state);
+        let terminal = render_narrow(TWO_PANE_MIN_COLUMNS, MIN_ROWS, &state);
         assert!(buffer_contains(&terminal, "AFTER-ACTION REPORT"));
         // The full headline text wraps across rows at this width, and a
         // wrapped line is no longer contiguous once the buffer is flattened
@@ -3682,7 +3720,7 @@ end
         // sacrificed for lower ones when space is constrained"). At a wider
         // two-pane width (120), there's room for the full closure —
         // evidence and the closing paragraph too — same as success.
-        let terminal = render(TWO_PANE_MIN_COLUMNS, MIN_ROWS, &state);
+        let terminal = render_narrow(TWO_PANE_MIN_COLUMNS, MIN_ROWS, &state);
         assert!(buffer_contains(
             &terminal,
             "OPERATION FAILED: budget exhausted"
@@ -3828,9 +3866,17 @@ end
         // still takes the two-pane layout — the report pane's 40%-width
         // inner area is the tightest fit the full success report has to
         // survive. A wider two-pane width (120) leaves the same inner
-        // *height* but a wider pane, so it's checked too.
+        // *height* but a wider pane, so it's checked too. `TWO_PANE_MIN_
+        // COLUMNS` (100) is now below the console's enforced minimum
+        // (#126), so that case is driven through `render_narrow` to keep
+        // exercising the retained narrow-layout rendering directly.
         for width in [TWO_PANE_MIN_COLUMNS, 120] {
-            let terminal = render(width, MIN_ROWS, &state);
+            let render_fn = if width >= MIN_COLUMNS {
+                render
+            } else {
+                render_narrow
+            };
+            let terminal = render_fn(width, MIN_ROWS, &state);
             assert!(
                 buffer_contains(&terminal, "FOOTHOLD ESTABLISHED"),
                 "headline clipped at {width}x{MIN_ROWS}"
@@ -3852,7 +3898,7 @@ end
             for _ in 0..max_scroll {
                 state.apply(Msg::ScrollDown);
             }
-            let scrolled = render(width, MIN_ROWS, &state);
+            let scrolled = render_fn(width, MIN_ROWS, &state);
             assert!(
                 buffer_contains(&scrolled, "network."),
                 "closing paragraph unreachable even scrolled to the bottom at {width}x{MIN_ROWS}"
@@ -3984,7 +4030,7 @@ end
         assert_eq!(state.current_view(), View::AfterAction);
         assert!(state.operation().unwrap().finished);
 
-        let terminal = render(TWO_PANE_MIN_COLUMNS, MIN_ROWS, &state);
+        let terminal = render_narrow(TWO_PANE_MIN_COLUMNS, MIN_ROWS, &state);
         assert!(buffer_contains(&terminal, "OPERATION FAILED"));
         assert!(buffer_contains(&terminal, "FIRST CONTACT INCOMPLETE"));
         assert!(buffer_contains(&terminal, "F4  revise the controller"));
@@ -4015,13 +4061,13 @@ end
 
         let mut state = working_state();
         state.apply(Msg::RequestDeploy);
-        let terminal = render(90, 30, &state);
+        let terminal = render_narrow(90, 30, &state);
         assert!(buffer_contains(&terminal, "COMPROMISED SATELLITE FEED"));
         assert!(!buffer_contains(&terminal, "OPERATION TELEMETRY"));
         assert!(buffer_contains(&terminal, "> COMPROMISED SATELLITE FEED"));
 
         state.apply(Msg::FocusNextPane);
-        let terminal = render(90, 30, &state);
+        let terminal = render_narrow(90, 30, &state);
         assert!(buffer_contains(&terminal, "OPERATION TELEMETRY"));
         assert!(!buffer_contains(&terminal, "COMPROMISED SATELLITE FEED"));
         assert!(buffer_contains(&terminal, "> OPERATION TELEMETRY"));
@@ -4041,7 +4087,7 @@ end
         assert!(buffer_contains(&wide, "> OPERATION TELEMETRY"));
         assert!(!buffer_contains(&wide, "> COMPROMISED SATELLITE FEED"));
 
-        let narrow = render(90, 30, &state);
+        let narrow = render_narrow(90, 30, &state);
         assert!(buffer_contains(&narrow, "OPERATION TELEMETRY"));
         assert!(buffer_contains(&narrow, "> OPERATION TELEMETRY"));
         assert!(!buffer_contains(&narrow, "COMPROMISED SATELLITE FEED"));

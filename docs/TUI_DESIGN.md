@@ -49,13 +49,11 @@ A target can still have an objective once the player chooses to act. The distinc
 
 ## Target terminal
 
-Primary design target: **120×40**.
+Supported minimum and primary design target: **120×40**. The console does not attempt partial gameplay below this geometry.
 
-Supported minimum: **80×24**.
+At 100+ columns, views may use a primary pane plus a contextual secondary pane. At 80–99 columns, secondary information becomes a switchable subview rather than compressing the primary content into an unreadable layout; this narrow, single-pane rendering mode remains implemented (§ [Responsive behavior](#responsive-behavior)) but, with the minimum raised to 120×40, is not currently reachable through the enforced minimum-geometry gate. Removing it is a separate, directly dependent follow-up.
 
-At 100+ columns, views may use a primary pane plus a contextual secondary pane. At 80–99 columns, secondary information becomes a switchable subview rather than compressing the primary content into an unreadable layout.
-
-Below 80 columns or 24 rows, do not silently truncate critical information. Show an in-world resize notice and preserve the ability to quit.
+Below 120 columns or 40 rows, do not silently truncate critical information. Show an in-world resize notice and preserve the ability to quit.
 
 Color may reinforce state, but no information may depend on color alone. Unicode box drawing and symbols are welcome where supported; ASCII equivalents should remain possible. The identity is the resistance console and compromised telemetry, not any particular glyph set.
 
@@ -210,7 +208,8 @@ panes, so a marker there would claim a choice that doesn't exist.
   and both panes reappear on returning to wide without changing focus.
 - A fresh After Action result always focuses the Report pane, regardless of
   what was focused the last time After Action was visited, so the outcome
-  hierarchy (§5) remains primary at 80×24 without requiring `F8`.
+  hierarchy (§5) remains primary at the narrow single-pane width without
+  requiring `F8`.
 
 ### Read-only panes and unsupported input
 
@@ -669,7 +668,7 @@ to expose, an exact-string snapshot of its current content.
 | Reset / quit / redeploy confirmation pending | inert (dialog swallows all non-dialog keys) | inert | inert (already open) | inert | inert | inert | inert |
 | Narrow (80–99 columns), source pane focused | available, advertised | available | available | accepted | accepted | accepted | accepted |
 | Narrow (80–99 columns), reference pane focused | available (view-level; works even though source isn't currently visible) | available | available | inert | inert | inert | inert |
-| Below minimum geometry (<80×24) | inert (only the geometry warning and `Ctrl+Q` are live) | inert | inert | inert | inert | inert | inert |
+| Below minimum geometry (<120×40) | inert (only the geometry warning and `Ctrl+Q` are live) | inert | inert | inert | inert | inert | inert |
 
 `Ctrl+V`/`F6`/`F7` availability in every row follows one authoritative rule —
 Controller is the open view, the terminal is not below minimum geometry, and
@@ -955,7 +954,7 @@ remains safe in Controller because it does not insert a normal text character
 into Lua source.
 
 For After Action specifically, the Report pane is focused by default (§ [Pane
-focus](#pane-focus)): at 80–99 columns, including the 80×24 minimum, the player
+focus](#pane-focus)): at 80–99 columns, the player
 sees outcome, trigger, meaning, and completion (hierarchy items 1–4)
 immediately, without needing `F8` to discover whether they succeeded or what
 that meant. Moving focus only trades which pane is visible; it never reorders
@@ -963,15 +962,15 @@ the outcome hierarchy (§5) itself, so evidence, next actions, and availability
 keep the same relative priority within the report pane regardless of which
 pane is showing.
 
-### Below 80 columns or 24 rows
+### Below 120 columns or 40 rows
 
 Display an in-world geometry warning instead of an unusable compressed interface:
 
 ```text
 HUMAN EXCEPTION // resistance console
 Terminal link degraded.
-Minimum console geometry: 80x24
-Current geometry: 72x20
+Minimum console geometry: 120x40
+Current geometry: 100x30
 Resize the terminal to restore the resistance console.
 ```
 
