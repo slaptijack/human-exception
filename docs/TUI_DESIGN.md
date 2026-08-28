@@ -458,12 +458,14 @@ representation or other implementation detail beyond what
   horizontally, so moving through a shorter line and back doesn't forget how
   far right the cursor was.
 - The vertical and horizontal viewport auto-scrolls to keep the cursor
-  visible, accounting for wide/combining characters. There is no separately
-  persisted scroll offset for this pane — the visible viewport is always
-  derived from the current cursor position, so it never needs independent
-  resetting; contrast the Help and After-Action-report panes, which do
-  remember an explicit scroll offset because they have no cursor to derive
-  one from.
+  visible, accounting for wide/combining characters — with one accepted,
+  temporary exception; see [Known limitation: wide-glyph cursor
+  visibility](#known-limitation-wide-glyph-cursor-visibility) below. There is
+  no separately persisted scroll offset for this pane — the visible viewport
+  is always derived from the current cursor position, so it never needs
+  independent resetting; contrast the Help and After-Action-report panes,
+  which do remember an explicit scroll offset because they have no cursor to
+  derive one from.
 - Line numbers are visible but are not part of the source and are never
   included in a copy or in what is validated/deployed.
 - The cursor is visibly rendered whenever Controller source is the focused
@@ -493,6 +495,55 @@ representation or other implementation detail beyond what
   epic, matching #88. No Lua syntax highlighting exists in the current
   implementation; a reliable, unhighlighted editor is preferable to a
   fragile grammar integration.
+
+#### Known limitation: wide-glyph cursor visibility
+
+`ratatui-code-editor` 0.0.6 (adopted in #90) has one accepted, temporary gap
+in the viewport guarantee stated above: `Editor::focus()` decides whether to
+scroll horizontally by comparing the cursor's raw *character-count* column
+against the viewport's *terminal-cell* width, while `get_visible_cursor()`
+correctly computes the visual, grapheme-width-based column. For a line
+composed of wide (double-width) glyphs that is long enough to require
+horizontal scrolling, character count under-counts the true visual width, so
+`focus()` can conclude no scroll is needed while the cursor is actually
+off-screen.
+
+**Affected:** cursor-visibility-follows-viewport for a line that (a) is long
+enough to require horizontal scrolling and (b) is made of wide (double-width)
+glyphs.
+
+**Unaffected:** everything else the viewport guarantee covers — ordinary
+ASCII long lines, short wide-glyph content that fits without scrolling,
+combining marks, and exact Unicode source round-tripping. These are proven
+in `tests/editor_foundation_contract.rs` by
+`unicode_combining_marks_and_wide_glyphs_round_trip`,
+`combining_marks_keep_cursor_visible_after_focus`, and
+`exact_source_round_trip_including_empty_and_trailing_newline`.
+
+This is accepted for #88/#90 and tracked upstream, independent of and not
+blocking Human Exception:
+[vipmax/ratatui-code-editor#15](https://github.com/vipmax/ratatui-code-editor/issues/15)
+confirms the root cause, and
+[vipmax/ratatui-code-editor#16](https://github.com/vipmax/ratatui-code-editor/pull/16)
+proposes a fix. The characterization test
+`known_limitation_wide_glyph_line_can_leave_cursor_offscreen_after_focus` in
+`tests/editor_foundation_contract.rs` asserts today's actual (broken)
+behavior on purpose, so it fails conspicuously — rather than silently — the
+moment an upstream fix changes that behavior. No Human Exception-specific
+cursor or viewport workaround should be added for this without a separate
+decision.
+
+Once an upstream release contains the fix, resolve this by:
+
+1. opening a small dependency-upgrade issue;
+2. updating `ratatui-code-editor` to the released version containing the fix;
+3. replacing the characterization assertion in
+   `known_limitation_wide_glyph_line_can_leave_cursor_offscreen_after_focus`
+   with the desired visible-cursor regression assertion (`is_some()` — the
+   test's own comment flags this);
+4. verifying the behavior through both the foundation contract test and
+   Controller `TestBackend` coverage;
+5. removing this subsection from this document.
 
 #### Command priority
 
