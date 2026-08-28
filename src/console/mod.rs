@@ -611,9 +611,57 @@ mod tests {
         assert!(buffer_contains(&terminal, "Terminal link degraded."));
         assert!(buffer_contains(
             &terminal,
-            "Minimum console geometry: 80x24"
+            "Minimum console geometry: 120x40"
         ));
         assert!(!buffer_contains(&terminal, "SIGNALS"));
+    }
+
+    #[test]
+    fn startup_one_column_short_of_minimum_shows_the_geometry_warning() {
+        let (_, terminal) = render(119, 40, &[]);
+        assert!(buffer_contains(&terminal, "Terminal link degraded."));
+        assert!(!buffer_contains(&terminal, "SIGNALS"));
+    }
+
+    #[test]
+    fn startup_one_row_short_of_minimum_shows_the_geometry_warning() {
+        let (_, terminal) = render(120, 39, &[]);
+        assert!(buffer_contains(&terminal, "Terminal link degraded."));
+        assert!(!buffer_contains(&terminal, "SIGNALS"));
+    }
+
+    #[test]
+    fn startup_at_exactly_the_minimum_geometry_enters_the_console() {
+        let (_, terminal) = render(120, 40, &[]);
+        assert!(!buffer_contains(&terminal, "Terminal link degraded."));
+        assert!(buffer_contains(&terminal, "SIGNALS"));
+    }
+
+    #[test]
+    fn resizing_up_to_the_minimum_enters_the_console_without_a_restart() {
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).expect("test backend should initialize");
+        let mut state = AppState::new();
+        let mut last_transition_press: TransitionKeyDebounce = None;
+        terminal
+            .draw(|frame| ui::draw(frame, &state))
+            .expect("initial draw should succeed");
+
+        terminal.backend_mut().resize(120, 40);
+        if should_redraw(
+            &mut state,
+            Event::Resize(120, 40),
+            (120, 40),
+            &mut last_transition_press,
+        ) {
+            terminal
+                .draw(|frame| ui::draw(frame, &state))
+                .expect("redraw should succeed");
+        }
+
+        assert!(!buffer_contains(&terminal, "Terminal link degraded."));
+        assert!(buffer_contains(&terminal, "SIGNALS"));
+        assert_eq!(state.current_view(), View::Signals);
     }
 
     #[test]
@@ -821,30 +869,17 @@ mod tests {
     }
 
     #[test]
-    fn paste_while_reference_pane_visible_in_narrow_layout_is_ignored() {
-        let (state, _) = render(
-            90,
-            40,
-            &[
-                press(KeyCode::Enter),
-                press(KeyCode::Enter),
-                press(KeyCode::F(8)), // swap the narrow secondary pane to the Lua reference
-                paste("sneaked in"),
-            ],
-        );
-
-        assert_eq!(
-            state.controller_source(),
-            Some(intel::STARTER_CONTROLLER.to_string())
-        );
-    }
-
-    #[test]
     fn paste_while_reference_pane_focused_in_wide_layout_is_ignored() {
-        // At 100+ columns both panes are visible, so screen visibility alone
-        // can't tell paste apart from real focus — this is the wide-width
-        // counterpart to `paste_while_reference_pane_visible_in_narrow_layout_is_ignored`
-        // above, proving routing follows focus rather than layout.
+        // Paste-routing follows focus, not screen visibility: this pane
+        // remains the reference pane whether or not the second pane happens
+        // to be visible at the current width. A narrow single-pane
+        // counterpart to this test previously lived here, but #126 raised
+        // the console's enforced minimum geometry to 120x40 — above
+        // `ui::TWO_PANE_MIN_COLUMNS`, the width below which the console
+        // collapses to a single visible pane — so that narrow layout is no
+        // longer reachable through the app's own minimum-geometry gate;
+        // removing its rendering code entirely is a separate, directly
+        // dependent follow-up issue, not this one.
         let (state, _) = render(
             120,
             40,
@@ -1074,12 +1109,12 @@ mod tests {
     }
 
     #[test]
-    fn typing_while_the_narrow_reference_pane_is_shown_does_not_edit_the_hidden_source() {
+    fn typing_while_the_reference_pane_is_focused_does_not_edit_the_hidden_source() {
         use state::PaneId;
 
         let (state, _) = render(
-            90,
-            30,
+            120,
+            40,
             &[
                 press(KeyCode::Enter), // inspect the actionable signal, opening Target
                 press(KeyCode::Enter), // commit, opening Controller
@@ -1103,14 +1138,14 @@ mod tests {
     fn a_resize_preserves_focus_moved_by_f8() {
         use state::PaneId;
 
-        let (mut state, _) = render(90, 30, &[press(KeyCode::F(8))]);
+        let (mut state, _) = render(120, 40, &[press(KeyCode::F(8))]);
         assert_eq!(state.focused_pane(View::Signals), PaneId::SelectedSignal);
 
         let mut last_transition_press: TransitionKeyDebounce = None;
         should_redraw(
             &mut state,
-            Event::Resize(90, 30),
-            (90, 30),
+            Event::Resize(150, 50),
+            (150, 50),
             &mut last_transition_press,
         );
 
@@ -1118,16 +1153,18 @@ mod tests {
     }
 
     #[test]
-    fn a_wide_to_narrow_to_wide_resize_preserves_source_selection_and_undo_history() {
+    fn a_wide_to_undersized_to_wide_resize_preserves_source_selection_and_undo_history() {
         // Source, cursor, selection, and undo/redo history are
         // `ControllerDocument` state; `sync_for_render`'s scroll-offset
         // recompute (the only thing a resize actually touches) must never
-        // disturb any of it. Driven end to end through real key/resize
-        // events rather than direct `Msg`/`EditOp` calls, matching issue
-        // #96's dominant review question. `AppState`'s public surface
-        // exposes no direct cursor/selection accessor, so a still-active
-        // selection is observed indirectly: typing over it must replace it,
-        // not insert alongside it.
+        // disturb any of it, and dipping below the console's enforced
+        // minimum (#126) along the way must not mutate it either — nor let
+        // any non-quit input through while undersized. Driven end to end
+        // through real key/resize events rather than direct `Msg`/`EditOp`
+        // calls, matching issue #96's dominant review question. `AppState`'s
+        // public surface exposes no direct cursor/selection accessor, so a
+        // still-active selection is observed indirectly: typing over it
+        // must replace it, not insert alongside it.
         //
         // Every event, resize included, is actually drawn (resizing the
         // backend first, exactly as the real event loop does) rather than
@@ -1185,9 +1222,12 @@ mod tests {
             );
         }
 
-        // Wide -> narrow -> the two-pane threshold -> wide again — none of
-        // which is a key event, and so must leave the selection untouched.
-        for (width, height) in [(80, 24), (100, 24), (120, 40)] {
+        // Wide -> undersized -> wide again — none of which is a key event,
+        // and so must leave the selection untouched. 60x20 is well below
+        // the console's enforced minimum (#126); it stands in for the old
+        // 80x24/100x24 supported-narrow sizes this cycle used to visit,
+        // which are undersized under the new minimum.
+        for (width, height) in [(60, 20), (120, 40)] {
             terminal.backend_mut().resize(width, height);
             drive(
                 &mut state,
@@ -1212,24 +1252,32 @@ mod tests {
              typed alongside it: {after_replace:?}"
         );
 
-        // Undo/redo across another resize must round-trip exactly, too.
-        terminal.backend_mut().resize(80, 24);
+        // Shrinking below the minimum must neither mutate the document nor
+        // let a stray Ctrl+Z through: only resize and the quit path stay
+        // live while undersized.
+        terminal.backend_mut().resize(60, 20);
         drive(
             &mut state,
             &mut terminal,
-            Event::Resize(80, 24),
-            (80, 24),
+            Event::Resize(60, 20),
+            (60, 20),
             &mut last_transition_press,
         );
         drive(
             &mut state,
             &mut terminal,
             press_ctrl(KeyCode::Char('z')),
-            (80, 24),
+            (60, 20),
             &mut last_transition_press,
         );
-        assert_eq!(state.controller_source().unwrap(), before_edit);
+        assert_eq!(
+            state.controller_source().unwrap(),
+            after_replace,
+            "Ctrl+Z must be inert while the console is undersized"
+        );
 
+        // Growing back to a supported geometry must restore ordinary
+        // editing, including undo/redo, exactly as before the dip.
         terminal.backend_mut().resize(120, 40);
         drive(
             &mut state,
@@ -1238,6 +1286,15 @@ mod tests {
             (120, 40),
             &mut last_transition_press,
         );
+        drive(
+            &mut state,
+            &mut terminal,
+            press_ctrl(KeyCode::Char('z')),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        assert_eq!(state.controller_source().unwrap(), before_edit);
+
         drive(
             &mut state,
             &mut terminal,
@@ -1282,12 +1339,13 @@ mod tests {
     }
 
     #[test]
-    fn help_can_scroll_all_the_way_to_its_final_content_at_eighty_columns() {
-        // At the supported 80x24 minimum, Help's full contextual + Lua
-        // reference content needs more scroll than the coarse internal
-        // MAX_PANE_SCROLL cap once alone allowed — that cap must stay
-        // comfortably above the real content height, not below it.
-        let backend = ratatui::backend::TestBackend::new(80, 24);
+    fn help_can_scroll_all_the_way_to_its_final_content_at_the_minimum_geometry() {
+        // At the console's enforced 120x40 minimum (#126), Help's full
+        // contextual + Lua reference content needs more scroll than the
+        // coarse internal MAX_PANE_SCROLL cap once alone allowed — that cap
+        // must stay comfortably above the real content height, not below
+        // it.
+        let backend = ratatui::backend::TestBackend::new(ui::MIN_COLUMNS, ui::MIN_ROWS);
         let mut terminal = Terminal::new(backend).expect("test backend should initialize");
         let mut state = AppState::new();
         let mut last_transition_press: TransitionKeyDebounce = None;
@@ -1297,7 +1355,12 @@ mod tests {
         for event in std::iter::once(press(KeyCode::F(1)))
             .chain(std::iter::repeat_n(press(KeyCode::Down), 200))
         {
-            if should_redraw(&mut state, event, (80, 24), &mut last_transition_press) {
+            if should_redraw(
+                &mut state,
+                event,
+                (ui::MIN_COLUMNS, ui::MIN_ROWS),
+                &mut last_transition_press,
+            ) {
                 terminal
                     .draw(|frame| ui::draw(frame, &state))
                     .expect("redraw should succeed");
@@ -1307,7 +1370,7 @@ mod tests {
         assert!(
             buffer_contains(&terminal, "? undiscovered"),
             "200 Down presses should be enough to reach Help's final legend \
-             line at 80x24, not get stuck short of it"
+             line at the minimum geometry, not get stuck short of it"
         );
     }
 
@@ -1447,18 +1510,32 @@ mod tests {
         assert!(buffer_contains(&terminal, "controller script error"));
     }
 
+    /// A runtime error several lines long, each well past the report pane's
+    /// width even at `ui::MIN_COLUMNS` — used to force the After Action
+    /// report to need scrolling regardless of viewport size, now that the
+    /// console's enforced minimum (#126) gives the report pane far more
+    /// room than the old 80x24/100x24 sizes this kind of test used to rely
+    /// on for a tight fit.
+    const LONG_ERROR_CONTROLLER: &str = r#"
+        function on_tick(observation)
+            local segment = string.rep("x", 130)
+            local message = segment
+            for i = 1, 9 do
+                message = message .. "\n" .. segment
+            end
+            error(message, 0)
+        end
+    "#;
+
     #[test]
     fn after_action_arrows_do_not_scroll_the_report_while_its_satellite_pane_is_focused() {
         let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
-        events.extend(clear_and_type(ROUTE_TO_UPLINK));
+        events.extend(clear_and_type(LONG_ERROR_CONTROLLER));
         events.push(press(KeyCode::F(6)));
         events.push(press(KeyCode::Char(' '))); // pause
-        events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
+        events.push(press(KeyCode::Enter)); // step the one tick that errors
 
-        // A short viewport (`ui::MIN_ROWS`) so the report actually needs
-        // scrolling — otherwise there'd be nothing to distinguish "scrolled"
-        // from "already at the bottom".
-        let width = 100; // the narrowest width the two-pane layout takes
+        let width = ui::MIN_COLUMNS;
         let (mut state, mut terminal) = render(width, ui::MIN_ROWS, &events);
         assert_eq!(state.current_view(), View::AfterAction);
 
