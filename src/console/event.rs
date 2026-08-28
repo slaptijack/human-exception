@@ -98,8 +98,8 @@ pub fn map(
         KeyCode::F(6) => Some(Msg::RequestDeploy),
         KeyCode::F(7) if controller_is_open => Some(Msg::RequestResetController),
         // `F8` moves focus to the next pane in every current two-pane view
-        // at any supported width (`docs/TUI_DESIGN.md`, "F8 -- next pane").
-        // `focus_movement_available` is `false` for Help, for the
+        // (`docs/TUI_DESIGN.md`, "F8 -- next pane"). `focus_movement_available`
+        // is `false` for Help, for the
         // Operation/After Action placeholders before any deployment
         // exists, and while a confirmation dialog is pending (though those
         // are already filtered out above) — in each case `F8` stays inert
@@ -139,9 +139,8 @@ pub fn map(
         KeyCode::Up if scroll_focus_matches(current_view, focused_pane) => Some(Msg::ScrollUp),
         KeyCode::Down if scroll_focus_matches(current_view, focused_pane) => Some(Msg::ScrollDown),
         // Ordinary editing keys must not silently mutate the source unless
-        // it's the pane actually focused — whether because the reference
-        // pane is focused instead (which `F8` can swap to at any width) or
-        // because it's swapped in on screen at 80-99 columns.
+        // it's the pane actually focused — i.e. the reference pane, not the
+        // source, is focused (which `F8` can move to).
         _ if controller_is_open && focused_pane == PaneId::ControllerSource => {
             // AltGr (used on many non-US keyboard layouts to type
             // punctuation like `{`, `}`, `[`, `]`, `\`, `@`) is reported by

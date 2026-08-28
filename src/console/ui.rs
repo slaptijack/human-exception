@@ -462,10 +462,9 @@ fn lua_field_reference_lines() -> Vec<Line<'static>> {
 }
 
 /// The live operation view: the satellite feed dominates, telemetry is
-/// secondary (`docs/TUI_DESIGN.md` §4, "Operation"). Two panes at 100+
-/// columns; below that, only the focused pane renders, with `F8` moving
-/// focus to reveal the other — the same focus-driven visibility Controller
-/// and Signals already use.
+/// secondary (`docs/TUI_DESIGN.md` §4, "Operation"). Both panes always
+/// render; `F8` moves which one carries the focus marker, the same as
+/// Controller and Signals.
 fn draw_operation(frame: &mut Frame, area: Rect, state: &AppState) {
     // Wins over the normal layout regardless of width, the same way a
     // pending reset confirmation always wins Controller's focus-driven
