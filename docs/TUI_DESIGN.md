@@ -51,7 +51,7 @@ A target can still have an objective once the player chooses to act. The distinc
 
 Supported minimum and primary design target: **120×40**. The console does not attempt partial gameplay below this geometry.
 
-At 100+ columns, views may use a primary pane plus a contextual secondary pane. At 80–99 columns, secondary information becomes a switchable subview rather than compressing the primary content into an unreadable layout; this narrow, single-pane rendering mode remains implemented (§ [Responsive behavior](#responsive-behavior)) but, with the minimum raised to 120×40, is not currently reachable through the enforced minimum-geometry gate. Removing it is a separate, directly dependent follow-up.
+Every view uses a primary pane plus a contextual secondary pane, both always visible (§ [Responsive behavior](#responsive-behavior)).
 
 Below 120 columns or 40 rows, do not silently truncate critical information. Show an in-world resize notice and preserve the ability to quit.
 
@@ -81,7 +81,7 @@ Function keys are intentional because they remain available while editing Lua an
 
 `F3`, `F4`, `F5`, and `F6` may be unavailable until their prerequisite state exists. Unavailable actions should be visibly disabled rather than silently ignored.
 
-Some views bind additional local keys beyond this global set. `F7` resets the controller in Controller. `F8` moves focus to the next pane in the current view at any supported width — see [Pane focus](#pane-focus). These are documented with the views they apply to.
+Some views bind additional local keys beyond this global set. `F7` resets the controller in Controller. `F8` moves focus to the next pane in the current view — see [Pane focus](#pane-focus). These are documented with the views they apply to.
 
 ### Navigation while a deployment is active
 
@@ -141,29 +141,23 @@ No current view has more than two panes.
 
 ### F8 — next pane
 
-`F8` moves focus to the next pane in the current view, consistently at both
-wide (100+ column) and narrow (80–99 column) widths. In Help, which has a
-single pane, `F8` is inert. The same is true whenever the currently rendered
-surface doesn't actually present a second pane to move to: Operation before
-anything has ever been deployed, and After Action before anything has ever
-been deployed, are each a single placeholder pane, not the two-pane
-composition their row in [Panes per view](#panes-per-view) describes once a
-deployment exists — the focus marker and the footer's `F8` hint are both
-absent there too. (An active, not-yet-finished deployment viewed via After
-Action is a different case: both panes already render real content there, so
-that remains an ordinary two-pane view with `F8` and the marker both
-working normally.) The same placeholder-style inertness applies while a
-confirmation dialog (quit, controller-reset, or deployment-replace) is
-pending: `F8` is swallowed along with every other non-dialog key, and the
+`F8` moves focus to the next pane in the current view; both panes of a
+two-pane view remain visible throughout (§ [Responsive
+behavior](#responsive-behavior)), so `F8` only moves which one is focused. In
+Help, which has a single pane, `F8` is inert. The same is true whenever the
+currently rendered surface doesn't actually present a second pane to move
+to: Operation before anything has ever been deployed, and After Action
+before anything has ever been deployed, are each a single placeholder pane,
+not the two-pane composition their row in [Panes per view](#panes-per-view)
+describes once a deployment exists — the focus marker and the footer's `F8`
+hint are both absent there too. (An active, not-yet-finished deployment
+viewed via After Action is a different case: both panes already render real
+content there, so that remains an ordinary two-pane view with `F8` and the
+marker both working normally.) The same placeholder-style inertness applies
+while a confirmation dialog (quit, controller-reset, or deployment-replace)
+is pending: `F8` is swallowed along with every other non-dialog key, and the
 footer hint is suppressed for as long as the dialog is open, even in a view
 that is otherwise two-pane.
-
-At 100+ columns both panes of a view remain visible (§ [Responsive
-behavior](#responsive-behavior)); `F8` only moves which one is focused. At
-80–99 columns only the focused pane renders, so `F8` is what changes which
-pane the player sees. This is one behavior, not two — F8 always means "move
-focus," and visibility at narrow widths is a rendering consequence of focus,
-not a separate toggle.
 
 ### Input priority
 
@@ -177,9 +171,9 @@ Input is resolved in this order:
 4. **Focused-pane input** — input that only the currently focused pane
    interprets.
 
-A modal confirmation is never hidden behind an unfocused pane at any width; if
-Controller source is modified, the reset confirmation triggered by `F7` remains
-visible regardless of which pane is currently focused or visible.
+A modal confirmation is never hidden behind an unfocused pane; if Controller
+source is modified, the reset confirmation triggered by `F7` remains visible
+regardless of which pane is currently focused.
 
 ### Non-color focus cue
 
@@ -203,22 +197,19 @@ panes, so a marker there would claim a choice that doesn't exist.
   restores that view's last focused pane.
 - Opening Help (`F1`) and dismissing it never changes the underlying view's
   remembered focus.
-- Resizing between wide and narrow never leaves focus pointing at a pane that
-  is no longer visible — the already-focused pane is what narrow mode shows,
-  and both panes reappear on returning to wide without changing focus.
 - A fresh After Action result always focuses the Report pane, regardless of
   what was focused the last time After Action was visited, so the outcome
-  hierarchy (§5) remains primary at the narrow single-pane width without
-  requiring `F8`.
+  hierarchy (§5) is what the player sees immediately, without requiring
+  `F8`.
 
 ### Read-only panes and unsupported input
 
 A pane with no pane-local input today (Target's two panes, Operation's
-satellite feed) may still be focused: focus also governs narrow-layout
-visibility, so a read-only pane must remain reachable. Pressing a key with no
-pane-local meaning in the focused pane stays inert. This contract does not
-manufacture new pane-local interactions merely so that every pane has
-something to do.
+satellite feed) may still be focused, since focus determines input ownership
+and the non-color cue independently of any pane having something to do.
+Pressing a key with no pane-local meaning in the focused pane stays inert.
+This contract does not manufacture new pane-local interactions merely so
+that every pane has something to do.
 
 ### Pane-local vs. view-level input today
 
@@ -631,11 +622,11 @@ confirmed reset:
 While the reset confirmation is pending, it takes priority over all editor
 input — including selection and undo/redo keys — exactly as the existing
 [Input priority](#input-priority) rule already requires for every other
-Controller key. At 80–99 columns, if the Lua field reference pane happened
-to be the visible/focused pane when `F7` was pressed, the confirmation is
-still shown in the source pane's screen position (since that is where the
-banner renders) without changing which pane is actually focused; focus
-itself is restored to whatever the player had once the dialog resolves.
+Controller key. If the Lua field reference pane happened to be focused when
+`F7` was pressed, the confirmation still renders in the source pane (since
+that is where the banner renders) without changing which pane is actually
+focused; focus itself is restored to whatever the player had once the
+dialog resolves.
 
 #### Modified state and validation invalidation
 
@@ -666,8 +657,6 @@ to expose, an exact-string snapshot of its current content.
 | Source pane focused, no dialog pending | available | available | available | accepted, mutates | accepted | accepted, mutates | accepted, mutates |
 | Reference pane focused | available | available | available | inert | inert | inert | inert (silently ignored) |
 | Reset / quit / redeploy confirmation pending | inert (dialog swallows all non-dialog keys) | inert | inert (already open) | inert | inert | inert | inert |
-| Narrow (80–99 columns), source pane focused | available, advertised | available | available | accepted | accepted | accepted | accepted |
-| Narrow (80–99 columns), reference pane focused | available (view-level; works even though source isn't currently visible) | available | available | inert | inert | inert | inert |
 | Below minimum geometry (<120×40) | inert (only the geometry warning and `Ctrl+Q` are live) | inert | inert | inert | inert | inert | inert |
 
 `Ctrl+V`/`F6`/`F7` availability in every row follows one authoritative rule —
@@ -934,33 +923,17 @@ When opened during a running deployment, Help temporarily pauses execution as de
 
 ## Responsive behavior
 
-### 100+ columns
+### 120+ columns
 
-Use the two-pane compositions shown above.
+Use the two-pane compositions shown above; both panes always render, and
+`F8` moves which one carries the focus marker and input ownership (see
+[Pane focus](#pane-focus)). It remains safe in Controller because it does
+not insert a normal text character into Lua source.
 
-### 80–99 columns
-
-Only the focused pane renders (see [Pane focus](#pane-focus)); the other becomes
-reachable by moving focus rather than by compressing both into view:
-
-- Signals ↔ selected-signal detail;
-- Target intelligence ↔ provenance/access;
-- Controller ↔ Lua reference;
-- Satellite feed ↔ telemetry;
-- final satellite frame ↔ after-action report.
-
-`F8` moves focus to the other pane and is shown in the footer at this width. It
-remains safe in Controller because it does not insert a normal text character
-into Lua source.
-
-For After Action specifically, the Report pane is focused by default (§ [Pane
-focus](#pane-focus)): at 80–99 columns, the player
-sees outcome, trigger, meaning, and completion (hierarchy items 1–4)
-immediately, without needing `F8` to discover whether they succeeded or what
-that meant. Moving focus only trades which pane is visible; it never reorders
-the outcome hierarchy (§5) itself, so evidence, next actions, and availability
-keep the same relative priority within the report pane regardless of which
-pane is showing.
+For After Action specifically, the Report pane is focused by default (§
+[Pane focus](#pane-focus)): the player sees outcome, trigger, meaning, and
+completion (hierarchy items 1–4) immediately, without needing `F8` to
+discover whether they succeeded or what that meant.
 
 ### Below 120 columns or 40 rows
 

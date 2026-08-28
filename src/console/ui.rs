@@ -22,12 +22,6 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 pub const MIN_COLUMNS: u16 = 120;
 pub const MIN_ROWS: u16 = 40;
 
-/// Below this width, every two-pane view falls back to rendering only its
-/// currently focused pane (`AppState::focused_pane`), with `F8` moving focus
-/// to reveal the other one, per `docs/TUI_DESIGN.md` ("Responsive
-/// behavior").
-const TWO_PANE_MIN_COLUMNS: u16 = 100;
-
 const TITLE: &str = "HUMAN EXCEPTION // RESISTANCE CONSOLE";
 
 /// Draws the full console frame for the current session state.
@@ -55,11 +49,7 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
 }
 
 /// The header/body/footer layout `draw` renders once the quit-confirmation
-/// and minimum-geometry checks above have both passed. Factored out so
-/// narrow-layout rendering (`TWO_PANE_MIN_COLUMNS` and below) stays directly
-/// testable at its own widths even though the console's enforced minimum
-/// (#126) now makes those widths unreachable through `draw` itself — that
-/// narrow-layout code is deliberately retained, not removed, by #126.
+/// and minimum-geometry checks above have both passed.
 fn draw_console(frame: &mut Frame, area: Rect, state: &AppState) {
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(3),
@@ -336,79 +326,16 @@ fn draw_body(frame: &mut Frame, area: Rect, state: &AppState) {
 }
 
 fn draw_controller(frame: &mut Frame, area: Rect, state: &AppState) {
-    if area.width >= TWO_PANE_MIN_COLUMNS {
-        let focused = state.focused_pane(View::Controller);
-        let [left, right] =
-            Layout::horizontal([Constraint::Percentage(70), Constraint::Percentage(30)])
-                .areas(area);
-        draw_controller_source(frame, left, state, focused == PaneId::ControllerSource);
-        draw_pane(
-            frame,
-            right,
-            pane_title("LUA FIELD REFERENCE", focused == PaneId::LuaFieldReference),
-            lua_field_reference_lines(),
-        );
-    } else if state.focused_pane(View::Controller) == PaneId::LuaFieldReference
-        && !state.reset_confirmation_pending()
-    {
-        // Unlike the wide two-pane layout above (where the source pane and
-        // its banner are always visible alongside the reference), this is
-        // the only place the reference pane can be shown *instead of* the
-        // source, so validation/reset feedback needs its own copy of the
-        // banner here too — otherwise pressing Ctrl+Enter/Ctrl+V while
-        // looking at the reference would appear to do nothing.
-        draw_controller_reference(frame, area, state);
-    } else {
-        // A pending reset confirmation always wins the narrow-mode display
-        // (its banner only ever renders inside the source pane, so showing
-        // the reference pane instead while it's pending would leave the
-        // prompt invisible) but does not itself move focus — so the marker
-        // must still reflect the stored focus, not just which pane is on
-        // screen. If the reference pane was focused when `F7` fired, the
-        // source is shown unmarked here and the marker returns to the
-        // reference pane once the confirmation resolves.
-        draw_controller_source(
-            frame,
-            area,
-            state,
-            state.focused_pane(View::Controller) == PaneId::ControllerSource,
-        );
-    }
-}
-
-/// The narrow-layout (80-99 column) stand-in for the source pane when `F8`
-/// has swapped the Lua reference in instead. Renders the same validation
-/// banner `draw_controller_source` would, since that pane isn't on screen
-/// to show it. Only ever shown as the sole visible pane, so it is always
-/// focused.
-fn draw_controller_reference(frame: &mut Frame, area: Rect, state: &AppState) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(pane_title("LUA FIELD REFERENCE", true));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let banner = controller_banner(state);
-    let (content_area, banner_area) = if let Some(banner) = &banner {
-        let rows = banner_height(banner, inner.width);
-        let [content, banner_row] =
-            Layout::vertical([Constraint::Min(0), Constraint::Length(rows)]).areas(inner);
-        (content, Some(banner_row))
-    } else {
-        (inner, None)
-    };
-
-    frame.render_widget(
-        Paragraph::new(lua_field_reference_lines()).wrap(Wrap { trim: false }),
-        content_area,
+    let focused = state.focused_pane(View::Controller);
+    let [left, right] =
+        Layout::horizontal([Constraint::Percentage(70), Constraint::Percentage(30)]).areas(area);
+    draw_controller_source(frame, left, state, focused == PaneId::ControllerSource);
+    draw_pane(
+        frame,
+        right,
+        pane_title("LUA FIELD REFERENCE", focused == PaneId::LuaFieldReference),
+        lua_field_reference_lines(),
     );
-
-    if let (Some(banner_area), Some(banner)) = (banner_area, banner) {
-        frame.render_widget(
-            Paragraph::new(banner).wrap(Wrap { trim: false }),
-            banner_area,
-        );
-    }
 }
 
 /// An upper bound on how many rows [`controller_banner`] can claim, so one
@@ -417,8 +344,8 @@ const MAX_BANNER_ROWS: u16 = 4;
 
 /// How many rows to reserve for `banner` at `width`, wrapping instead of
 /// clipping a message that runs past one row — a Lua syntax error easily
-/// exceeds the supported 80-column pane's width, and clipping it can lose
-/// the `:line:` location `docs/TUI_DESIGN.md` requires stay visible.
+/// exceeds the source pane's width, and clipping it can lose the `:line:`
+/// location `docs/TUI_DESIGN.md` requires stay visible.
 fn banner_height(banner: &[Line<'static>], width: u16) -> u16 {
     (wrapped_row_count(banner, width) as u16).clamp(1, MAX_BANNER_ROWS)
 }
@@ -502,9 +429,9 @@ fn controller_banner(state: &AppState) -> Option<Vec<Line<'static>>> {
 }
 
 /// A short, representative subset of the Lua contract shown as a cheat
-/// sheet next to (or, at narrow widths, instead of) the editor. See
-/// `help_lines`'s "Lua contract" section for the complete reference; the
-/// two are checked for consistency in tests so they can't silently drift.
+/// sheet next to the editor. See `help_lines`'s "Lua contract" section for
+/// the complete reference; the two are checked for consistency in tests so
+/// they can't silently drift.
 fn lua_field_reference_lines() -> Vec<Line<'static>> {
     vec![
         Line::from(Span::styled(
@@ -577,44 +504,27 @@ fn draw_operation(frame: &mut Frame, area: Rect, state: &AppState) {
 
     let focused = state.focused_pane(View::Operation);
 
-    if area.width >= TWO_PANE_MIN_COLUMNS {
-        let [left, right] =
-            Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
-                .areas(area);
-        draw_pane(
-            frame,
-            left,
-            pane_title("COMPROMISED SATELLITE FEED", focused == PaneId::Satellite),
-            satellite_lines(&op.current),
-        );
-        draw_pane(
-            frame,
-            right,
-            pane_title("OPERATION TELEMETRY", focused == PaneId::OperationTelemetry),
-            telemetry_lines(&op),
-        );
-    } else if focused == PaneId::OperationTelemetry {
-        draw_pane(
-            frame,
-            area,
-            pane_title("OPERATION TELEMETRY", true),
-            telemetry_lines(&op),
-        );
-    } else {
-        draw_pane(
-            frame,
-            area,
-            pane_title("COMPROMISED SATELLITE FEED", true),
-            satellite_lines(&op.current),
-        );
-    }
+    let [left, right] =
+        Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(area);
+    draw_pane(
+        frame,
+        left,
+        pane_title("COMPROMISED SATELLITE FEED", focused == PaneId::Satellite),
+        satellite_lines(&op.current),
+    );
+    draw_pane(
+        frame,
+        right,
+        pane_title("OPERATION TELEMETRY", focused == PaneId::OperationTelemetry),
+        telemetry_lines(&op),
+    );
 }
 
 /// The reflective, run-concluded view: the same final satellite frame
 /// Operation was last showing, alongside a concise mechanical outcome and
 /// summary stats (`docs/TUI_DESIGN.md` §5, "After Action is an operation
 /// state, not a disconnected popup"). Reuses `satellite_lines`/`draw_pane`
-/// and the same two-pane/narrow-layout structure as `draw_operation`.
+/// and the same two-pane structure as `draw_operation`.
 fn draw_after_action(frame: &mut Frame, area: Rect, state: &AppState) {
     let Some(op) = state.operation() else {
         draw_pane(
@@ -632,36 +542,15 @@ fn draw_after_action(frame: &mut Frame, area: Rect, state: &AppState) {
     let scroll = state.scroll_offset(PaneId::Report);
     let focused = state.focused_pane(View::AfterAction);
 
-    if area.width >= TWO_PANE_MIN_COLUMNS {
-        let [left, right] =
-            Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
-                .areas(area);
-        draw_pane(
-            frame,
-            left,
-            pane_title("FINAL SATELLITE FRAME", focused == PaneId::FinalFrame),
-            satellite_lines(&op.current),
-        );
-        draw_after_action_report_pane(frame, right, &op, scroll, focused == PaneId::Report);
-    } else if focused == PaneId::Report {
-        // The report pane carries hierarchy items 1-4 (outcome, trigger,
-        // meaning, completion) that the player must see before anything
-        // else, for every finished operation — not just a synchronous load
-        // failure with no discovered tiles (`docs/TUI_DESIGN.md` §5,
-        // "Responsive behavior": "the report subview defaults to primary").
-        // `deploy`/`step_operation` already focus `PaneId::Report` on every
-        // fresh terminal outcome, so this direct comparison is sufficient
-        // to keep the report primary without any extra "defaults to report"
-        // bookkeeping here.
-        draw_after_action_report_pane(frame, area, &op, scroll, true);
-    } else {
-        draw_pane(
-            frame,
-            area,
-            pane_title("FINAL SATELLITE FRAME", true),
-            satellite_lines(&op.current),
-        );
-    }
+    let [left, right] =
+        Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(area);
+    draw_pane(
+        frame,
+        left,
+        pane_title("FINAL SATELLITE FRAME", focused == PaneId::FinalFrame),
+        satellite_lines(&op.current),
+    );
+    draw_after_action_report_pane(frame, right, &op, scroll, focused == PaneId::Report);
 }
 
 /// Draws the AFTER-ACTION REPORT pane, pinning the `F4` recovery hint to a
@@ -1222,27 +1111,15 @@ fn draw_signals(frame: &mut Frame, area: Rect, state: &AppState) {
     let signal = &authored_signals()[state.selected_signal()];
     let focused = state.focused_pane(View::Signals);
 
-    if area.width >= TWO_PANE_MIN_COLUMNS {
-        let [left, right] =
-            Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
-                .areas(area);
-        draw_pane(
-            frame,
-            left,
-            pane_title("SIGNALS", focused == PaneId::SignalsList),
-            signal_list_lines(state),
-        );
-        draw_signal_detail_pane(frame, right, signal, focused == PaneId::SelectedSignal);
-    } else if focused == PaneId::SelectedSignal {
-        draw_signal_detail_pane(frame, area, signal, true);
-    } else {
-        draw_pane(
-            frame,
-            area,
-            pane_title("SIGNALS", true),
-            signal_list_lines(state),
-        );
-    }
+    let [left, right] =
+        Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(area);
+    draw_pane(
+        frame,
+        left,
+        pane_title("SIGNALS", focused == PaneId::SignalsList),
+        signal_list_lines(state),
+    );
+    draw_signal_detail_pane(frame, right, signal, focused == PaneId::SelectedSignal);
 }
 
 fn draw_signal_detail_pane(frame: &mut Frame, area: Rect, signal: &Signal, focused: bool) {
@@ -1315,41 +1192,22 @@ fn draw_target(frame: &mut Frame, area: Rect, state: &AppState) {
     let dossier = first_contact_dossier();
     let focused = state.focused_pane(View::Target);
 
-    if area.width >= TWO_PANE_MIN_COLUMNS {
-        let [left, right] =
-            Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)])
-                .areas(area);
-        draw_pane_with_pinned_action(
-            frame,
-            left,
-            pane_title("TARGET INTELLIGENCE", focused == PaneId::TargetIntelligence),
-            target_intel_lines(&dossier),
-            "Enter  work this opportunity",
-        );
-        draw_pane_with_pinned_action(
-            frame,
-            right,
-            pane_title("PROVENANCE / ACCESS", focused == PaneId::Provenance),
-            target_provenance_lines(&dossier),
-            "Esc  back to signals",
-        );
-    } else if focused == PaneId::Provenance {
-        draw_pane_with_pinned_action(
-            frame,
-            area,
-            pane_title("PROVENANCE / ACCESS", true),
-            target_provenance_lines(&dossier),
-            "Esc  back to signals",
-        );
-    } else {
-        draw_pane_with_pinned_action(
-            frame,
-            area,
-            pane_title("TARGET INTELLIGENCE", true),
-            target_intel_lines(&dossier),
-            "Enter  work this opportunity",
-        );
-    }
+    let [left, right] =
+        Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).areas(area);
+    draw_pane_with_pinned_action(
+        frame,
+        left,
+        pane_title("TARGET INTELLIGENCE", focused == PaneId::TargetIntelligence),
+        target_intel_lines(&dossier),
+        "Enter  work this opportunity",
+    );
+    draw_pane_with_pinned_action(
+        frame,
+        right,
+        pane_title("PROVENANCE / ACCESS", focused == PaneId::Provenance),
+        target_provenance_lines(&dossier),
+        "Esc  back to signals",
+    );
 }
 
 /// Content for the TARGET INTELLIGENCE pane, excluding the pinned
@@ -1452,14 +1310,9 @@ pub(crate) fn after_action_report_inner_dimensions(
     const BORDER_INSET: u16 = 2; // the report pane's own Block::borders(ALL)
     let body_height = frame_height.saturating_sub(HEADER_AND_FOOTER_HEIGHT);
 
-    let pane_width = if frame_width >= TWO_PANE_MIN_COLUMNS {
-        let [_, right] =
-            Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
-                .areas(Rect::new(0, 0, frame_width, body_height));
-        right.width
-    } else {
-        frame_width
-    };
+    let [_, right] = Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .areas(Rect::new(0, 0, frame_width, body_height));
+    let pane_width = right.width;
 
     (
         pane_width.saturating_sub(BORDER_INSET),
@@ -1818,15 +1671,13 @@ fn view_specific_help(view: View) -> Vec<Line<'static>> {
         View::Signals => vec![
             Line::from("Up/Down  move the selection"),
             Line::from("Enter    open Target (only signals marked [OPEN] respond)"),
-            Line::from("at 100+ columns its detail shows alongside the list automatically;"),
-            Line::from("F8 moves focus there, which is what shows at 80-99 columns"),
+            Line::from("Its detail shows alongside the list automatically;"),
+            Line::from("F8 moves focus there"),
         ],
         View::Target => vec![
             Line::from("Enter  work this opportunity"),
             Line::from("Esc    back to Signals"),
-            Line::from(
-                "F8     move focus between intel and provenance (visible pane at 80-99 columns)",
-            ),
+            Line::from("F8     move focus between intel and provenance"),
         ],
         View::Controller => vec![
             Line::from("Type to edit; arrows/Home/End/PageUp/PageDown move the cursor"),
@@ -1836,17 +1687,13 @@ fn view_specific_help(view: View) -> Vec<Line<'static>> {
             Line::from("Tab/Shift+Tab indent/unindent"),
             Line::from("F7          reset to the starter controller (confirms if modified)"),
             Line::from("Ctrl+V      load the source and check for on_tick, without calling it"),
-            Line::from(
-                "F8          move focus between source and reference (visible pane at 80-99 columns)",
-            ),
+            Line::from("F8          move focus between source and reference"),
         ],
         View::Operation => vec![
             Line::from("F6     deploy the current controller (confirms if a run is active)"),
             Line::from("Space  pause/resume the run"),
             Line::from("Enter  advance exactly one tick while paused"),
-            Line::from(
-                "F8     move focus between feed and telemetry (visible pane at 80-99 columns)",
-            ),
+            Line::from("F8     move focus between feed and telemetry"),
             Line::from("Leaving via F2/F3/F4 pauses the run; F5 returns to it as you left it."),
         ],
         View::AfterAction => vec![
@@ -1855,9 +1702,7 @@ fn view_specific_help(view: View) -> Vec<Line<'static>> {
             Line::from("F4       edit the controller (your edits are preserved)"),
             Line::from("F5       review this run's frozen source and telemetry (Review Run)"),
             Line::from("F6       redeploy from a clean scenario state"),
-            Line::from(
-                "F8       move focus between frame and report (visible pane at 80-99 columns)",
-            ),
+            Line::from("F8       move focus between frame and report"),
         ],
         View::Help => Vec::new(),
     }
@@ -2015,23 +1860,6 @@ mod tests {
         terminal
     }
 
-    /// Like [`render`], but calls [`draw_console`] directly, skipping
-    /// `draw`'s minimum-geometry gate. Narrow-layout tests use this at
-    /// widths/heights below the console's enforced minimum (#126) to keep
-    /// exercising that retained-but-currently-unreachable rendering code
-    /// directly, instead of the full app entry point.
-    fn render_narrow(width: u16, height: u16, state: &AppState) -> Terminal<TestBackend> {
-        let backend = TestBackend::new(width, height);
-        let mut terminal = Terminal::new(backend).expect("test backend should initialize");
-        terminal
-            .draw(|frame| {
-                let area = frame.area();
-                draw_console(frame, area, state);
-            })
-            .expect("draw should succeed");
-        terminal
-    }
-
     fn buffer_contains(terminal: &Terminal<TestBackend>, needle: &str) -> bool {
         terminal
             .backend()
@@ -2140,29 +1968,18 @@ mod tests {
     }
 
     #[test]
-    fn narrow_signals_view_shows_one_pane_until_f8_moves_focus() {
+    fn signals_view_shows_both_panes_and_moves_the_focus_marker_with_f8() {
         let state = AppState::new();
-        let terminal = render_narrow(90, 30, &state);
+        let terminal = render(120, 40, &state);
 
         assert!(buffer_contains(&terminal, "SIGNALS"));
-        assert!(!buffer_contains(&terminal, "SELECTED SIGNAL"));
-        assert!(buffer_contains(&terminal, "> SIGNALS"));
-    }
-
-    #[test]
-    fn narrow_signals_view_shows_detail_pane_once_focus_moves() {
-        use super::super::state::Msg;
-
-        let mut state = AppState::new();
-        state.apply(Msg::FocusNextPane);
-        let terminal = render_narrow(90, 30, &state);
-
         assert!(buffer_contains(&terminal, "SELECTED SIGNAL"));
-        assert!(buffer_contains(&terminal, "> SELECTED SIGNAL"));
+        assert!(buffer_contains(&terminal, "> SIGNALS"));
+        assert!(!buffer_contains(&terminal, "> SELECTED SIGNAL"));
     }
 
     #[test]
-    fn signals_focus_survives_a_wide_to_narrow_to_wide_resize() {
+    fn signals_focus_survives_a_resize() {
         use super::super::state::Msg;
 
         // Focus itself is `AppState` state, entirely independent of the
@@ -2174,20 +1991,19 @@ mod tests {
         state.apply(Msg::FocusNextPane);
         assert_eq!(state.focused_pane(View::Signals), PaneId::SelectedSignal);
 
-        let wide = render(120, 40, &state);
-        assert!(buffer_contains(&wide, "SIGNALS"));
-        assert!(buffer_contains(&wide, "SELECTED SIGNAL"));
-        assert!(buffer_contains(&wide, "> SELECTED SIGNAL"));
-        assert!(!buffer_contains(&wide, "> SIGNALS"));
+        let small = render(120, 40, &state);
+        assert!(buffer_contains(&small, "SIGNALS"));
+        assert!(buffer_contains(&small, "SELECTED SIGNAL"));
+        assert!(buffer_contains(&small, "> SELECTED SIGNAL"));
+        assert!(!buffer_contains(&small, "> SIGNALS"));
 
-        let narrow = render_narrow(90, 30, &state);
-        assert!(buffer_contains(&narrow, "SELECTED SIGNAL"));
-        assert!(buffer_contains(&narrow, "> SELECTED SIGNAL"));
-        assert!(!buffer_contains(&narrow, "> 11:42"));
+        let large = render(150, 50, &state);
+        assert!(buffer_contains(&large, "SELECTED SIGNAL"));
+        assert!(buffer_contains(&large, "> SELECTED SIGNAL"));
 
-        let wide_again = render(120, 40, &state);
-        assert!(buffer_contains(&wide_again, "SIGNALS"));
-        assert!(buffer_contains(&wide_again, "SELECTED SIGNAL"));
+        let small_again = render(120, 40, &state);
+        assert!(buffer_contains(&small_again, "SIGNALS"));
+        assert!(buffer_contains(&small_again, "SELECTED SIGNAL"));
         assert_eq!(state.focused_pane(View::Signals), PaneId::SelectedSignal);
     }
 
@@ -2203,16 +2019,16 @@ mod tests {
     }
 
     #[test]
-    fn target_view_at_the_two_pane_threshold_still_shows_the_pinned_actions() {
+    fn target_view_at_minimum_supported_geometry_shows_both_pinned_actions() {
         use super::super::state::Msg;
 
-        // 100x24: the narrowest width that switches Target into the
-        // two-pane layout, where a 55% intelligence pane wraps enough known
-        // facts and the opportunity blurb that the action row would be the
-        // first thing pushed off-screen if it weren't pinned separately.
+        // At the console's real minimum, the 55% intelligence pane wraps
+        // enough known facts and the opportunity blurb that the action row
+        // would be the first thing pushed off-screen if it weren't pinned
+        // separately.
         let mut state = AppState::new();
         state.apply(Msg::Activate);
-        let terminal = render_narrow(TWO_PANE_MIN_COLUMNS, MIN_ROWS, &state);
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
 
         assert!(buffer_contains(&terminal, "work this opportunity"));
         assert!(buffer_contains(&terminal, "back to signals"));
@@ -2226,31 +2042,30 @@ mod tests {
         state.apply(Msg::Activate);
         assert_eq!(state.focused_pane(View::Target), PaneId::TargetIntelligence);
 
-        let wide = render(120, 40, &state);
-        assert!(buffer_contains(&wide, "> TARGET INTELLIGENCE"));
-        assert!(!buffer_contains(&wide, "> PROVENANCE / ACCESS"));
+        let small = render(120, 40, &state);
+        assert!(buffer_contains(&small, "> TARGET INTELLIGENCE"));
+        assert!(!buffer_contains(&small, "> PROVENANCE / ACCESS"));
 
         state.apply(Msg::FocusNextPane);
         assert_eq!(state.focused_pane(View::Target), PaneId::Provenance);
 
-        let wide = render(120, 40, &state);
-        assert!(buffer_contains(&wide, "> PROVENANCE / ACCESS"));
-        assert!(!buffer_contains(&wide, "> TARGET INTELLIGENCE"));
+        let small = render(120, 40, &state);
+        assert!(buffer_contains(&small, "> PROVENANCE / ACCESS"));
+        assert!(!buffer_contains(&small, "> TARGET INTELLIGENCE"));
 
-        let narrow = render_narrow(90, 30, &state);
-        assert!(buffer_contains(&narrow, "PROVENANCE / ACCESS"));
-        assert!(buffer_contains(&narrow, "> PROVENANCE / ACCESS"));
-        assert!(!buffer_contains(&narrow, "TARGET INTELLIGENCE"));
+        let large = render(150, 50, &state);
+        assert!(buffer_contains(&large, "PROVENANCE / ACCESS"));
+        assert!(buffer_contains(&large, "> PROVENANCE / ACCESS"));
 
-        let wide_again = render(120, 40, &state);
-        assert!(buffer_contains(&wide_again, "> PROVENANCE / ACCESS"));
+        let small_again = render(120, 40, &state);
+        assert!(buffer_contains(&small_again, "> PROVENANCE / ACCESS"));
         assert_eq!(state.focused_pane(View::Target), PaneId::Provenance);
     }
 
     #[test]
-    fn signal_detail_pane_at_the_two_pane_threshold_still_shows_the_pinned_action() {
+    fn signal_detail_pane_at_minimum_supported_geometry_still_shows_the_pinned_action() {
         let state = AppState::new();
-        let terminal = render_narrow(TWO_PANE_MIN_COLUMNS, MIN_ROWS, &state);
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
 
         assert!(buffer_contains(&terminal, "inspect opportunity"));
     }
@@ -2511,56 +2326,6 @@ mod tests {
         );
     }
 
-    // These two tests exercise narrow-width header candidate selection via
-    // `render_narrow`, bypassing `draw`'s top-level minimum-geometry gate:
-    // 80 columns is below the console's enforced minimum (#126) and so can
-    // no longer be reached through `draw` itself, but the candidate-fitting
-    // logic these tests cover is retained code (removing it is out of scope
-    // for #126) and still deserves direct coverage.
-    #[test]
-    fn controller_status_stays_visible_from_signals_at_eighty_columns() {
-        use super::super::state::Msg;
-        use super::super::state::View;
-
-        let mut state = AppState::new();
-        state.apply(Msg::Activate);
-        state.apply(Msg::Activate);
-        state.apply(Msg::EditController(super::super::editor::EditOp::Insert(
-            'x',
-        )));
-        state.apply(Msg::Navigate(View::Signals));
-        let terminal = render_narrow(80, 30, &state);
-
-        assert!(
-            buffer_contains(&terminal, "CONTROLLER: modified"),
-            "at the narrow 80-column width, a candidate that drops the \
-             signals count instead of controller status should be offered \
-             before one that drops controller status entirely"
-        );
-    }
-
-    #[test]
-    fn controller_status_stays_visible_from_target_at_eighty_columns() {
-        use super::super::state::Msg;
-        use super::super::state::View;
-
-        let mut state = AppState::new();
-        state.apply(Msg::Activate);
-        state.apply(Msg::Activate);
-        state.apply(Msg::EditController(super::super::editor::EditOp::Insert(
-            'x',
-        )));
-        state.apply(Msg::Navigate(View::Target));
-        let terminal = render_narrow(80, 30, &state);
-
-        assert!(
-            buffer_contains(&terminal, "CONTROLLER: modified"),
-            "at the narrow 80-column width, a candidate that drops the \
-             Target field instead of controller status should be offered \
-             before one that drops controller status entirely"
-        );
-    }
-
     #[test]
     fn header_shows_status_ready_after_a_successful_validation_from_any_view() {
         use super::super::state::Msg;
@@ -2662,7 +2427,7 @@ mod tests {
         )));
         state.apply(Msg::FocusNextPane); // move focus to the Lua reference pane
         state.apply(Msg::RequestResetController);
-        let terminal = render_narrow(90, 30, &state);
+        let terminal = render(120, 40, &state);
 
         assert_eq!(
             state.focused_pane(View::Controller),
@@ -2674,15 +2439,14 @@ mod tests {
             "Reset controller? Edits will be lost."
         ));
 
-        // The confirmation forces the source pane onto screen (so its
-        // banner and Enter/Esc prompt stay reachable) without moving
-        // focus off the reference pane — the marker must track the
-        // stored focus, not just which pane is displayed, so the source
-        // shown here stays unmarked.
+        // The confirmation's banner and Enter/Esc prompt render in the
+        // source pane without moving focus off the reference pane — the
+        // marker must track the stored focus, not which pane the banner
+        // happens to render in, so the source stays unmarked here.
         assert!(!buffer_contains(&terminal, "> CAPTURED CONTROLLER"));
 
         state.apply(Msg::CancelResetController);
-        let after_cancel = render_narrow(90, 30, &state);
+        let after_cancel = render(120, 40, &state);
         assert!(buffer_contains(&after_cancel, "> LUA FIELD REFERENCE"));
         assert_eq!(
             state.focused_pane(View::Controller),
@@ -2691,7 +2455,7 @@ mod tests {
     }
 
     #[test]
-    fn reset_confirmation_hides_the_f8_hint_at_wide_and_narrow_widths() {
+    fn reset_confirmation_hides_the_f8_hint() {
         use super::super::state::Msg;
 
         let mut state = AppState::new();
@@ -2703,15 +2467,15 @@ mod tests {
         state.apply(Msg::RequestResetController);
         assert!(state.reset_confirmation_pending());
 
-        for (width, height) in [(120, 40), (90, 30)] {
-            let terminal = render_narrow(width, height, &state);
+        for (width, height) in [(120, 40), (150, 50)] {
+            let terminal = render(width, height, &state);
             assert!(!buffer_contains(&terminal, "F8 Next Pane"));
             assert!(!buffer_contains(&terminal, "F8 Pane"));
         }
     }
 
     #[test]
-    fn controller_focus_survives_a_wide_to_narrow_to_wide_resize() {
+    fn controller_focus_survives_a_resize() {
         use super::super::state::Msg;
 
         let mut state = AppState::new();
@@ -2719,20 +2483,20 @@ mod tests {
         state.apply(Msg::Activate);
         state.apply(Msg::FocusNextPane); // move focus to the Lua reference pane
 
-        let wide = render(120, 40, &state);
-        assert!(buffer_contains(&wide, "CAPTURED CONTROLLER"));
-        assert!(buffer_contains(&wide, "LUA FIELD REFERENCE"));
-        assert!(buffer_contains(&wide, "> LUA FIELD REFERENCE"));
-        assert!(!buffer_contains(&wide, "> CAPTURED CONTROLLER"));
+        let small = render(120, 40, &state);
+        assert!(buffer_contains(&small, "CAPTURED CONTROLLER"));
+        assert!(buffer_contains(&small, "LUA FIELD REFERENCE"));
+        assert!(buffer_contains(&small, "> LUA FIELD REFERENCE"));
+        assert!(!buffer_contains(&small, "> CAPTURED CONTROLLER"));
 
-        let narrow = render_narrow(90, 30, &state);
-        assert!(buffer_contains(&narrow, "LUA FIELD REFERENCE"));
-        assert!(buffer_contains(&narrow, "> LUA FIELD REFERENCE"));
-        assert!(!buffer_contains(&narrow, "CAPTURED CONTROLLER"));
+        let large = render(150, 50, &state);
+        assert!(buffer_contains(&large, "LUA FIELD REFERENCE"));
+        assert!(buffer_contains(&large, "> LUA FIELD REFERENCE"));
+        assert!(!buffer_contains(&large, "> CAPTURED CONTROLLER"));
 
-        let wide_again = render(120, 40, &state);
-        assert!(buffer_contains(&wide_again, "CAPTURED CONTROLLER"));
-        assert!(buffer_contains(&wide_again, "LUA FIELD REFERENCE"));
+        let small_again = render(120, 40, &state);
+        assert!(buffer_contains(&small_again, "CAPTURED CONTROLLER"));
+        assert!(buffer_contains(&small_again, "LUA FIELD REFERENCE"));
         assert_eq!(
             state.focused_pane(View::Controller),
             PaneId::LuaFieldReference
@@ -2740,7 +2504,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_input_only_reaches_the_pane_the_visible_marker_identifies() {
+    fn typed_input_only_reaches_the_pane_the_focus_marker_identifies() {
         use super::super::event;
         use super::super::state::Msg;
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -2756,11 +2520,11 @@ mod tests {
             PaneId::LuaFieldReference
         );
 
-        // The narrow render shows exactly the reference pane, marked
-        // focused — and typing must not reach the (currently hidden)
-        // source, matching `event::map`'s pane-local routing.
-        let narrow = render_narrow(90, 30, &state);
-        assert!(buffer_contains(&narrow, "> LUA FIELD REFERENCE"));
+        // Both panes render, but typing must not reach the source while the
+        // reference pane carries the focus marker, matching `event::map`'s
+        // pane-local routing.
+        let terminal = render(120, 40, &state);
+        assert!(buffer_contains(&terminal, "> LUA FIELD REFERENCE"));
 
         let msg = event::map(
             key,
@@ -2773,15 +2537,15 @@ mod tests {
         );
         assert_eq!(msg, None);
 
-        // Once focus (and so the visible marker) moves back to the source
-        // pane, the same key is routed there.
+        // Once focus (and so the marker) moves back to the source pane, the
+        // same key is routed there.
         state.apply(Msg::FocusNextPane);
         assert_eq!(
             state.focused_pane(View::Controller),
             PaneId::ControllerSource
         );
-        let narrow = render_narrow(90, 30, &state);
-        assert!(buffer_contains(&narrow, "> CAPTURED CONTROLLER"));
+        let terminal = render(120, 40, &state);
+        assert!(buffer_contains(&terminal, "> CAPTURED CONTROLLER"));
 
         let msg = event::map(
             key,
@@ -2799,8 +2563,8 @@ mod tests {
             )))
         );
         state.apply(msg.unwrap());
-        let narrow = render_narrow(90, 30, &state);
-        assert!(buffer_contains(&narrow, "z"));
+        let terminal = render(120, 40, &state);
+        assert!(buffer_contains(&terminal, "z"));
     }
 
     #[test]
@@ -3000,12 +2764,7 @@ end
     fn a_large_representative_controller_renders_correctly_at_every_supported_size() {
         use super::super::state::Msg;
 
-        // The first two are genuinely supported sizes, driven through the
-        // real `draw` gate. The third, `TWO_PANE_MIN_COLUMNS` at 30 rows, is
-        // below the console's enforced minimum (#126) and so is driven
-        // through `render_narrow` instead, to keep proving the retained
-        // narrow-layout rendering handles this fixture too.
-        for (width, height) in [(120, 40), (150, 50), (TWO_PANE_MIN_COLUMNS, 30)] {
+        for (width, height) in [(120, 40), (150, 50)] {
             let mut state = AppState::new();
             state.apply(Msg::Activate);
             state.apply(Msg::Activate);
@@ -3020,11 +2779,7 @@ end
                 "the large representative fixture itself must be valid Lua"
             );
 
-            let terminal = if width >= MIN_COLUMNS && height >= MIN_ROWS {
-                render(width, height, &state)
-            } else {
-                render_narrow(width, height, &state)
-            };
+            let terminal = render(width, height, &state);
             assert!(
                 buffer_contains(&terminal, "CAPTURED CONTROLLER"),
                 "failed at {width}x{height}"
@@ -3204,40 +2959,41 @@ end
         assert_eq!(state.current_view(), View::AfterAction);
         assert!(state.operation().unwrap().finished);
 
-        let terminal = render_narrow(TWO_PANE_MIN_COLUMNS, MIN_ROWS, &state);
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
         assert!(buffer_contains(&terminal, "OPERATION FAILED"));
         assert!(buffer_contains(&terminal, "bad state:"));
     }
 
     #[test]
-    fn the_cursor_stays_visible_while_editing_at_the_two_pane_threshold() {
+    fn the_cursor_stays_visible_while_editing_at_the_minimum_geometry() {
         use super::super::editor::EditOp;
         use super::super::state::Msg;
 
         let mut state = AppState::new();
         state.apply(Msg::Activate);
         state.apply(Msg::Activate);
-        // At 100 columns the source pane's bordered editor content area is
-        // well under 100 columns wide (it shares the frame with the Lua
-        // reference pane and loses 2 more to its own border) — 120 `Z`s is
-        // comfortably longer than that, so the line can only fit by
-        // actually scrolling horizontally, not merely by shrinking to fit.
+        // At the console's minimum width the source pane's bordered editor
+        // content area is well under 120 columns wide (it shares the frame
+        // with the Lua reference pane and loses 2 more to its own border) —
+        // 120 `Z`s is comfortably longer than that, so the line can only
+        // fit by actually scrolling horizontally, not merely by shrinking
+        // to fit.
         let long_marker = "Z".repeat(120);
         for c in long_marker.chars() {
             state.apply(Msg::EditController(EditOp::Insert(c)));
         }
 
-        let terminal = render_narrow(TWO_PANE_MIN_COLUMNS, MIN_ROWS, &state);
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
         assert!(terminal.backend().cursor_visible());
         assert!(
             !buffer_contains(&terminal, &long_marker),
             "the full 120-character line must not fit unscrolled in the \
-             two-pane threshold's narrower source pane"
+             minimum-geometry source pane"
         );
         assert!(
             buffer_contains(&terminal, "ZZZZZZZZZZ"),
             "the tail of the long line, where the cursor now is, must still \
-             be on screen at the two-pane threshold width"
+             be on screen at the minimum geometry"
         );
     }
 
@@ -3585,7 +3341,7 @@ end
     }
 
     #[test]
-    fn a_synchronous_deploy_failure_defaults_to_the_report_pane_at_narrow_widths() {
+    fn a_synchronous_deploy_failure_defaults_to_the_report_pane() {
         use super::super::editor::EditOp;
         use super::super::state::Msg;
 
@@ -3597,22 +3353,20 @@ end
         state.apply(Msg::RequestDeploy);
         assert_eq!(state.current_view(), View::AfterAction);
 
-        // Below the two-pane threshold, with no `F8` toggle pressed yet, a
-        // deploy that never started a live run has nothing to show in the
-        // satellite pane — the compact failure report must be what's
-        // visible by default, not an empty grid the player has to know to
-        // toggle away from.
-        let terminal = render_narrow(90, 30, &state);
-        assert!(buffer_contains(&terminal, "AFTER-ACTION REPORT"));
+        // A deploy that never started a live run has nothing to show in the
+        // satellite pane, so the Report pane must carry the focus marker by
+        // default — not the final satellite frame — even though both panes
+        // render.
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+        assert!(buffer_contains(&terminal, "> AFTER-ACTION REPORT"));
         assert!(buffer_contains(
             &terminal,
             "OPERATION FAILED: controller script error"
         ));
-        assert!(!buffer_contains(&terminal, "FINAL SATELLITE FRAME"));
     }
 
     #[test]
-    fn after_action_focus_survives_a_wide_to_narrow_to_wide_resize() {
+    fn after_action_focus_survives_a_resize() {
         use super::super::state::Msg;
 
         // `budget_exhausted_state` is defined below, alongside the rest of
@@ -3623,25 +3377,24 @@ end
 
         state.apply(Msg::FocusNextPane); // move focus to the final satellite frame
 
-        let wide = render(120, 40, &state);
-        assert!(buffer_contains(&wide, "AFTER-ACTION REPORT"));
-        assert!(buffer_contains(&wide, "FINAL SATELLITE FRAME"));
-        assert!(buffer_contains(&wide, "> FINAL SATELLITE FRAME"));
-        assert!(!buffer_contains(&wide, "> AFTER-ACTION REPORT"));
+        let small = render(120, 40, &state);
+        assert!(buffer_contains(&small, "AFTER-ACTION REPORT"));
+        assert!(buffer_contains(&small, "FINAL SATELLITE FRAME"));
+        assert!(buffer_contains(&small, "> FINAL SATELLITE FRAME"));
+        assert!(!buffer_contains(&small, "> AFTER-ACTION REPORT"));
 
-        let narrow = render_narrow(90, 30, &state);
-        assert!(buffer_contains(&narrow, "FINAL SATELLITE FRAME"));
-        assert!(buffer_contains(&narrow, "> FINAL SATELLITE FRAME"));
-        assert!(!buffer_contains(&narrow, "AFTER-ACTION REPORT"));
+        let large = render(150, 50, &state);
+        assert!(buffer_contains(&large, "FINAL SATELLITE FRAME"));
+        assert!(buffer_contains(&large, "> FINAL SATELLITE FRAME"));
 
-        let wide_again = render(120, 40, &state);
-        assert!(buffer_contains(&wide_again, "AFTER-ACTION REPORT"));
-        assert!(buffer_contains(&wide_again, "FINAL SATELLITE FRAME"));
+        let small_again = render(120, 40, &state);
+        assert!(buffer_contains(&small_again, "AFTER-ACTION REPORT"));
+        assert!(buffer_contains(&small_again, "FINAL SATELLITE FRAME"));
         assert_eq!(state.focused_pane(View::AfterAction), PaneId::FinalFrame);
     }
 
     #[test]
-    fn the_recovery_hint_stays_visible_at_the_two_pane_minimum_geometry() {
+    fn the_recovery_hint_stays_visible_at_the_minimum_geometry() {
         use super::super::editor::EditOp;
         use super::super::state::Msg;
 
@@ -3653,14 +3406,13 @@ end
         state.apply(Msg::RequestDeploy);
         assert_eq!(state.current_view(), View::AfterAction);
 
-        // The two-pane report pane is only 40% wide at the narrowest
-        // two-pane geometry the console supports (`TWO_PANE_MIN_COLUMNS` x
-        // `MIN_ROWS`) — narrow enough that both the headline and the
-        // diagnostic detail wrap across several lines. Before the recovery
-        // hint was pinned to a fixed last row (`draw_pane_with_pinned_action`
-        // via `draw_after_action_report_pane`), that wrapped content could
-        // push it below the pane's visible rows.
-        let terminal = render_narrow(TWO_PANE_MIN_COLUMNS, MIN_ROWS, &state);
+        // The two-pane report pane is only 40% wide at the console's
+        // supported minimum geometry — narrow enough that both the headline
+        // and the diagnostic detail wrap across several lines. Before the
+        // recovery hint was pinned to a fixed last row
+        // (`draw_pane_with_pinned_action` via `draw_after_action_report_pane`),
+        // that wrapped content could push it below the pane's visible rows.
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
         assert!(buffer_contains(&terminal, "AFTER-ACTION REPORT"));
         // The full headline text wraps across rows at this width, and a
         // wrapped line is no longer contiguous once the buffer is flattened
@@ -3697,8 +3449,8 @@ end
         let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
 
         // At the console's supported minimum geometry, the outcome and
-        // incompletion must be visible without pressing `F8` to swap panes
-        // (`docs/TUI_DESIGN.md` §5, "Responsive behavior").
+        // incompletion must be visible in the Report pane by default,
+        // without pressing `F8` (`docs/TUI_DESIGN.md` §5).
         assert!(buffer_contains(&terminal, "AFTER-ACTION REPORT"));
         assert!(buffer_contains(
             &terminal,
@@ -3708,27 +3460,14 @@ end
     }
 
     #[test]
-    fn the_full_failure_closure_fits_at_the_two_pane_minimum_geometry() {
+    fn the_full_failure_closure_fits_at_the_minimum_geometry() {
         let state = budget_exhausted_state();
 
-        // At `TWO_PANE_MIN_COLUMNS` x `MIN_ROWS` — a 40%-wide, unscrollable
-        // report pane — the outcome hierarchy's higher-priority items
-        // (outcome, completion) and the separately-pinned `F4` recovery hint
-        // must survive even if lower-priority evidence/closing-paragraph
-        // body text is clipped from the bottom of the unscrollable
-        // `Paragraph` (`docs/TUI_DESIGN.md` §5: "Higher items must never be
-        // sacrificed for lower ones when space is constrained"). At a wider
-        // two-pane width (120), there's room for the full closure —
-        // evidence and the closing paragraph too — same as success.
-        let terminal = render_narrow(TWO_PANE_MIN_COLUMNS, MIN_ROWS, &state);
-        assert!(buffer_contains(
-            &terminal,
-            "OPERATION FAILED: budget exhausted"
-        ));
-        assert!(buffer_contains(&terminal, "FIRST CONTACT INCOMPLETE"));
-        assert!(buffer_contains(&terminal, "F4  revise the controller"));
-
-        let terminal = render(120, MIN_ROWS, &state);
+        // At the console's supported minimum geometry, the 40%-wide report
+        // pane has room for the full closure — outcome, completion,
+        // evidence, the closing paragraph, and the separately-pinned `F4`
+        // recovery hint — same as success.
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
         assert!(buffer_contains(
             &terminal,
             "OPERATION FAILED: budget exhausted"
@@ -3857,26 +3596,17 @@ end
     }
 
     #[test]
-    fn the_full_success_closure_reaches_the_bottom_at_the_two_pane_minimum_geometry() {
+    fn the_full_success_closure_reaches_the_bottom_at_the_minimum_geometry() {
         use super::super::state::Msg;
 
         let mut state = succeeded_state();
 
-        // `TWO_PANE_MIN_COLUMNS` x `MIN_ROWS` is the narrowest geometry that
-        // still takes the two-pane layout — the report pane's 40%-width
-        // inner area is the tightest fit the full success report has to
-        // survive. A wider two-pane width (120) leaves the same inner
-        // *height* but a wider pane, so it's checked too. `TWO_PANE_MIN_
-        // COLUMNS` (100) is now below the console's enforced minimum
-        // (#126), so that case is driven through `render_narrow` to keep
-        // exercising the retained narrow-layout rendering directly.
-        for width in [TWO_PANE_MIN_COLUMNS, 120] {
-            let render_fn = if width >= MIN_COLUMNS {
-                render
-            } else {
-                render_narrow
-            };
-            let terminal = render_fn(width, MIN_ROWS, &state);
+        // `MIN_COLUMNS` is the narrowest supported width, giving the report
+        // pane's 40%-width inner area the tightest fit the full success
+        // report has to survive. A wider width (150) leaves the same inner
+        // *height* but a wider pane, so it's checked too.
+        for width in [MIN_COLUMNS, 150] {
+            let terminal = render(width, MIN_ROWS, &state);
             assert!(
                 buffer_contains(&terminal, "FOOTHOLD ESTABLISHED"),
                 "headline clipped at {width}x{MIN_ROWS}"
@@ -3898,7 +3628,7 @@ end
             for _ in 0..max_scroll {
                 state.apply(Msg::ScrollDown);
             }
-            let scrolled = render_fn(width, MIN_ROWS, &state);
+            let scrolled = render(width, MIN_ROWS, &state);
             assert!(
                 buffer_contains(&scrolled, "network."),
                 "closing paragraph unreachable even scrolled to the bottom at {width}x{MIN_ROWS}"
@@ -4030,7 +3760,7 @@ end
         assert_eq!(state.current_view(), View::AfterAction);
         assert!(state.operation().unwrap().finished);
 
-        let terminal = render_narrow(TWO_PANE_MIN_COLUMNS, MIN_ROWS, &state);
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
         assert!(buffer_contains(&terminal, "OPERATION FAILED"));
         assert!(buffer_contains(&terminal, "FIRST CONTACT INCOMPLETE"));
         assert!(buffer_contains(&terminal, "F4  revise the controller"));
@@ -4056,45 +3786,45 @@ end
     }
 
     #[test]
-    fn narrow_operation_view_shows_one_pane_until_f8_moves_focus() {
+    fn operation_view_shows_both_panes_and_moves_the_focus_marker_with_f8() {
         use super::super::state::Msg;
 
         let mut state = working_state();
         state.apply(Msg::RequestDeploy);
-        let terminal = render_narrow(90, 30, &state);
+        let terminal = render(120, 40, &state);
         assert!(buffer_contains(&terminal, "COMPROMISED SATELLITE FEED"));
-        assert!(!buffer_contains(&terminal, "OPERATION TELEMETRY"));
+        assert!(buffer_contains(&terminal, "OPERATION TELEMETRY"));
         assert!(buffer_contains(&terminal, "> COMPROMISED SATELLITE FEED"));
+        assert!(!buffer_contains(&terminal, "> OPERATION TELEMETRY"));
 
         state.apply(Msg::FocusNextPane);
-        let terminal = render_narrow(90, 30, &state);
+        let terminal = render(120, 40, &state);
         assert!(buffer_contains(&terminal, "OPERATION TELEMETRY"));
-        assert!(!buffer_contains(&terminal, "COMPROMISED SATELLITE FEED"));
+        assert!(buffer_contains(&terminal, "COMPROMISED SATELLITE FEED"));
         assert!(buffer_contains(&terminal, "> OPERATION TELEMETRY"));
     }
 
     #[test]
-    fn operation_focus_survives_a_wide_to_narrow_to_wide_resize() {
+    fn operation_focus_survives_a_resize() {
         use super::super::state::Msg;
 
         let mut state = working_state();
         state.apply(Msg::RequestDeploy);
         state.apply(Msg::FocusNextPane); // move focus to telemetry
 
-        let wide = render(120, 40, &state);
-        assert!(buffer_contains(&wide, "COMPROMISED SATELLITE FEED"));
-        assert!(buffer_contains(&wide, "OPERATION TELEMETRY"));
-        assert!(buffer_contains(&wide, "> OPERATION TELEMETRY"));
-        assert!(!buffer_contains(&wide, "> COMPROMISED SATELLITE FEED"));
+        let small = render(120, 40, &state);
+        assert!(buffer_contains(&small, "COMPROMISED SATELLITE FEED"));
+        assert!(buffer_contains(&small, "OPERATION TELEMETRY"));
+        assert!(buffer_contains(&small, "> OPERATION TELEMETRY"));
+        assert!(!buffer_contains(&small, "> COMPROMISED SATELLITE FEED"));
 
-        let narrow = render_narrow(90, 30, &state);
-        assert!(buffer_contains(&narrow, "OPERATION TELEMETRY"));
-        assert!(buffer_contains(&narrow, "> OPERATION TELEMETRY"));
-        assert!(!buffer_contains(&narrow, "COMPROMISED SATELLITE FEED"));
+        let large = render(150, 50, &state);
+        assert!(buffer_contains(&large, "OPERATION TELEMETRY"));
+        assert!(buffer_contains(&large, "> OPERATION TELEMETRY"));
 
-        let wide_again = render(120, 40, &state);
-        assert!(buffer_contains(&wide_again, "COMPROMISED SATELLITE FEED"));
-        assert!(buffer_contains(&wide_again, "OPERATION TELEMETRY"));
+        let small_again = render(120, 40, &state);
+        assert!(buffer_contains(&small_again, "COMPROMISED SATELLITE FEED"));
+        assert!(buffer_contains(&small_again, "OPERATION TELEMETRY"));
         assert_eq!(
             state.focused_pane(View::Operation),
             PaneId::OperationTelemetry
