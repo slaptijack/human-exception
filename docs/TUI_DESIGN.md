@@ -469,7 +469,9 @@ representation or other implementation detail beyond what
 - Line numbers are visible but are not part of the source and are never
   included in a copy or in what is validated/deployed.
 - The cursor is visibly rendered whenever Controller source is the focused
-  pane.
+  pane, with the same accepted, temporary exception as the viewport
+  guarantee above; see [Known limitation: wide-glyph cursor
+  visibility](#known-limitation-wide-glyph-cursor-visibility).
 - **Selection:** `Shift`+any cursor-movement key (arrows, `Home`/`End`,
   `PageUp`/`PageDown`, word movement) extends a selection from an anchor at
   the point `Shift` was first held; `Ctrl+A` selects the whole document.
@@ -499,26 +501,39 @@ representation or other implementation detail beyond what
 #### Known limitation: wide-glyph cursor visibility
 
 `ratatui-code-editor` 0.0.6 (adopted in #90) has one accepted, temporary gap
-in the viewport guarantee stated above: `Editor::focus()` decides whether to
-scroll horizontally by comparing the cursor's raw *character-count* column
-against the viewport's *terminal-cell* width, while `get_visible_cursor()`
-correctly computes the visual, grapheme-width-based column. For a line
-composed of wide (double-width) glyphs that is long enough to require
-horizontal scrolling, character count under-counts the true visual width, so
-`focus()` can conclude no scroll is needed while the cursor is actually
-off-screen.
+in both the viewport guarantee and the visible-cursor requirement stated
+above: `Editor::focus()` decides whether to scroll horizontally by comparing
+the cursor's raw *character-count* column against the viewport's
+*terminal-cell* width, while `get_visible_cursor()` correctly computes the
+visual, grapheme-width-based column. Whenever a line's visual width exceeds
+its character count by enough to cross the viewport boundary, character
+count under-counts the true visual width, so `focus()` can conclude no scroll
+is needed while the cursor is actually off-screen and unrendered.
 
-**Affected:** cursor-visibility-follows-viewport for a line that (a) is long
-enough to require horizontal scrolling and (b) is made of wide (double-width)
-glyphs.
+**Affected:** cursor-visibility-follows-viewport (and, as a direct
+consequence, the visible-cursor requirement) for any line long enough to
+require horizontal scrolling where wide (double-width) glyphs push the
+line's true visual width past the viewport's terminal-cell width — whether
+the line is made entirely of wide glyphs or is a mix of ordinary and wide
+characters (for example, a Lua comment or string containing CJK text after
+enough ASCII columns).
 
-**Unaffected:** everything else the viewport guarantee covers — ordinary
-ASCII long lines, short wide-glyph content that fits without scrolling,
-combining marks, and exact Unicode source round-tripping. These are proven
-in `tests/editor_foundation_contract.rs` by
-`unicode_combining_marks_and_wide_glyphs_round_trip`,
-`combining_marks_keep_cursor_visible_after_focus`, and
-`exact_source_round_trip_including_empty_and_trailing_newline`.
+**Unaffected:**
+
+- ordinary ASCII long lines requiring horizontal scroll — cursor stays
+  visible (`long_line_scrolling_follows_the_cursor`,
+  `tests/editor_foundation_contract.rs`);
+- short wide-glyph or combining-mark content that fits within the viewport
+  without scrolling — cursor stays visible
+  (`combining_marks_keep_cursor_visible_after_focus`,
+  `tests/editor_foundation_contract.rs`;
+  `unicode_wide_glyphs_and_combining_marks_render_with_a_visible_cursor`,
+  `src/console/ui.rs`, at the Controller level);
+- exact Unicode source *content* round-tripping, independent of cursor
+  visibility or line width
+  (`unicode_combining_marks_and_wide_glyphs_round_trip`,
+  `exact_source_round_trip_including_empty_and_trailing_newline`,
+  `tests/editor_foundation_contract.rs`).
 
 This is accepted for #88/#90 and tracked upstream, independent of and not
 blocking Human Exception:
@@ -528,10 +543,10 @@ confirms the root cause, and
 proposes a fix. The characterization test
 `known_limitation_wide_glyph_line_can_leave_cursor_offscreen_after_focus` in
 `tests/editor_foundation_contract.rs` asserts today's actual (broken)
-behavior on purpose, so it fails conspicuously — rather than silently — the
-moment an upstream fix changes that behavior. No Human Exception-specific
-cursor or viewport workaround should be added for this without a separate
-decision.
+behavior on purpose — including that `focus()` leaves `get_offset_x()` at
+`0` — so it fails conspicuously, rather than silently, the moment an
+upstream fix changes that behavior. No Human Exception-specific cursor or
+viewport workaround should be added for this without a separate decision.
 
 Once an upstream release contains the fix, resolve this by:
 
@@ -539,8 +554,10 @@ Once an upstream release contains the fix, resolve this by:
 2. updating `ratatui-code-editor` to the released version containing the fix;
 3. replacing the characterization assertion in
    `known_limitation_wide_glyph_line_can_leave_cursor_offscreen_after_focus`
-   with the desired visible-cursor regression assertion (`is_some()` — the
-   test's own comment flags this);
+   with the desired visible-cursor regression assertion — both the
+   `get_offset_x() == 0` assertion (a fixed `focus()` must scroll, so this
+   offset will become nonzero) and the `is_none()` assertion (which becomes
+   `is_some()`) need to change together, not just the latter;
 4. verifying the behavior through both the foundation contract test and
    Controller `TestBackend` coverage;
 5. removing this subsection from this document.
