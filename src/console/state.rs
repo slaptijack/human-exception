@@ -173,6 +173,15 @@ pub struct OperationView<'a> {
     /// re-infer meaning from `records`/`error` itself. `None` until the
     /// operation is finished.
     pub conclusion: Option<OperationConclusion<'a>>,
+    /// The Review Run chronology: `INITIAL`, then one point per completed
+    /// tick, then an optional terminal-failure boundary. Empty when deploy
+    /// itself failed (no execution ever started) — see [`review_points`].
+    ///
+    /// Not yet read by any rendering code: Review Run's selection and
+    /// presentation are #133/#134, which land on top of this projection.
+    /// Exercised directly by this module's tests until then.
+    #[allow(dead_code)]
+    pub review_points: Vec<ReviewPoint<'a>>,
 }
 
 /// How a finished deployment ended, derived once from the authoritative
@@ -227,6 +236,122 @@ fn observe_snapshot(live: &LiveOperation) -> OperationSnapshot {
         tick: observation.tick,
         budget_remaining: observation.budget_remaining,
     }
+}
+
+/// One inspectable boundary in a finished (or in-progress) operation's
+/// chronology for Review Run: `INITIAL`, then one point per completed
+/// tick, then an optional terminal-failure boundary. Derived only from the
+/// immutable run record ([`Operation`]'s `initial_snapshot`/`records`/
+/// `error`) — never by replaying the simulation or consulting hidden
+/// scenario state (`docs/VISION.md`; epic #130's "Review chronology
+/// contract").
+// Not yet read by any rendering code: Review Run's selection and
+// presentation are #133/#134, which land on top of this projection.
+// Exercised directly by this module's tests until then.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct ReviewPoint<'a> {
+    pub kind: ReviewPointKind<'a>,
+    /// The satellite-safe state at this point: drone position, budget, map
+    /// dimensions, and the full cumulative discovered set.
+    pub snapshot: OperationSnapshot,
+    /// Tiles present in `snapshot.discovered` but absent from the
+    /// preceding review point's. Empty for [`ReviewPointKind::Initial`]
+    /// (nothing precedes it, so nothing is "new" relative to a prior
+    /// point) and for [`ReviewPointKind::TerminalFailure`] (its snapshot
+    /// is identical to the point before it, since no tick executed to
+    /// discover anything new).
+    pub newly_discovered: Vec<crate::simulation::DiscoveredTile>,
+}
+
+/// What kind of chronology boundary a [`ReviewPoint`] represents.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub enum ReviewPointKind<'a> {
+    /// The legitimate pre-tick observation: no action, no events.
+    Initial,
+    /// A completed tick: action, resulting position/budget, outcome, and
+    /// structured events/costs all come from the borrowed [`TickRecord`].
+    Tick(&'a TickRecord),
+    /// A controller/runtime failure after the deployment started but with
+    /// no further valid `TickRecord` — the run's terminal `error` while
+    /// `initial_snapshot` is `Some`. Carries the last known position and
+    /// budget (the preceding point's snapshot) rather than a fabricated
+    /// tick.
+    TerminalFailure(&'a ControllerError),
+}
+
+/// The [`crate::simulation::DiscoveredTile`]s in `next` whose position
+/// isn't present in `previous`. Both `discovered` lists are cumulative and
+/// only ever grow (`Simulation::observe`), so a position-keyed set
+/// difference is exact regardless of ordering.
+fn discovered_since(
+    previous: &[crate::simulation::DiscoveredTile],
+    next: &[crate::simulation::DiscoveredTile],
+) -> Vec<crate::simulation::DiscoveredTile> {
+    let known: std::collections::HashSet<_> = previous.iter().map(|tile| tile.position).collect();
+    next.iter()
+        .filter(|tile| !known.contains(&tile.position))
+        .copied()
+        .collect()
+}
+
+/// Projects an operation's immutable facts into its ordered Review Run
+/// chronology. Returns an empty `Vec` when `initial_snapshot` is `None`:
+/// deploy itself failed before any execution started, so there is no
+/// reviewable point at all — not even a fabricated `INITIAL` — matching
+/// the deploy-failure boundary already carried by [`OperationView::error`].
+fn review_points<'a>(
+    initial_snapshot: &'a Option<OperationSnapshot>,
+    records: &'a [TickRecord],
+    error: Option<&'a ControllerError>,
+) -> Vec<ReviewPoint<'a>> {
+    let Some(initial) = initial_snapshot else {
+        return Vec::new();
+    };
+
+    let mut points = vec![ReviewPoint {
+        kind: ReviewPointKind::Initial,
+        snapshot: initial.clone(),
+        newly_discovered: Vec::new(),
+    }];
+
+    let mut previous_discovered = &initial.discovered;
+    let mut last_snapshot = initial.clone();
+    for record in records {
+        let newly_discovered = discovered_since(previous_discovered, &record.discovered);
+        let snapshot = OperationSnapshot {
+            drone_position: record.drone_position,
+            map_width: record.map_width,
+            map_height: record.map_height,
+            discovered: record.discovered.clone(),
+            tick: record.tick,
+            budget_remaining: record.budget_remaining,
+        };
+        points.push(ReviewPoint {
+            kind: ReviewPointKind::Tick(record),
+            snapshot: snapshot.clone(),
+            newly_discovered,
+        });
+        previous_discovered = &record.discovered;
+        last_snapshot = snapshot;
+    }
+
+    // `error` is only ever set at deploy time (which forces
+    // `initial_snapshot` to `None`, already handled above) or when
+    // `LiveOperation::step` itself returns `Err` — never alongside a
+    // `Succeeded`/`BudgetExhausted` `TickOutcome`, which instead arrives as
+    // `Ok(record)` and is pushed onto `records` above. So this can never
+    // duplicate a real terminal tick.
+    if let Some(err) = error {
+        points.push(ReviewPoint {
+            kind: ReviewPointKind::TerminalFailure(err),
+            snapshot: last_snapshot,
+            newly_discovered: Vec::new(),
+        });
+    }
+
+    points
 }
 
 /// A player intent, decoupled from whatever key produced it.
@@ -497,6 +622,7 @@ impl AppState {
                 starting_budget,
                 current,
                 conclusion,
+                review_points: review_points(&op.initial_snapshot, &op.records, op.error.as_ref()),
             }
         })
     }
@@ -1876,6 +2002,209 @@ mod tests {
             state.operation.as_ref().unwrap().initial_snapshot,
             Some(initial),
             "the pre-tick snapshot must not change once later ticks complete"
+        );
+    }
+
+    /// Two valid moves (both onto floor tiles adjacent to the fixed First
+    /// Contact drone start), then an unconditional error — used to exercise
+    /// a controller failure that happens after some ticks have already
+    /// completed, as opposed to `ALWAYS_ERRORS`'s first-tick failure.
+    const FAILS_AFTER_TWO_TICKS: &str = r#"
+        local step = 0
+        function on_tick(observation)
+            step = step + 1
+            if step > 2 then error('boom') end
+            return "north"
+        end
+    "#;
+
+    #[test]
+    fn a_successful_run_projects_initial_and_every_completed_tick_with_no_failure_point() {
+        let mut state = working_state();
+        state.controller = Some(ControllerDocument::new(ROUTE_TO_UPLINK));
+        state.apply(Msg::RequestDeploy);
+
+        while state.advance_running_operation() {}
+
+        let op = state.operation().unwrap();
+        assert!(op.finished);
+        assert_eq!(op.review_points.len(), 1 + op.records.len());
+        assert!(matches!(op.review_points[0].kind, ReviewPointKind::Initial));
+        for (point, record) in op.review_points[1..].iter().zip(op.records.iter()) {
+            match point.kind {
+                ReviewPointKind::Tick(r) => assert_eq!(r, record),
+                other => panic!("expected a Tick point, got {other:?}"),
+            }
+        }
+        let last = op.review_points.last().unwrap();
+        match last.kind {
+            ReviewPointKind::Tick(record) => {
+                assert_eq!(record.outcome, crate::simulation::TickOutcome::Succeeded)
+            }
+            other => panic!("expected the terminal point to be a completed tick, got {other:?}"),
+        }
+
+        // First Contact's route to the uplink used here also passes through
+        // its one hazard tile, so this run doubles as hazard-entry coverage:
+        // the corresponding review point's structured events include it.
+        assert!(op.review_points.iter().any(|point| {
+            matches!(point.kind, ReviewPointKind::Tick(record)
+            if record.events.iter().any(|event| matches!(
+                event,
+                crate::simulation::SimEvent::HazardEntered { .. }
+            )))
+        }));
+    }
+
+    #[test]
+    fn a_budget_exhausted_run_projects_no_synthetic_terminal_point() {
+        let mut state = working_state();
+        state.controller = Some(ControllerDocument::new(ALWAYS_WAITS));
+        state.apply(Msg::RequestDeploy);
+
+        while state.advance_running_operation() {}
+
+        let op = state.operation().unwrap();
+        assert!(op.finished);
+        assert_eq!(op.review_points.len(), 1 + op.records.len());
+        let last = op.review_points.last().unwrap();
+        match last.kind {
+            ReviewPointKind::Tick(record) => assert_eq!(
+                record.outcome,
+                crate::simulation::TickOutcome::Failed(
+                    crate::simulation::FailureReason::BudgetExhausted
+                )
+            ),
+            other => panic!("expected the terminal point to be a completed tick, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_controller_failure_after_completed_ticks_appends_a_terminal_failure_point() {
+        let mut state = working_state();
+        state.controller = Some(ControllerDocument::new(FAILS_AFTER_TWO_TICKS));
+        state.apply(Msg::RequestDeploy);
+
+        while state.advance_running_operation() {}
+
+        let op = state.operation().unwrap();
+        assert!(op.finished);
+        assert_eq!(
+            op.records.len(),
+            2,
+            "exactly two ticks completed before the failure"
+        );
+        assert_eq!(
+            op.review_points.len(),
+            1 + 2 + 1,
+            "INITIAL, two ticks, one failure point"
+        );
+
+        let last_tick = op.review_points[2].clone();
+        match last_tick.kind {
+            ReviewPointKind::Tick(record) => assert_eq!(record, &op.records[1]),
+            other => panic!("expected a Tick point, got {other:?}"),
+        }
+
+        let failure = op.review_points.last().unwrap();
+        assert!(matches!(
+            failure.kind,
+            ReviewPointKind::TerminalFailure(ControllerError::CallbackFailed(_))
+        ));
+        assert_eq!(
+            failure.snapshot, last_tick.snapshot,
+            "the failure boundary carries the last completed tick's position and budget, \
+             not a fabricated one"
+        );
+        assert!(
+            failure.newly_discovered.is_empty(),
+            "no tick executed for the failure boundary, so nothing new was discovered"
+        );
+    }
+
+    #[test]
+    fn a_first_tick_controller_failure_appends_a_terminal_failure_point_without_a_tick() {
+        let mut state = working_state();
+        state.controller = Some(ControllerDocument::new(ALWAYS_ERRORS));
+        state.apply(Msg::RequestDeploy);
+
+        state.advance_running_operation();
+
+        let op = state.operation().unwrap();
+        assert!(op.finished);
+        assert!(
+            op.records.is_empty(),
+            "no tick completed before the failure"
+        );
+        assert_eq!(
+            op.review_points.len(),
+            2,
+            "INITIAL and the failure point only"
+        );
+        assert!(matches!(op.review_points[0].kind, ReviewPointKind::Initial));
+        assert!(matches!(
+            op.review_points[1].kind,
+            ReviewPointKind::TerminalFailure(ControllerError::CallbackFailed(_))
+        ));
+        assert_eq!(
+            op.review_points[1].snapshot, op.review_points[0].snapshot,
+            "with no completed tick, the failure boundary carries the initial snapshot"
+        );
+    }
+
+    #[test]
+    fn a_deploy_time_load_failure_has_no_reviewable_points() {
+        let mut state = working_state();
+        state.controller = Some(ControllerDocument::new("function on_tick("));
+
+        state.apply(Msg::RequestDeploy);
+
+        let op = state.operation().expect("deploy always records an outcome");
+        assert!(op.finished);
+        assert!(
+            op.review_points.is_empty(),
+            "a deployment that never started execution has no fabricated INITIAL, \
+             tick, or satellite snapshot"
+        );
+        assert!(
+            op.error.is_some(),
+            "the deploy failure is still surfaced via `error`"
+        );
+    }
+
+    #[test]
+    fn discovery_deltas_reflect_only_positions_new_since_the_preceding_review_point() {
+        let mut state = working_state();
+        state.controller = Some(ControllerDocument::new(ROUTE_TO_UPLINK));
+        state.apply(Msg::RequestDeploy);
+
+        while state.advance_running_operation() {}
+
+        let op = state.operation().unwrap();
+        assert!(
+            op.review_points[0].newly_discovered.is_empty(),
+            "INITIAL has no preceding point to be new relative to"
+        );
+        let mut previously_known: std::collections::HashSet<_> = op.review_points[0]
+            .snapshot
+            .discovered
+            .iter()
+            .map(|tile| tile.position)
+            .collect();
+        let mut saw_new_tile = false;
+        for point in &op.review_points[1..] {
+            for tile in &point.newly_discovered {
+                assert!(
+                    !previously_known.contains(&tile.position),
+                    "a tile reported as newly discovered must not have been known before"
+                );
+                saw_new_tile = true;
+            }
+            previously_known.extend(point.snapshot.discovered.iter().map(|tile| tile.position));
+        }
+        assert!(
+            saw_new_tile,
+            "this route should discover at least one new tile after INITIAL"
         );
     }
 
