@@ -274,10 +274,9 @@ fn is_repeat_untrustworthy(code: KeyCode) -> bool {
 ///
 /// A resize always needs a redraw, since the geometry warning (or the shell
 /// it replaces) depends on the frame size, not on any key event. Pane focus
-/// itself is untouched by a resize — narrow-layout visibility is derived
-/// from `AppState::focused_pane`, so the already-focused pane is simply
-/// what narrow mode shows, with no separate state to reset here (`docs/
-/// TUI_DESIGN.md`, "Focus persistence").
+/// itself is untouched by a resize — it's `AppState::focused_pane`, with no
+/// separate state to reset here (`docs/TUI_DESIGN.md`, "Focus
+/// persistence").
 fn should_redraw(
     state: &mut AppState,
     event: Event,
@@ -869,17 +868,10 @@ mod tests {
     }
 
     #[test]
-    fn paste_while_reference_pane_focused_in_wide_layout_is_ignored() {
-        // Paste-routing follows focus, not screen visibility: this pane
-        // remains the reference pane whether or not the second pane happens
-        // to be visible at the current width. A narrow single-pane
-        // counterpart to this test previously lived here, but #126 raised
-        // the console's enforced minimum geometry to 120x40 — above
-        // `ui::TWO_PANE_MIN_COLUMNS`, the width below which the console
-        // collapses to a single visible pane — so that narrow layout is no
-        // longer reachable through the app's own minimum-geometry gate;
-        // removing its rendering code entirely is a separate, directly
-        // dependent follow-up issue, not this one.
+    fn paste_while_reference_pane_focused_is_ignored() {
+        // Paste-routing follows focus: input reaching the Lua reference
+        // pane (read-only) is ignored regardless of which pane the source
+        // is rendered alongside.
         let (state, _) = render(
             120,
             40,
@@ -898,7 +890,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_characters_while_reference_pane_focused_in_wide_layout_are_ignored() {
+    fn typed_characters_while_reference_pane_focused_are_ignored() {
         let (state, _) = render(
             120,
             40,

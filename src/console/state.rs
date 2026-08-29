@@ -216,10 +216,9 @@ pub enum Msg {
     /// or commits to working the current dossier's opportunity in Target.
     Activate,
     /// `F8`: moves focus to the next pane in the current view, wrapping
-    /// around. A no-op in single-pane views (Help). At 80-99 columns this
-    /// also changes which pane renders (`ui::draw_*`'s narrow-layout
-    /// branches derive visibility from `AppState::focused_pane`); at 100+
-    /// columns both panes stay visible and only focus itself moves.
+    /// around. A no-op in single-pane views (Help). Both panes of a
+    /// two-pane view always render; this only moves which one carries the
+    /// focus marker and input ownership.
     FocusNextPane,
     /// Scrolls the current view's focused pane up/down by one row, if it's
     /// scrollable (see `event::scroll_focus_matches`). Applies to whichever
