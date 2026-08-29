@@ -135,6 +135,15 @@ struct Operation {
     /// One entry per completed tick, oldest first, for telemetry and the
     /// satellite feed's latest discovered state.
     records: Vec<TickRecord>,
+    /// The legitimate pre-tick observation, captured once immediately after
+    /// `LiveOperation::deploy` succeeded and before any tick executed.
+    /// `None` only when deploy itself failed and no simulation ever
+    /// started — see `Operation::live`'s doc comment. Unlike `records`,
+    /// this never changes once set: Review Run must be able to tell what
+    /// was already known at deployment from what tick 1 discovered
+    /// (`docs/TUI_DESIGN.md`, "After Action is an operation state, not a
+    /// disconnected popup").
+    initial_snapshot: Option<OperationSnapshot>,
     paused: bool,
     error: Option<ControllerError>,
 }
@@ -195,6 +204,7 @@ pub struct OperationConclusion<'a> {
 /// ever built from [`crate::simulation::Simulation::observe`]'s already
 /// hidden-information-safe `Observation`, or the fixed scenario's public
 /// starting facts, never from raw scenario/map internals.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OperationSnapshot {
     pub drone_position: crate::simulation::Position,
     pub map_width: i32,
@@ -202,6 +212,21 @@ pub struct OperationSnapshot {
     pub discovered: Vec<crate::simulation::DiscoveredTile>,
     pub tick: u32,
     pub budget_remaining: u32,
+}
+
+/// A hidden-information-safe snapshot of `live`'s current state, built only
+/// from [`LiveOperation::observe`] and the fixed scenario's public map
+/// dimensions — never from raw scenario/simulation internals.
+fn observe_snapshot(live: &LiveOperation) -> OperationSnapshot {
+    let observation = live.observe();
+    OperationSnapshot {
+        drone_position: observation.drone_position,
+        map_width: live.map_width(),
+        map_height: live.map_height(),
+        discovered: observation.discovered,
+        tick: observation.tick,
+        budget_remaining: observation.budget_remaining,
+    }
 }
 
 /// A player intent, decoupled from whatever key produced it.
@@ -396,7 +421,7 @@ impl AppState {
     pub fn operation(&self) -> Option<OperationView<'_>> {
         self.operation.as_ref().map(|op| {
             let starting_budget = crate::simulation::Scenario::first_contact().starting_budget();
-            let current = match (op.records.last(), op.live.as_ref()) {
+            let current = match (op.records.last(), &op.initial_snapshot) {
                 (Some(record), _) => OperationSnapshot {
                     drone_position: record.drone_position,
                     map_width: record.map_width,
@@ -405,17 +430,10 @@ impl AppState {
                     tick: record.tick,
                     budget_remaining: record.budget_remaining,
                 },
-                (None, Some(live)) => {
-                    let observation = live.observe();
-                    OperationSnapshot {
-                        drone_position: observation.drone_position,
-                        map_width: live.map_width(),
-                        map_height: live.map_height(),
-                        discovered: observation.discovered,
-                        tick: observation.tick,
-                        budget_remaining: observation.budget_remaining,
-                    }
-                }
+                // No tick has completed yet: the deploy-time snapshot is
+                // still the current state, since the fixed scenario never
+                // changes on its own between deploy and the first tick.
+                (None, Some(initial)) => initial.clone(),
                 // Deploy itself failed: nothing was ever observed, so fall
                 // back to the fixed scenario's public starting facts rather
                 // than any raw map/scenario internals.
@@ -785,19 +803,28 @@ impl AppState {
         self.next_run_id += 1;
 
         let operation = match LiveOperation::deploy(&source) {
-            Ok(live) => Operation {
-                live: Some(live),
-                deployed_source: source,
-                run_id,
-                records: Vec::new(),
-                paused: false,
-                error: None,
-            },
+            Ok(live) => {
+                // Captured now, before any tick executes, so later ticks
+                // (and the eventual terminal outcome) can never retroactively
+                // change what the player is shown as "already known at
+                // deployment" — see `Operation::initial_snapshot`.
+                let initial_snapshot = Some(observe_snapshot(&live));
+                Operation {
+                    live: Some(live),
+                    deployed_source: source,
+                    run_id,
+                    records: Vec::new(),
+                    initial_snapshot,
+                    paused: false,
+                    error: None,
+                }
+            }
             Err(err) => Operation {
                 live: None,
                 deployed_source: source,
                 run_id,
                 records: Vec::new(),
+                initial_snapshot: None,
                 paused: false,
                 error: Some(err),
             },
@@ -1788,6 +1815,68 @@ mod tests {
         // No live run was ever shown — go straight to the After Action
         // report rather than parking on an empty Operation view.
         assert_eq!(state.current_view(), View::AfterAction);
+    }
+
+    #[test]
+    fn deploying_a_script_with_a_load_error_has_no_initial_snapshot() {
+        let mut state = working_state();
+        state.controller = Some(ControllerDocument::new("function on_tick("));
+
+        state.apply(Msg::RequestDeploy);
+
+        let op = state
+            .operation
+            .as_ref()
+            .expect("deploy always records an outcome");
+        assert!(
+            op.initial_snapshot.is_none(),
+            "a deployment that never started a live simulation must not \
+             invent an initial execution snapshot"
+        );
+    }
+
+    #[test]
+    fn deploying_the_starter_controller_retains_a_pretick_initial_snapshot() {
+        let mut state = working_state();
+
+        state.apply(Msg::RequestDeploy);
+
+        let starting_budget = crate::simulation::Scenario::first_contact().starting_budget();
+        let op = state.operation.as_ref().expect("a deploy just happened");
+        let initial = op
+            .initial_snapshot
+            .as_ref()
+            .expect("a successfully loaded deployment retains a pre-tick snapshot");
+        let scenario = crate::simulation::Scenario::first_contact();
+        assert_eq!(initial.tick, 0);
+        assert_eq!(initial.budget_remaining, starting_budget);
+        assert_eq!(initial.map_width, scenario.map().width());
+        assert_eq!(initial.map_height, scenario.map().height());
+        assert_eq!(initial.drone_position, scenario.drone_start());
+    }
+
+    #[test]
+    fn the_initial_snapshot_stays_unchanged_after_ticks_complete() {
+        let mut state = working_state();
+        state.controller = Some(ControllerDocument::new(ROUTE_TO_UPLINK));
+
+        state.apply(Msg::RequestDeploy);
+        let initial = state
+            .operation
+            .as_ref()
+            .expect("a deploy just happened")
+            .initial_snapshot
+            .clone()
+            .expect("a successful deploy retains a pre-tick snapshot");
+
+        while state.advance_running_operation() {}
+
+        assert!(state.operation().unwrap().finished);
+        assert_eq!(
+            state.operation.as_ref().unwrap().initial_snapshot,
+            Some(initial),
+            "the pre-tick snapshot must not change once later ticks complete"
+        );
     }
 
     #[test]
