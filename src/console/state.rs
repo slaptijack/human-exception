@@ -177,11 +177,18 @@ pub struct OperationView<'a> {
     /// tick, then an optional terminal-failure boundary. Empty when deploy
     /// itself failed (no execution ever started) — see [`review_points`].
     ///
-    /// Not yet read by any rendering code: Review Run's selection and
-    /// presentation are #133/#134, which land on top of this projection.
-    /// Exercised directly by this module's tests until then.
+    /// Not yet read by any rendering code: Review Run's presentation is
+    /// #134, which lands on top of this projection and `review_selected`
+    /// below. Exercised directly by this module's tests until then.
     #[allow(dead_code)]
     pub review_points: Vec<ReviewPoint<'a>>,
+    /// The player's currently selected review point, as an index into
+    /// `review_points` above. `None` before the run has finished, or if
+    /// `review_points` is empty (a deploy-time load failure never produced
+    /// a reviewable point). Re-clamped here against the freshly computed
+    /// `review_points`, so a stale stored index can never be read as valid.
+    #[allow(dead_code)]
+    pub review_selected: Option<usize>,
 }
 
 /// How a finished deployment ended, derived once from the authoritative
@@ -460,6 +467,16 @@ pub struct AppState {
     /// views whose focus has actually diverged from the default get an
     /// entry.
     focused_panes: HashMap<View, PaneId>,
+    /// Index into the current operation's `review_points`, or `None` before
+    /// the run has finished or if it produced no reviewable point at all (a
+    /// deploy-time load failure). Lives independently of `Operation` — see
+    /// its own doc comment — so Review Run can track "what the player is
+    /// looking at" without the immutable run record ever needing to
+    /// represent navigation. Set once a run finishes ([`AppState::deploy`],
+    /// [`AppState::step_operation`]) and otherwise left untouched, so
+    /// navigating away and back, and opening/dismissing Help, preserve it
+    /// for free; a fresh deploy always resets it.
+    review_selected: Option<usize>,
     should_quit: bool,
 }
 
@@ -480,6 +497,7 @@ impl Default for AppState {
             redeploy_confirmation_pending: false,
             scroll_offsets: HashMap::new(),
             focused_panes: HashMap::new(),
+            review_selected: None,
             should_quit: false,
         }
     }
@@ -539,6 +557,18 @@ impl AppState {
 
     pub fn redeploy_confirmation_pending(&self) -> bool {
         self.redeploy_confirmation_pending
+    }
+
+    /// The raw stored review-selection index, independent of any particular
+    /// operation's `review_points`. Prefer `OperationView::review_selected`
+    /// (from [`AppState::operation`]) where a clamped, definitely-valid
+    /// index is needed.
+    ///
+    /// Not yet read by any rendering code — see `OperationView::review_selected`'s
+    /// doc comment — but exercised directly by this module's tests.
+    #[allow(dead_code)]
+    pub fn review_selected(&self) -> Option<usize> {
+        self.review_selected
     }
 
     /// A read-only view of the current deployment, if the player has
@@ -612,6 +642,8 @@ impl AppState {
                     run_id: op.run_id,
                 }
             });
+            let review_points = review_points(&op.initial_snapshot, &op.records, op.error.as_ref());
+            let review_selected = self.review_selected.filter(|&i| i < review_points.len());
             OperationView {
                 deployed_source: &op.deployed_source,
                 run_id: op.run_id,
@@ -622,7 +654,8 @@ impl AppState {
                 starting_budget,
                 current,
                 conclusion,
-                review_points: review_points(&op.initial_snapshot, &op.records, op.error.as_ref()),
+                review_points,
+                review_selected,
             }
         })
     }
@@ -966,6 +999,25 @@ impl AppState {
         } else {
             View::Operation
         };
+        // A fresh deploy always starts a new review chronology: any prior
+        // run's selection must not leak into this one (a live run has
+        // nothing reviewable yet; a synchronous load failure jumps straight
+        // to its own terminal boundary, mirroring the AfterAction focus
+        // reset just below).
+        self.review_selected = if operation.is_finished() {
+            review_points(
+                &operation.initial_snapshot,
+                &operation.records,
+                operation.error.as_ref(),
+            )
+            .len()
+            .checked_sub(1)
+        } else {
+            None
+        };
+        if operation.is_finished() {
+            self.set_focused_pane(View::Operation, PaneId::OperationTelemetry);
+        }
         self.operation = Some(operation);
         // A fresh report may be shorter than whatever was last scrolled to,
         // so start it at the top rather than carrying over an offset from a
@@ -1002,9 +1054,19 @@ impl AppState {
         // happen from anywhere else). Hand off to After Action so the
         // player moves from "watching it run" to "learning what happened."
         if op.is_finished() {
+            // The run's chronology is now frozen, so its terminal review
+            // point is already known — select it now, before the player
+            // has even navigated to Review Run, the same way the report
+            // focus below is set proactively rather than on first render.
+            let terminal_review_point =
+                review_points(&op.initial_snapshot, &op.records, op.error.as_ref())
+                    .len()
+                    .checked_sub(1);
             self.current_view = View::AfterAction;
             self.scroll_offsets.insert(PaneId::Report, 0);
             self.set_focused_pane(View::AfterAction, PaneId::Report);
+            self.review_selected = terminal_review_point;
+            self.set_focused_pane(View::Operation, PaneId::OperationTelemetry);
         }
         true
     }
@@ -2205,6 +2267,120 @@ mod tests {
         assert!(
             saw_new_tile,
             "this route should discover at least one new tile after INITIAL"
+        );
+    }
+
+    #[test]
+    fn a_newly_completed_run_selects_its_terminal_review_point() {
+        let mut state = working_state();
+        state.controller = Some(ControllerDocument::new(ROUTE_TO_UPLINK));
+        state.apply(Msg::RequestDeploy);
+
+        while state.advance_running_operation() {}
+
+        let op = state.operation().unwrap();
+        assert!(op.finished);
+        assert_eq!(op.review_selected, Some(op.review_points.len() - 1));
+    }
+
+    #[test]
+    fn a_controller_failure_selects_its_terminal_review_point() {
+        let mut state = working_state();
+        state.controller = Some(ControllerDocument::new(ALWAYS_ERRORS));
+        state.apply(Msg::RequestDeploy);
+
+        state.advance_running_operation();
+
+        let op = state.operation().unwrap();
+        assert!(op.finished);
+        assert_eq!(op.review_selected, Some(op.review_points.len() - 1));
+        assert!(matches!(
+            op.review_points[op.review_selected.unwrap()].kind,
+            ReviewPointKind::TerminalFailure(_)
+        ));
+    }
+
+    #[test]
+    fn a_deploy_time_load_failure_has_no_review_selection() {
+        let mut state = working_state();
+        state.controller = Some(ControllerDocument::new("function on_tick("));
+
+        state.apply(Msg::RequestDeploy);
+
+        assert_eq!(state.review_selected(), None);
+        assert_eq!(state.operation().unwrap().review_selected, None);
+    }
+
+    #[test]
+    fn navigating_away_and_back_preserves_review_selection() {
+        let mut state = working_state();
+        state.controller = Some(ControllerDocument::new(ROUTE_TO_UPLINK));
+        state.apply(Msg::RequestDeploy);
+        while state.advance_running_operation() {}
+        let selected = state.review_selected();
+
+        state.apply(Msg::Navigate(View::Controller));
+        state.apply(Msg::Navigate(View::Operation));
+
+        assert_eq!(state.review_selected(), selected);
+    }
+
+    #[test]
+    fn help_round_trip_preserves_review_selection() {
+        let mut state = working_state();
+        state.controller = Some(ControllerDocument::new(ROUTE_TO_UPLINK));
+        state.apply(Msg::RequestDeploy);
+        while state.advance_running_operation() {}
+        let selected = state.review_selected();
+
+        state.apply(Msg::OpenHelp);
+        state.apply(Msg::DismissHelp);
+
+        assert_eq!(state.review_selected(), selected);
+    }
+
+    #[test]
+    fn redeploying_resets_review_selection_for_the_new_run() {
+        let mut state = working_state();
+        state.controller = Some(ControllerDocument::new(ALWAYS_ERRORS));
+        state.apply(Msg::RequestDeploy);
+        state.advance_running_operation();
+        assert!(
+            state.review_selected().is_some(),
+            "the first run's failure has a terminal review point selected"
+        );
+
+        // `ALWAYS_ERRORS` still loads fine — only the callback itself fails
+        // once invoked — so this redeploy starts a fresh live run rather
+        // than another synchronous load failure.
+        state.apply(Msg::RequestDeploy);
+
+        assert_eq!(
+            state.review_selected(),
+            None,
+            "a fresh live deployment has nothing reviewable yet, and must not \
+             carry over the prior run's selection"
+        );
+
+        state.advance_running_operation();
+        let op = state.operation().unwrap();
+        assert!(op.finished);
+        assert_eq!(op.review_selected, Some(op.review_points.len() - 1));
+    }
+
+    #[test]
+    fn a_finished_run_focuses_the_run_inspector_pane() {
+        let mut state = working_state();
+        state.set_focused_pane(View::Operation, PaneId::Satellite);
+        state.controller = Some(ControllerDocument::new(ALWAYS_ERRORS));
+        state.apply(Msg::RequestDeploy);
+
+        state.advance_running_operation();
+
+        assert!(state.operation().unwrap().finished);
+        assert_eq!(
+            state.focused_pane(View::Operation),
+            PaneId::OperationTelemetry
         );
     }
 
