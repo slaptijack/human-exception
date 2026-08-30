@@ -6,8 +6,8 @@
 
 use super::intel::{Signal, TargetDossier, authored_signals, first_contact_dossier};
 use super::state::{
-    AppState, ConclusionKind, OperationSnapshot, OperationView, PaneId, Validation, View,
-    WorkingSet,
+    AppState, ConclusionKind, OperationSnapshot, OperationView, PaneId, ReviewPoint,
+    ReviewPointKind, Validation, View, WorkingSet,
 };
 use crate::lua_controller::{ControllerError, TickRecord};
 use crate::render::render_satellite_view;
@@ -505,17 +505,29 @@ fn draw_operation(frame: &mut Frame, area: Rect, state: &AppState) {
 
     let [left, right] =
         Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(area);
+    // Once the run is finished, this view is functioning as Review Run
+    // rather than a live view (`docs/TUI_DESIGN.md` §5, "Review Run"): both
+    // panes must describe the same selected review point, not whatever the
+    // live view was last showing.
+    let (satellite, telemetry) = if op.finished {
+        (
+            review_run_satellite_lines(&op),
+            review_run_telemetry_lines(&op),
+        )
+    } else {
+        (satellite_lines(&op.current), telemetry_lines(&op))
+    };
     draw_pane(
         frame,
         left,
         pane_title("COMPROMISED SATELLITE FEED", focused == PaneId::Satellite),
-        satellite_lines(&op.current),
+        satellite,
     );
     draw_pane(
         frame,
         right,
         pane_title("OPERATION TELEMETRY", focused == PaneId::OperationTelemetry),
-        telemetry_lines(&op),
+        telemetry,
     );
 }
 
@@ -898,6 +910,12 @@ fn satellite_lines(snapshot: &OperationSnapshot) -> Vec<Line<'static>> {
         .collect()
 }
 
+/// The live Operation telemetry pane's content. Only ever called while the
+/// run is still going (`draw_operation` switches to
+/// [`review_run_telemetry_lines`] once `op.finished`), so every branch here
+/// can assume `op.error` is `None` and the last recorded tick, if any, is
+/// still `TickOutcome::Running` — a finished operation always has either an
+/// error or a terminal `TickOutcome`, per [`super::state::Operation::is_finished`].
 fn telemetry_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from(format!("tick          {:02}", op.current.tick)),
@@ -915,48 +933,6 @@ fn telemetry_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
         Line::from(format!("controller    {}", operation_status_label(op))),
         Line::from(""),
     ];
-
-    // Once the run is over, this pane is functioning as "Review Run"
-    // (reachable via `F5` from After Action) rather than a live view — show
-    // the immutable source and revision that produced this result, not
-    // whatever the editor currently holds (`docs/TUI_DESIGN.md` §5,
-    // "Review Run displays the immutable source revision and telemetry
-    // associated with that recorded run").
-    if op.finished {
-        lines.push(Line::from(format!("deployed rev  run-{:02}", op.run_id)));
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "DEPLOYED SOURCE",
-            Style::default().add_modifier(Modifier::BOLD),
-        )));
-        lines.extend(bounded_detail_lines(op.deployed_source));
-        lines.push(Line::from(""));
-    }
-
-    if let Some(error) = op.error {
-        lines.push(Line::from(Span::styled(
-            controller_error_headline(error),
-            Style::default().add_modifier(Modifier::BOLD),
-        )));
-        lines.extend(bounded_detail_lines(&controller_error_detail(error)));
-        lines.push(Line::from(""));
-        lines.push(Line::from("F4  revise the controller"));
-        lines.push(Line::from("F6  redeploy"));
-        return lines;
-    }
-
-    if let Some(outcome) = op.records.last().map(|record| record.outcome)
-        && outcome != TickOutcome::Running
-    {
-        lines.push(Line::from(Span::styled(
-            outcome_headline(outcome),
-            Style::default().add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(""));
-        lines.push(Line::from("F4  revise the controller"));
-        lines.push(Line::from("F6  redeploy"));
-        return lines;
-    }
 
     lines.push(Line::from(Span::styled(
         "RECENT EVENTS",
@@ -979,6 +955,194 @@ fn telemetry_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
     }
 
     lines
+}
+
+/// The finished-run Review Run satellite pane's content: the selected
+/// review point's legitimate discovered snapshot, never `op.current`'s
+/// scenario-derived fallback (`docs/TUI_DESIGN.md` §5, "Review Run").
+///
+/// A deploy-time load failure produces an empty `review_points` — no tick
+/// ever executed, so there is nothing legitimate to show, and this must
+/// never fall back to manufacturing a frame from authoritative scenario
+/// state.
+fn review_run_satellite_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
+    let Some(point) = selected_review_point(op) else {
+        return vec![
+            Line::from(Span::styled(
+                "NO RECORDED SATELLITE EXECUTION STATE",
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from("Deployment failed before the drone observed anything."),
+        ];
+    };
+    satellite_lines(&point.snapshot)
+}
+
+/// The finished-run Review Run telemetry pane's content: the run identity
+/// and, for a deploy-time load failure, the failure that stopped execution
+/// before any review point existed (`docs/TUI_DESIGN.md` §5, "Review Run"),
+/// otherwise the selected review point's evidence via
+/// [`review_point_evidence_lines`].
+fn review_run_telemetry_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "REVIEW RUN",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(format!("deployed rev  run-{:02}", op.run_id)),
+    ];
+
+    let Some(point) = selected_review_point(op) else {
+        lines.push(Line::from(""));
+        if let Some(error) = op.error {
+            lines.push(Line::from(Span::styled(
+                controller_error_headline(error),
+                Style::default().add_modifier(Modifier::BOLD),
+            )));
+            lines.extend(bounded_detail_lines(&controller_error_detail(error)));
+            lines.push(Line::from(""));
+        }
+        lines.push(Line::from("F4  revise the controller"));
+        lines.push(Line::from("F6  redeploy"));
+        return lines;
+    };
+
+    lines.extend(review_point_evidence_lines(op, point));
+    lines
+}
+
+/// The currently selected [`ReviewPoint`], or `None` when `op.review_points`
+/// is empty (a deploy-time load failure never produced a reviewable point).
+/// Falls back to the chronology's terminal point if `op.review_selected`
+/// is somehow unset on a non-empty chronology — `AppState::operation`
+/// already keeps this `Some` once a run finishes with any review points at
+/// all, but this stays defensive rather than panicking on an index.
+fn selected_review_point<'a>(op: &'a OperationView<'a>) -> Option<&'a ReviewPoint<'a>> {
+    if op.review_points.is_empty() {
+        return None;
+    }
+    let index = op
+        .review_selected
+        .unwrap_or(op.review_points.len() - 1)
+        .min(op.review_points.len() - 1);
+    op.review_points.get(index)
+}
+
+/// One review point's full evidence, in the order `docs/TUI_DESIGN.md` §5
+/// documents for Review Run: run identity (pushed by the caller), point
+/// identity, the recorded action (or its truthful absence), resulting
+/// position/budget, newly discovered tiles, structured events, and —
+/// only on the point that is actually the run's terminal boundary —
+/// success/budget-exhaustion/controller-failure evidence, then the frozen
+/// deployed source. Pure and independent of `review_selected`/`AppState` so
+/// it can be exercised directly against a hand-built [`ReviewPoint`] for
+/// every [`ReviewPointKind`], including ones the player cannot navigate to
+/// yet (chronology navigation is out of this issue's scope).
+fn review_point_evidence_lines(
+    op: &OperationView<'_>,
+    point: &ReviewPoint<'_>,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(review_point_identity(op, point))];
+
+    lines.push(Line::from(match point.kind {
+        ReviewPointKind::Tick(record) => format!("action        {}", action_label(record.action)),
+        ReviewPointKind::Initial => "action        (none — pre-tick observation)".to_string(),
+        ReviewPointKind::TerminalFailure(_) => {
+            "action        (none — execution stopped)".to_string()
+        }
+    }));
+    lines.push(Line::from(format!(
+        "position      ({}, {})",
+        point.snapshot.drone_position.x, point.snapshot.drone_position.y
+    )));
+    lines.push(Line::from(format!(
+        "budget        {} / {}",
+        point.snapshot.budget_remaining, op.starting_budget
+    )));
+    lines.push(Line::from(format!(
+        "discovered    {} new tile(s)",
+        point.newly_discovered.len()
+    )));
+
+    if let ReviewPointKind::Tick(record) = point.kind {
+        let event_lines: Vec<Line<'static>> =
+            record.events.iter().filter_map(sim_event_line).collect();
+        if !event_lines.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "EVENTS",
+                Style::default().add_modifier(Modifier::BOLD),
+            )));
+            lines.extend(event_lines);
+        }
+    }
+    lines.push(Line::from(""));
+
+    match point.kind {
+        ReviewPointKind::Tick(record) if record.outcome != TickOutcome::Running => {
+            lines.push(Line::from(Span::styled(
+                outcome_headline(record.outcome),
+                Style::default().add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(""));
+        }
+        ReviewPointKind::TerminalFailure(error) => {
+            lines.push(Line::from(Span::styled(
+                controller_error_headline(error),
+                Style::default().add_modifier(Modifier::BOLD),
+            )));
+            lines.extend(bounded_detail_lines(&controller_error_detail(error)));
+            lines.push(Line::from(""));
+        }
+        _ => {}
+    }
+
+    lines.push(Line::from(Span::styled(
+        "DEPLOYED SOURCE",
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    lines.extend(bounded_detail_lines(op.deployed_source));
+    lines.push(Line::from(""));
+
+    lines.push(Line::from("F4  revise the controller"));
+    lines.push(Line::from("F6  redeploy"));
+
+    lines
+}
+
+/// A review point's boundary identity, distinguishing the legitimate
+/// pre-tick observation, a completed tick, and a controller/runtime failure
+/// boundary from each other and — for a failure — from whatever tick last
+/// completed before it (`docs/TUI_DESIGN.md` §5, "A runtime/controller
+/// failure boundary must clearly distinguish the last completed tick from
+/// the failure that stopped execution").
+fn review_point_identity(op: &OperationView<'_>, point: &ReviewPoint<'_>) -> String {
+    match point.kind {
+        ReviewPointKind::Initial => "INITIAL".to_string(),
+        ReviewPointKind::Tick(record) => format!("TICK {:02}", record.tick),
+        ReviewPointKind::TerminalFailure(_) => match op.records.last() {
+            Some(last) => format!("FAILURE (after tick {:02})", last.tick),
+            None => "FAILURE (before any tick completed)".to_string(),
+        },
+    }
+}
+
+/// A single structured event's evidence line, or `None` for an event kind
+/// already represented by the terminal outcome headline
+/// ([`outcome_headline`]) rather than duplicated here.
+fn sim_event_line(event: &SimEvent) -> Option<Line<'static>> {
+    match event {
+        SimEvent::ActionCost { action, amount } => Some(Line::from(format!(
+            "  {} — cost {}",
+            action_label(*action),
+            amount
+        ))),
+        SimEvent::HazardEntered { amount, .. } => {
+            Some(Line::from(format!("  hazard entered — cost {amount}")))
+        }
+        SimEvent::OperationSucceeded | SimEvent::BudgetExhausted => None,
+    }
 }
 
 fn operation_event_line(record: &TickRecord) -> Line<'static> {
@@ -3340,6 +3504,113 @@ end
     }
 
     #[test]
+    fn a_zero_tick_deploy_failure_shows_no_recorded_satellite_state_in_review_run() {
+        use super::super::editor::EditOp;
+        use super::super::state::Msg;
+
+        let mut state = working_state();
+        for _ in 0..500 {
+            state.apply(Msg::EditController(EditOp::Backspace));
+        }
+        state.apply(Msg::EditController(EditOp::Insert('(')));
+        state.apply(Msg::RequestDeploy);
+        assert_eq!(state.current_view(), View::AfterAction);
+        assert!(state.operation().unwrap().review_points.is_empty());
+
+        // Review Run (`F5`/`Navigate(Operation)`) must never manufacture a
+        // satellite frame from authoritative scenario state just because
+        // deploy itself failed before any tick ever executed
+        // (`docs/TUI_DESIGN.md` §5, "Review Run").
+        state.apply(Msg::Navigate(View::Operation));
+        for (width, height) in [(120, 40), (150, 50)] {
+            let terminal = render(width, height, &state);
+            assert!(buffer_contains(
+                &terminal,
+                "NO RECORDED SATELLITE EXECUTION STATE"
+            ));
+            assert!(!buffer_contains(&terminal, "legend: D drone"));
+            assert!(buffer_contains(
+                &terminal,
+                "OPERATION FAILED: controller script error"
+            ));
+            assert!(buffer_contains(&terminal, "F4  revise the controller"));
+            assert!(buffer_contains(&terminal, "F6  redeploy"));
+        }
+    }
+
+    /// Types `source` into a working, undeployed state, deploys it, and
+    /// steps every tick to whatever conclusion it deterministically reaches —
+    /// the shared plumbing behind [`succeeded_state`]/[`budget_exhausted_state`]
+    /// and this module's mid-run-controller-failure fixture.
+    fn deployed_and_run_to_completion(source: &str) -> AppState {
+        use super::super::editor::EditOp;
+        use super::super::state::Msg;
+
+        let mut state = working_state();
+        for _ in 0..500 {
+            state.apply(Msg::EditController(EditOp::Backspace));
+        }
+        state.apply(Msg::PasteController(source.to_string()));
+        state.apply(Msg::RequestDeploy);
+
+        for _ in 0..20 {
+            if state.operation().is_some_and(|op| op.finished) {
+                break;
+            }
+            state.advance_running_operation();
+        }
+        assert!(
+            state.operation().unwrap().finished,
+            "should have finished well within 20 ticks"
+        );
+        state
+    }
+
+    /// Two valid moves onto floor tiles adjacent to the fixed First Contact
+    /// drone start, then an unconditional error — mirrors `console::state`'s
+    /// own `FAILS_AFTER_TWO_TICKS` fixture, exercising a controller failure
+    /// that happens after some ticks have already completed.
+    const FAILS_AFTER_TWO_TICKS: &str = r#"
+        local step = 0
+        function on_tick(observation)
+            step = step + 1
+            if step > 2 then error('boom') end
+            return "north"
+        end
+    "#;
+
+    #[test]
+    fn a_mid_run_controller_failure_shows_a_distinct_failure_boundary_in_review_run() {
+        let mut state = deployed_and_run_to_completion(FAILS_AFTER_TWO_TICKS);
+        assert_eq!(
+            state.operation().unwrap().records.len(),
+            2,
+            "exactly two ticks should have completed before the failure"
+        );
+
+        state.apply(super::super::state::Msg::Navigate(View::Operation));
+        for (width, height) in [(120, 40), (150, 50)] {
+            let terminal = render(width, height, &state);
+            // The failure boundary is clearly distinguished from the last
+            // completed tick, names which tick preceded it, and carries no
+            // fabricated action of its own (`docs/TUI_DESIGN.md` §5, "A
+            // runtime/controller failure boundary must clearly distinguish
+            // the last completed tick from the failure that stopped
+            // execution").
+            assert!(buffer_contains(&terminal, "FAILURE (after tick 02)"));
+            assert!(buffer_contains(
+                &terminal,
+                "action        (none — execution stopped)"
+            ));
+            assert!(buffer_contains(
+                &terminal,
+                "OPERATION FAILED: controller runtime error"
+            ));
+            assert!(buffer_contains(&terminal, "boom"));
+        }
+    }
+
+    #[test]
     fn a_synchronous_deploy_failure_defaults_to_the_report_pane() {
         use super::super::editor::EditOp;
         use super::super::state::Msg;
@@ -3845,5 +4116,177 @@ end
             &terminal,
             "The active run will be abandoned."
         ));
+    }
+
+    /// A minimal but representative [`OperationView`] for exercising
+    /// [`review_point_evidence_lines`] directly against hand-built
+    /// [`ReviewPoint`] values — including [`ReviewPointKind`]s the player
+    /// cannot yet navigate to via any `Msg` (chronology navigation is out
+    /// of this issue's scope, so `review_selected` is always the run's
+    /// terminal point in practice).
+    fn test_operation_view<'a>(records: &'a [TickRecord]) -> OperationView<'a> {
+        OperationView {
+            deployed_source: "function on_tick(observation) return \"wait\" end",
+            run_id: 1,
+            records,
+            paused: false,
+            finished: true,
+            error: None,
+            starting_budget: 15,
+            current: OperationSnapshot {
+                drone_position: crate::simulation::Position { x: 0, y: 0 },
+                map_width: 5,
+                map_height: 5,
+                discovered: Vec::new(),
+                tick: 0,
+                budget_remaining: 15,
+            },
+            conclusion: None,
+            review_points: Vec::new(),
+            review_selected: None,
+        }
+    }
+
+    fn test_snapshot(tick: u32, budget_remaining: u32) -> OperationSnapshot {
+        OperationSnapshot {
+            drone_position: crate::simulation::Position { x: 1, y: 2 },
+            map_width: 5,
+            map_height: 5,
+            discovered: Vec::new(),
+            tick,
+            budget_remaining,
+        }
+    }
+
+    fn lines_text(lines: &[Line<'static>]) -> String {
+        lines
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn review_point_evidence_lines_for_initial_shows_no_invented_action() {
+        let op = test_operation_view(&[]);
+        let point = ReviewPoint {
+            kind: ReviewPointKind::Initial,
+            snapshot: test_snapshot(0, 15),
+            newly_discovered: Vec::new(),
+        };
+        let text = lines_text(&review_point_evidence_lines(&op, &point));
+
+        assert!(text.contains("INITIAL"));
+        assert!(text.contains("action        (none — pre-tick observation)"));
+        assert!(text.contains("position      (1, 2)"));
+        assert!(text.contains("budget        15 / 15"));
+        assert!(text.contains("discovered    0 new tile(s)"));
+        // No terminal outcome/failure evidence belongs on a pre-tick point.
+        assert!(!text.contains("FOOTHOLD ESTABLISHED"));
+        assert!(!text.contains("OPERATION FAILED"));
+    }
+
+    #[test]
+    fn review_point_evidence_lines_for_a_non_terminal_tick_shows_its_action_and_events_but_no_outcome()
+     {
+        let record = TickRecord {
+            tick: 1,
+            drone_position: crate::simulation::Position { x: 1, y: 2 },
+            action: Action::Scan,
+            budget_remaining: 14,
+            outcome: TickOutcome::Running,
+            events: vec![SimEvent::ActionCost {
+                action: Action::Scan,
+                amount: 1,
+            }],
+            map_width: 5,
+            map_height: 5,
+            discovered: Vec::new(),
+        };
+        let op = test_operation_view(&[]);
+        let point = ReviewPoint {
+            kind: ReviewPointKind::Tick(&record),
+            snapshot: test_snapshot(1, 14),
+            newly_discovered: Vec::new(),
+        };
+        let text = lines_text(&review_point_evidence_lines(&op, &point));
+
+        assert!(text.contains("TICK 01"));
+        assert!(text.contains("action        scanned"));
+        assert!(text.contains("scanned — cost 1"));
+        // A tick still in progress is not the run's terminal boundary, so
+        // no outcome headline belongs here.
+        assert!(!text.contains("FOOTHOLD ESTABLISHED"));
+        assert!(!text.contains("OPERATION FAILED"));
+    }
+
+    #[test]
+    fn review_point_evidence_lines_for_the_terminal_tick_shows_the_outcome_headline() {
+        let record = TickRecord {
+            tick: 3,
+            drone_position: crate::simulation::Position { x: 4, y: 4 },
+            action: Action::MoveNorth,
+            budget_remaining: 10,
+            outcome: TickOutcome::Succeeded,
+            events: vec![SimEvent::OperationSucceeded],
+            map_width: 5,
+            map_height: 5,
+            discovered: Vec::new(),
+        };
+        let op = test_operation_view(&[]);
+        let point = ReviewPoint {
+            kind: ReviewPointKind::Tick(&record),
+            snapshot: test_snapshot(3, 10),
+            newly_discovered: Vec::new(),
+        };
+        let text = lines_text(&review_point_evidence_lines(&op, &point));
+
+        assert!(text.contains("TICK 03"));
+        assert!(text.contains("action        moved north"));
+        assert!(text.contains("FOOTHOLD ESTABLISHED"));
+        // `OperationSucceeded` is represented by the headline, not
+        // duplicated as its own structured event line.
+        assert!(!text.contains("EVENTS"));
+    }
+
+    #[test]
+    fn review_point_evidence_lines_for_a_terminal_failure_after_ticks_names_the_last_tick_without_a_fabricated_action()
+     {
+        let completed = [TickRecord {
+            tick: 2,
+            drone_position: crate::simulation::Position { x: 1, y: 1 },
+            action: Action::MoveEast,
+            budget_remaining: 13,
+            outcome: TickOutcome::Running,
+            events: Vec::new(),
+            map_width: 5,
+            map_height: 5,
+            discovered: Vec::new(),
+        }];
+        let op = test_operation_view(&completed);
+        let point = ReviewPoint {
+            kind: ReviewPointKind::TerminalFailure(&ControllerError::MissingCallback),
+            snapshot: test_snapshot(2, 13),
+            newly_discovered: Vec::new(),
+        };
+        let text = lines_text(&review_point_evidence_lines(&op, &point));
+
+        assert!(text.contains("FAILURE (after tick 02)"));
+        assert!(text.contains("action        (none — execution stopped)"));
+        assert!(text.contains("OPERATION FAILED: controller script error"));
+    }
+
+    #[test]
+    fn review_point_evidence_lines_for_a_first_tick_failure_names_no_preceding_tick() {
+        let op = test_operation_view(&[]);
+        let point = ReviewPoint {
+            kind: ReviewPointKind::TerminalFailure(&ControllerError::MissingCallback),
+            snapshot: test_snapshot(0, 15),
+            newly_discovered: Vec::new(),
+        };
+        let text = lines_text(&review_point_evidence_lines(&op, &point));
+
+        assert!(text.contains("FAILURE (before any tick completed)"));
+        assert!(text.contains("action        (none — execution stopped)"));
     }
 }
