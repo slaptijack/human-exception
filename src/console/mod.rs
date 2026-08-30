@@ -415,6 +415,20 @@ fn should_redraw(
             if undersized && !is_quit_related {
                 return false;
             }
+            // `event::map` has no access to rendered geometry, so it always
+            // emits `0` as a placeholder page count for these two variants
+            // (see `Msg::SelectReviewPointPageBackward`'s doc comment) —
+            // filled in here with the real visible-row count, the one place
+            // that has both the message and the current frame size.
+            let msg = match msg {
+                Msg::SelectReviewPointPageBackward(_) => Msg::SelectReviewPointPageBackward(
+                    ui::review_chronology_visible_rows(state, frame_size.0, frame_size.1),
+                ),
+                Msg::SelectReviewPointPageForward(_) => Msg::SelectReviewPointPageForward(
+                    ui::review_chronology_visible_rows(state, frame_size.0, frame_size.1),
+                ),
+                other => other,
+            };
             let is_pane_scroll = matches!(msg, Msg::ScrollUp | Msg::ScrollDown);
             state.apply(msg);
             if is_pane_scroll {
@@ -1486,6 +1500,57 @@ mod tests {
         assert!(state.operation().unwrap().finished);
         assert!(buffer_contains(&terminal, "AFTER-ACTION REPORT"));
         assert!(buffer_contains(&terminal, "FOOTHOLD ESTABLISHED"));
+    }
+
+    #[test]
+    fn review_run_page_down_moves_by_the_real_visible_chronology_page_size() {
+        // `event::map` itself has no access to frame geometry, so it emits
+        // `Msg::SelectReviewPointPageForward(0)` as a placeholder — this
+        // exercises the full pipeline through `should_redraw`, confirming
+        // it's rewritten with the real `ui::review_chronology_visible_rows`
+        // count for this frame size before `apply` runs, not left at `0`.
+        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
+        events.extend(clear_and_type(ROUTE_TO_UPLINK));
+        events.push(press(KeyCode::F(6)));
+        events.push(press(KeyCode::Char(' '))); // pause
+        events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
+        events.push(press(KeyCode::F(5))); // Review Run — already focused on
+        // the run inspector pane, since finishing the run focuses it
+        events.push(press(KeyCode::Home)); // jump to the first review point
+
+        let mut state = AppState::new();
+        let mut last_transition_press: TransitionKeyDebounce = None;
+        for event in &events {
+            should_redraw(
+                &mut state,
+                event.clone(),
+                (120, 40),
+                &mut last_transition_press,
+            );
+        }
+        assert_eq!(state.review_selected(), Some(0));
+
+        // The page size depends on the currently selected point's evidence
+        // (`ui::review_chronology_visible_rows`'s doc comment), so it must
+        // be read here — right after `Home`, before `PageDown` — matching
+        // what `should_redraw` itself will compute for that same keypress.
+        let page = ui::review_chronology_visible_rows(&state, 120, 40);
+        assert!(page > 0);
+        let last = state.operation().unwrap().review_points.len() - 1;
+
+        should_redraw(
+            &mut state,
+            press(KeyCode::PageDown),
+            (120, 40),
+            &mut last_transition_press,
+        );
+
+        assert_eq!(
+            state.review_selected(),
+            Some(page.min(last)),
+            "PageDown from the first point should land exactly `page` points \
+             forward, not stay at the placeholder `0` `event::map` emits"
+        );
     }
 
     #[test]

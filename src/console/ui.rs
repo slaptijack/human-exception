@@ -510,9 +510,13 @@ fn draw_operation(frame: &mut Frame, area: Rect, state: &AppState) {
     // panes must describe the same selected review point, not whatever the
     // live view was last showing.
     let (satellite, telemetry) = if op.finished {
+        let frame_size = frame.area();
         (
             review_run_satellite_lines(&op),
-            review_run_telemetry_lines(&op),
+            review_run_telemetry_lines(
+                &op,
+                review_chronology_visible_rows(state, frame_size.width, frame_size.height),
+            ),
         )
     } else {
         (satellite_lines(&op.current), telemetry_lines(&op))
@@ -982,9 +986,15 @@ fn review_run_satellite_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
 /// The finished-run Review Run telemetry pane's content: the run identity
 /// and, for a deploy-time load failure, the failure that stopped execution
 /// before any review point existed (`docs/TUI_DESIGN.md` §5, "Review Run"),
-/// otherwise the selected review point's evidence via
-/// [`review_point_evidence_lines`].
-fn review_run_telemetry_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
+/// otherwise the chronology index ([`review_chronology_lines`]) followed by
+/// the selected review point's evidence via [`review_point_evidence_lines`].
+/// `chronology_visible_rows` comes from [`review_chronology_visible_rows`]
+/// at the real frame size — passed in rather than recomputed here so a test
+/// exercising this function directly can pin an exact window.
+fn review_run_telemetry_lines(
+    op: &OperationView<'_>,
+    chronology_visible_rows: usize,
+) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from(Span::styled(
             "REVIEW RUN",
@@ -1008,6 +1018,11 @@ fn review_run_telemetry_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
         return lines;
     };
 
+    let chronology = review_chronology_lines(op, chronology_visible_rows);
+    if !chronology.is_empty() {
+        lines.extend(chronology);
+        lines.push(Line::from(""));
+    }
     lines.extend(review_point_evidence_lines(op, point));
     lines
 }
@@ -1503,6 +1518,154 @@ pub(crate) fn after_action_max_scroll(
     content_rows.saturating_sub(content_height.saturating_sub(pinned_action_row) as usize) as u16
 }
 
+/// The Review Run telemetry pane's content dimensions below its two fixed
+/// header rows ("REVIEW RUN" / "deployed rev run-NN"), matching the exact
+/// geometry [`draw_operation`] renders with — the same role
+/// [`after_action_report_inner_dimensions`] plays for After Action. Reused
+/// by both the render path and `console::mod`'s dispatch loop (which only
+/// has the raw frame size, not a rendered [`Rect`]) so the chronology
+/// index's visible-row count can never drift between the two.
+fn review_chronology_inner_dimensions(frame_width: u16, frame_height: u16) -> (u16, u16) {
+    if frame_width < MIN_COLUMNS || frame_height < MIN_ROWS {
+        return (0, 0);
+    }
+    const HEADER_AND_FOOTER_HEIGHT: u16 = 6; // draw()'s two Length(3) rows
+    const BORDER_INSET: u16 = 2; // the telemetry pane's own Block::borders(ALL)
+    const REVIEW_RUN_HEADER_ROWS: u16 = 2; // "REVIEW RUN" + "deployed rev run-NN"
+    let body_height = frame_height.saturating_sub(HEADER_AND_FOOTER_HEIGHT);
+
+    let [_, right] = Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .areas(Rect::new(0, 0, frame_width, body_height));
+
+    (
+        right.width.saturating_sub(BORDER_INSET),
+        body_height
+            .saturating_sub(BORDER_INSET)
+            .saturating_sub(REVIEW_RUN_HEADER_ROWS),
+    )
+}
+
+/// How many chronology rows the Review Run index can show at once at this
+/// frame size, without pushing the selected point's evidence — the pane's
+/// primary content (`docs/TUI_DESIGN.md` §5, "Review Run") — past the
+/// bottom of the pane. The telemetry pane never scrolls, so this measures
+/// the evidence's actual *wrapped* row count at the pane's real content
+/// width (not its logical line count: a single long line, e.g. a Lua error
+/// message, can wrap across several rendered rows) and gives the
+/// chronology only whatever rows are left over, `0` if none are. This is
+/// also the amount `PageUp`/`PageDown` move the selection by
+/// (`Msg::SelectReviewPointPageBackward`/`PageForward`) — the player pages
+/// exactly one screenful of the index they can currently see.
+///
+/// Deliberately keyed off the *currently selected* point's evidence rather
+/// than a fixed budget: evidence length varies by point (a controller
+/// failure's diagnostic detail is longer than a plain completed tick's),
+/// and a fixed reservation sized for the common case can silently overflow
+/// for a longer one, clipping content off the bottom with no scroll to
+/// recover it.
+pub(crate) fn review_chronology_visible_rows(
+    state: &AppState,
+    frame_width: u16,
+    frame_height: u16,
+) -> usize {
+    let Some(op) = state.operation() else {
+        return 0;
+    };
+    let Some(point) = selected_review_point(&op) else {
+        return 0;
+    };
+    let (content_width, content_height) =
+        review_chronology_inner_dimensions(frame_width, frame_height);
+    const SEPARATOR_ROWS: u16 = 1; // the blank line between the index and the evidence
+    let evidence_rows =
+        wrapped_row_count(&review_point_evidence_lines(&op, point), content_width) as u16;
+    content_height
+        .saturating_sub(evidence_rows)
+        .saturating_sub(SEPARATOR_ROWS) as usize
+}
+
+/// The first review point index the chronology index should render at
+/// `visible_rows` tall so that `selected` stays visible, without storing
+/// any independent viewport/scroll state (`docs/VISION.md`'s epic #130:
+/// "derive the viewport behavior from the selected point rather than
+/// adding a second independently authoritative selection"). Purely a
+/// function of `(selected, total, visible_rows)`: the chronology is split
+/// into fixed `visible_rows`-sized pages and whichever page contains
+/// `selected` is shown, so this lines up with how `PageUp`/`PageDown`
+/// themselves move — clamped so the window never runs past the end of a
+/// short chronology.
+fn chronology_window_start(selected: usize, total: usize, visible_rows: usize) -> usize {
+    if visible_rows == 0 || total <= visible_rows {
+        return 0;
+    }
+    let page_start = (selected / visible_rows) * visible_rows;
+    page_start.min(total - visible_rows)
+}
+
+/// One compact chronology-index label per review point — `INITIAL`,
+/// `TICK 01`, `FAILURE (after tick 02)` — via [`review_point_identity`],
+/// with a short suffix tag for a completed tick that entered a hazard,
+/// succeeded, or exhausted the budget. Reuses the same event/outcome
+/// matching [`operation_event_line`]/[`sim_event_line`] already do rather
+/// than duplicating hazard/outcome detection.
+fn review_chronology_row_label(op: &OperationView<'_>, point: &ReviewPoint<'_>) -> String {
+    let mut label = review_point_identity(op, point);
+    if let ReviewPointKind::Tick(record) = point.kind {
+        if record
+            .events
+            .iter()
+            .any(|event| matches!(event, SimEvent::HazardEntered { .. }))
+        {
+            label.push_str(" [HAZARD]");
+        }
+        if record.outcome == TickOutcome::Succeeded {
+            label.push_str(" [SUCCESS]");
+        }
+        if record
+            .events
+            .iter()
+            .any(|event| matches!(event, SimEvent::BudgetExhausted))
+        {
+            label.push_str(" [BUDGET EXHAUSTED]");
+        }
+    }
+    label
+}
+
+/// The Review Run chronology index: one row per review point, windowed to
+/// `visible_rows` around the selected point ([`chronology_window_start`]),
+/// with the selected row marked the same `"> "` cursor + bold convention
+/// [`signal_list_lines`] uses for Signals' own selection. Empty when
+/// `op.review_points` is empty (a deploy-time load failure never produced
+/// a reviewable point, so there's nothing to index).
+fn review_chronology_lines(op: &OperationView<'_>, visible_rows: usize) -> Vec<Line<'static>> {
+    if op.review_points.is_empty() || visible_rows == 0 {
+        return Vec::new();
+    }
+    let last = op.review_points.len() - 1;
+    let selected = op.review_selected.unwrap_or(last).min(last);
+    let start = chronology_window_start(selected, op.review_points.len(), visible_rows);
+    let end = (start + visible_rows).min(op.review_points.len());
+
+    op.review_points[start..end]
+        .iter()
+        .enumerate()
+        .map(|(offset, point)| {
+            let index = start + offset;
+            let cursor = if index == selected { "> " } else { "  " };
+            let style = if index == selected {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            Line::from(Span::styled(
+                format!("{cursor}{}", review_chronology_row_label(op, point)),
+                style,
+            ))
+        })
+        .collect()
+}
+
 fn draw_help(frame: &mut Frame, area: Rect, state: &AppState) {
     // Help has exactly one `PaneId` and `F8` is a no-op here, so
     // `focus_movement_available` is always `false` for it — the marker
@@ -1631,7 +1794,7 @@ fn help_lines(state: &AppState) -> Vec<Line<'static>> {
         "This view",
         Style::default().add_modifier(Modifier::BOLD),
     ))];
-    lines.extend(view_specific_help(context_view));
+    lines.extend(view_specific_help(state, context_view));
     lines.push(Line::from(""));
 
     lines.push(Line::from(Span::styled(
@@ -1829,7 +1992,7 @@ fn help_lines(state: &AppState) -> Vec<Line<'static>> {
     lines
 }
 
-fn view_specific_help(view: View) -> Vec<Line<'static>> {
+fn view_specific_help(state: &AppState, view: View) -> Vec<Line<'static>> {
     match view {
         View::Signals => vec![
             Line::from("Up/Down  move the selection"),
@@ -1851,6 +2014,14 @@ fn view_specific_help(view: View) -> Vec<Line<'static>> {
             Line::from("F7          reset to the starter controller (confirms if modified)"),
             Line::from("Ctrl+V      load the source and check for on_tick, without calling it"),
             Line::from("F8          move focus between source and reference"),
+        ],
+        View::Operation if state.operation().is_some_and(|op| op.finished) => vec![
+            Line::from("This is Review Run: read-only inspection of a finished operation."),
+            Line::from("Up/Down      select the previous/next review point"),
+            Line::from("PageUp/Down  move by one visible chronology page"),
+            Line::from("Home/End     jump to the first/terminal review point"),
+            Line::from("F6           redeploy from a clean scenario state"),
+            Line::from("F8           move focus between feed and the run inspector"),
         ],
         View::Operation => vec![
             Line::from("F6     deploy the current controller (confirms if a run is active)"),
@@ -2358,6 +2529,62 @@ mod tests {
 
         assert!(!buffer_contains(&terminal, "follows automatically"));
         assert!(buffer_contains(&terminal, "F8 moves focus there"));
+    }
+
+    #[test]
+    fn help_describes_review_run_controls_not_stale_live_operation_controls() {
+        use super::super::state::Msg;
+
+        let mut state = succeeded_state();
+        state.apply(Msg::Navigate(View::Operation));
+        state.apply(Msg::OpenHelp);
+        let terminal = render(120, 40, &state);
+
+        // The live Operation controls are no-ops on a finished run and must
+        // not be advertised there; the chronology-navigation keys this
+        // issue adds are the real controls, and must be discoverable.
+        assert!(!buffer_contains(&terminal, "pause/resume the run"));
+        assert!(!buffer_contains(
+            &terminal,
+            "advance exactly one tick while paused"
+        ));
+        assert!(buffer_contains(&terminal, "Review Run"));
+        assert!(buffer_contains(
+            &terminal,
+            "select the previous/next review point"
+        ));
+        assert!(buffer_contains(
+            &terminal,
+            "move by one visible chronology page"
+        ));
+        assert!(buffer_contains(
+            &terminal,
+            "jump to the first/terminal review point"
+        ));
+    }
+
+    #[test]
+    fn help_still_advertises_live_operation_pacing_controls_while_a_run_is_active() {
+        use super::super::state::Msg;
+
+        let mut state = working_state();
+        state.apply(Msg::RequestDeploy);
+        assert!(
+            state.operation().is_some_and(|op| !op.finished),
+            "the run should still be live"
+        );
+        state.apply(Msg::OpenHelp);
+        let terminal = render(120, 40, &state);
+
+        assert!(buffer_contains(&terminal, "pause/resume the run"));
+        assert!(buffer_contains(
+            &terminal,
+            "advance exactly one tick while paused"
+        ));
+        assert!(!buffer_contains(
+            &terminal,
+            "select the previous/next review point"
+        ));
     }
 
     #[test]
@@ -3607,7 +3834,92 @@ end
                 "OPERATION FAILED: controller runtime error"
             ));
             assert!(buffer_contains(&terminal, "boom"));
+            // The chronology index prepended above the evidence must never
+            // push this pane's tail off the bottom: the deployed source
+            // (wrapped across several rows at this pane's width, unlike its
+            // short raw line count) and the recovery hints must still be
+            // fully visible in this non-scrolling pane.
+            assert!(buffer_contains(&terminal, "DEPLOYED SOURCE"));
+            assert!(buffer_contains(&terminal, "error('boom') end"));
+            assert!(buffer_contains(&terminal, "F4  revise the controller"));
+            assert!(buffer_contains(&terminal, "F6  redeploy"));
         }
+    }
+
+    #[test]
+    fn the_chronology_index_marks_the_selected_row_and_updates_with_navigation() {
+        let mut state = succeeded_state();
+        state.apply(super::super::state::Msg::Navigate(View::Operation));
+        let last = state.operation().unwrap().review_points.len() - 1;
+
+        // A newly finished run selects (and shows) its terminal point.
+        for (width, height) in [(120, 40), (150, 50)] {
+            let terminal = render(width, height, &state);
+            assert!(buffer_contains(&terminal, "> TICK 08 [SUCCESS]"));
+        }
+
+        state.apply(super::super::state::Msg::SelectFirstReviewPoint);
+        for (width, height) in [(120, 40), (150, 50)] {
+            let terminal = render(width, height, &state);
+            assert!(buffer_contains(&terminal, "> INITIAL"));
+            // The evidence block below the index swaps to match — one
+            // selected point drives both (`docs/TUI_DESIGN.md` §5).
+            assert!(buffer_contains(
+                &terminal,
+                "action        (none — pre-tick observation)"
+            ));
+        }
+
+        state.apply(super::super::state::Msg::SelectNextReviewPoint);
+        assert_eq!(state.review_selected(), Some(1));
+        let terminal = render(120, 40, &state);
+        assert!(buffer_contains(&terminal, "> TICK 01"));
+        assert!(!buffer_contains(&terminal, "> INITIAL"));
+
+        state.apply(super::super::state::Msg::SelectLastReviewPoint);
+        assert_eq!(state.review_selected(), Some(last));
+    }
+
+    #[test]
+    fn the_full_chronology_is_reachable_via_paging_and_stays_windowed_around_the_selection() {
+        let mut state = succeeded_state();
+        let last = state.operation().unwrap().review_points.len() - 1;
+        assert!(
+            last >= 6,
+            "the fixed route should complete in several ticks, giving \
+             more review points than fit in one chronology page"
+        );
+        state.apply(super::super::state::Msg::Navigate(View::Operation));
+
+        state.apply(super::super::state::Msg::SelectFirstReviewPoint);
+        let terminal = render(120, 40, &state);
+        assert!(buffer_contains(&terminal, "> INITIAL"));
+
+        // Paging forward by the real visible-row count — not a truncated
+        // "recent events only" window — reaches a point beyond the first
+        // page, and the rendered index moves with it.
+        let page = review_chronology_visible_rows(&state, 120, 40);
+        state.apply(super::super::state::Msg::SelectReviewPointPageForward(page));
+        let selected = state.review_selected().unwrap();
+        assert_eq!(selected, page.min(last));
+        assert!(
+            selected > 0,
+            "paging forward from the first point must move"
+        );
+        let op = state.operation().unwrap();
+        let label = review_point_identity(&op, &op.review_points[selected]);
+        let terminal = render(120, 40, &state);
+        assert!(
+            buffer_contains(&terminal, &format!("> {label}")),
+            "expected the paged-to point {label:?} to be selected and visible"
+        );
+
+        // End reaches the terminal point directly, and it's visible too.
+        state.apply(super::super::state::Msg::SelectLastReviewPoint);
+        let op = state.operation().unwrap();
+        let label = review_point_identity(&op, &op.review_points[last]);
+        let terminal = render(120, 40, &state);
+        assert!(buffer_contains(&terminal, &format!("> {label}")));
     }
 
     #[test]

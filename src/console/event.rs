@@ -21,6 +21,16 @@ fn scroll_focus_matches(view: View, focused_pane: PaneId) -> bool {
     }
 }
 
+/// Whether the Run Inspector pane owns chronology-navigation keys: Operation
+/// is showing and `PaneId::OperationTelemetry` (there is no separate
+/// "Run Inspector" pane id — it doubles as the live telemetry pane) is
+/// focused. Whether the run has actually finished is checked in
+/// `AppState::apply`, not here — the same split `operation_is_open` already
+/// uses for `Enter`/`Space`, which don't know finished-ness either.
+fn review_run_focus_matches(view: View, focused_pane: PaneId) -> bool {
+    view == View::Operation && focused_pane == PaneId::OperationTelemetry
+}
+
 /// Maps a key event to a player intent, given the view currently showing
 /// (several keys are context-sensitive: `F1`/`Esc` need to know whether
 /// Help is open, `Esc`/arrows/`Enter` behave differently in Signals, Target,
@@ -138,6 +148,28 @@ pub fn map(
         }
         KeyCode::Up if scroll_focus_matches(current_view, focused_pane) => Some(Msg::ScrollUp),
         KeyCode::Down if scroll_focus_matches(current_view, focused_pane) => Some(Msg::ScrollDown),
+        // Review Run chronology navigation. The page-move variants carry a
+        // placeholder `0`; `console::mod`'s dispatch loop rewrites it from
+        // real frame geometry before calling `apply` (see `Msg`'s doc
+        // comment) since this function has no access to rendered geometry.
+        KeyCode::Up if review_run_focus_matches(current_view, focused_pane) => {
+            Some(Msg::SelectPreviousReviewPoint)
+        }
+        KeyCode::Down if review_run_focus_matches(current_view, focused_pane) => {
+            Some(Msg::SelectNextReviewPoint)
+        }
+        KeyCode::PageUp if review_run_focus_matches(current_view, focused_pane) => {
+            Some(Msg::SelectReviewPointPageBackward(0))
+        }
+        KeyCode::PageDown if review_run_focus_matches(current_view, focused_pane) => {
+            Some(Msg::SelectReviewPointPageForward(0))
+        }
+        KeyCode::Home if review_run_focus_matches(current_view, focused_pane) => {
+            Some(Msg::SelectFirstReviewPoint)
+        }
+        KeyCode::End if review_run_focus_matches(current_view, focused_pane) => {
+            Some(Msg::SelectLastReviewPoint)
+        }
         // Ordinary editing keys must not silently mutate the source unless
         // it's the pane actually focused — i.e. the reference pane, not the
         // source, is focused (which `F8` can move to).
@@ -1179,6 +1211,106 @@ mod tests {
         assert_eq!(
             map_in(key(KeyCode::F(8)), View::AfterAction),
             Some(Msg::FocusNextPane)
+        );
+    }
+
+    #[test]
+    fn review_run_chronology_keys_are_gated_on_the_telemetry_pane_being_focused() {
+        for code in [
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+            KeyCode::Home,
+            KeyCode::End,
+        ] {
+            assert!(
+                map(
+                    key(code),
+                    View::Operation,
+                    false,
+                    false,
+                    false,
+                    PaneId::OperationTelemetry,
+                    true,
+                )
+                .is_some(),
+                "{code:?} should map while OperationTelemetry is focused"
+            );
+            assert_eq!(
+                map(
+                    key(code),
+                    View::Operation,
+                    false,
+                    false,
+                    false,
+                    PaneId::Satellite,
+                    true,
+                ),
+                None,
+                "{code:?} must not map while the Satellite pane is focused instead"
+            );
+        }
+    }
+
+    #[test]
+    fn review_run_chronology_keys_map_to_the_expected_messages() {
+        let map_telemetry = |code| {
+            map(
+                key(code),
+                View::Operation,
+                false,
+                false,
+                false,
+                PaneId::OperationTelemetry,
+                true,
+            )
+        };
+        assert_eq!(
+            map_telemetry(KeyCode::Up),
+            Some(Msg::SelectPreviousReviewPoint)
+        );
+        assert_eq!(
+            map_telemetry(KeyCode::Down),
+            Some(Msg::SelectNextReviewPoint)
+        );
+        assert_eq!(
+            map_telemetry(KeyCode::PageUp),
+            Some(Msg::SelectReviewPointPageBackward(0))
+        );
+        assert_eq!(
+            map_telemetry(KeyCode::PageDown),
+            Some(Msg::SelectReviewPointPageForward(0))
+        );
+        assert_eq!(
+            map_telemetry(KeyCode::Home),
+            Some(Msg::SelectFirstReviewPoint)
+        );
+        assert_eq!(
+            map_telemetry(KeyCode::End),
+            Some(Msg::SelectLastReviewPoint)
+        );
+    }
+
+    #[test]
+    fn review_run_chronology_keys_do_not_leak_into_other_views() {
+        // Signals keeps its own Up/Down selection semantics even though it
+        // also uses `PaneId::SignalsList`, distinct from
+        // `PaneId::OperationTelemetry` — this just guards against the
+        // gate ever being loosened to match on the key alone.
+        assert_eq!(
+            map_in(key(KeyCode::Up), View::Signals),
+            Some(Msg::SelectPreviousSignal)
+        );
+        assert_eq!(
+            map_in(key(KeyCode::PageUp), View::Signals),
+            None,
+            "Signals has no PageUp binding of its own"
+        );
+        assert_eq!(
+            map_in(key(KeyCode::Home), View::Signals),
+            None,
+            "Signals has no Home binding of its own"
         );
     }
 
