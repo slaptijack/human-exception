@@ -7,7 +7,7 @@
 use super::intel::{Signal, TargetDossier, authored_signals, first_contact_dossier};
 use super::state::{
     AppState, ConclusionKind, OperationSnapshot, OperationView, PaneId, ReviewPoint,
-    ReviewPointKind, Validation, View, WorkingSet,
+    ReviewPointKind, RunInspectorMode, Validation, View, WorkingSet,
 };
 use crate::lua_controller::{ControllerError, TickRecord};
 use crate::render::render_satellite_view;
@@ -516,6 +516,7 @@ fn draw_operation(frame: &mut Frame, area: Rect, state: &AppState) {
             review_run_telemetry_lines(
                 &op,
                 review_chronology_visible_rows(state, frame_size.width, frame_size.height),
+                review_source_visible_rows(state, frame_size.width, frame_size.height),
             ),
         )
     } else {
@@ -983,17 +984,25 @@ fn review_run_satellite_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
     satellite_lines(&point.snapshot)
 }
 
-/// The finished-run Review Run telemetry pane's content: the run identity
-/// and, for a deploy-time load failure, the failure that stopped execution
-/// before any review point existed (`docs/TUI_DESIGN.md` §5, "Review Run"),
-/// otherwise the chronology index ([`review_chronology_lines`]) followed by
-/// the selected review point's evidence via [`review_point_evidence_lines`].
-/// `chronology_visible_rows` comes from [`review_chronology_visible_rows`]
-/// at the real frame size — passed in rather than recomputed here so a test
+/// The finished-run Review Run telemetry pane's content: the run identity,
+/// then either mode's body (`docs/TUI_DESIGN.md` §5, "Review Run"). For a
+/// deploy-time load failure (no review point exists at all), the body is
+/// the failure that stopped execution before any point existed, regardless
+/// of mode — there is nothing to browse in either TIMELINE or SOURCE.
+/// Otherwise `RunInspectorMode::Timeline` renders the chronology index
+/// ([`review_chronology_lines`]) followed by the selected review point's
+/// evidence via [`review_point_evidence_lines`] (unchanged by SOURCE's
+/// existence), and `RunInspectorMode::Source` renders the complete,
+/// unbounded `deployed_source` via [`review_source_lines`] — deliberately
+/// not [`review_point_evidence_lines`]'s `bounded_detail_lines` excerpt.
+/// `chronology_visible_rows`/`source_visible_rows` come from
+/// [`review_chronology_visible_rows`]/[`review_source_visible_rows`] at the
+/// real frame size — passed in rather than recomputed here so a test
 /// exercising this function directly can pin an exact window.
 fn review_run_telemetry_lines(
     op: &OperationView<'_>,
     chronology_visible_rows: usize,
+    source_visible_rows: usize,
 ) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from(Span::styled(
@@ -1018,12 +1027,27 @@ fn review_run_telemetry_lines(
         return lines;
     };
 
-    let chronology = review_chronology_lines(op, chronology_visible_rows);
-    if !chronology.is_empty() {
-        lines.extend(chronology);
-        lines.push(Line::from(""));
+    match op.run_inspector_mode {
+        RunInspectorMode::Timeline => {
+            let chronology = review_chronology_lines(op, chronology_visible_rows);
+            if !chronology.is_empty() {
+                lines.extend(chronology);
+                lines.push(Line::from(""));
+            }
+            lines.extend(review_point_evidence_lines(op, point));
+        }
+        RunInspectorMode::Source => {
+            lines.push(Line::from(Span::styled(
+                "SOURCE",
+                Style::default().add_modifier(Modifier::BOLD),
+            )));
+            lines.extend(review_source_lines(
+                op,
+                op.source_scroll,
+                source_visible_rows,
+            ));
+        }
     }
-    lines.extend(review_point_evidence_lines(op, point));
     lines
 }
 
@@ -1582,6 +1606,76 @@ pub(crate) fn review_chronology_visible_rows(
     content_height
         .saturating_sub(evidence_rows)
         .saturating_sub(SEPARATOR_ROWS) as usize
+}
+
+/// How many rows of `deployed_source` the Run Inspector's `SOURCE` mode can
+/// show at once at this frame size: [`review_chronology_inner_dimensions`]'s
+/// content height, less the one extra `SOURCE` header row
+/// [`review_run_telemetry_lines`] renders in that mode (`REVIEW RUN`/
+/// `deployed rev run-NN` are already accounted for by
+/// `review_chronology_inner_dimensions` — this is TIMELINE's chronology
+/// index's counterpart for SOURCE, so `console::mod`'s dispatch loop can
+/// page `PageUp`/`PageDown` by exactly one screenful the player can see, the
+/// same way it already does for chronology paging). `0` once no finished
+/// operation exists.
+pub(crate) fn review_source_visible_rows(
+    state: &AppState,
+    frame_width: u16,
+    frame_height: u16,
+) -> usize {
+    if state.operation().is_none() {
+        return 0;
+    }
+    const SOURCE_HEADER_ROWS: u16 = 1; // the bold "SOURCE" line
+    let (_, content_height) = review_chronology_inner_dimensions(frame_width, frame_height);
+    content_height.saturating_sub(SOURCE_HEADER_ROWS) as usize
+}
+
+/// How far the Run Inspector's `source_scroll` can advance before it would
+/// scroll past the last line of `deployed_source` at this frame size — the
+/// same role [`after_action_max_scroll`] plays for the After Action report,
+/// except `deployed_source` is rendered one raw line per row (no wrapping),
+/// so this counts logical lines rather than [`wrapped_row_count`]. `0` once
+/// no finished operation exists.
+pub(crate) fn review_source_max_scroll(
+    state: &AppState,
+    frame_width: u16,
+    frame_height: u16,
+) -> u16 {
+    let Some(op) = state.operation() else {
+        return 0;
+    };
+    let visible_rows = review_source_visible_rows(state, frame_width, frame_height) as u16;
+    let total_rows = op.deployed_source.lines().count() as u16;
+    total_rows.saturating_sub(visible_rows)
+}
+
+/// The complete, unbounded content of `op.deployed_source`, one raw
+/// (unwrapped, unhighlighted) line per row, windowed to the `visible_rows`
+/// starting at `scroll` — deliberately not [`bounded_detail_lines`], which
+/// caps at [`MAX_DETAIL_LINES`] logical lines and [`MAX_DETAIL_LINE_CHARS`]
+/// characters and is reserved for TIMELINE's compact evidence excerpt.
+/// SOURCE must show the exact deployed text a player can page/jump through
+/// in full, per issue #136's explicit exclusion of syntax highlighting or
+/// other editor behavior. Re-clamps `scroll` itself against the real line
+/// count here, the same render-time backstop `draw_help`/
+/// `draw_after_action_report_pane` already apply on top of
+/// `console::should_redraw`'s post-dispatch clamp — needed because
+/// `JumpSourceEnd` stores a large sentinel for exactly this to bring back
+/// down to the true end (`Msg::JumpSourceEnd`'s doc comment).
+fn review_source_lines(
+    op: &OperationView<'_>,
+    scroll: u16,
+    visible_rows: usize,
+) -> Vec<Line<'static>> {
+    let total_rows = op.deployed_source.lines().count() as u16;
+    let scroll = scroll.min(total_rows.saturating_sub(visible_rows as u16));
+    op.deployed_source
+        .lines()
+        .skip(scroll as usize)
+        .take(visible_rows)
+        .map(|line| Line::from(line.to_string()))
+        .collect()
 }
 
 /// The first review point index the chronology index should render at
@@ -4101,6 +4195,209 @@ end
         state
     }
 
+    /// How many padding comment lines [`long_source_succeeded_state`]
+    /// prepends to [`ROUTE_TO_UPLINK`] — comfortably more than both
+    /// [`MAX_DETAIL_LINES`] (proving SOURCE mode isn't truncated the way
+    /// TIMELINE's evidence excerpt is) and any one screenful at the
+    /// console's supported minimum geometry (proving `PageDown`/`End`
+    /// actually have further content to reach).
+    const LONG_SOURCE_PADDING_LINES: usize = 200;
+
+    /// [`succeeded_state`], but with `deployed_source` padded to
+    /// [`LONG_SOURCE_PADDING_LINES`] lines ahead of the real script — Lua
+    /// tolerates leading comment lines, so the deployment still runs and
+    /// finishes exactly as [`succeeded_state`] does, just with a
+    /// deployed source long enough to exercise SOURCE mode's paging and
+    /// end-of-source navigation.
+    fn long_source_succeeded_state() -> AppState {
+        use super::super::editor::EditOp;
+        use super::super::state::Msg;
+
+        let mut padded_source = String::new();
+        for line in 0..LONG_SOURCE_PADDING_LINES {
+            padded_source.push_str(&format!("-- padding line {line:03}\n"));
+        }
+        padded_source.push_str(ROUTE_TO_UPLINK);
+
+        let mut state = working_state();
+        for _ in 0..500 {
+            state.apply(Msg::EditController(EditOp::Backspace));
+        }
+        state.apply(Msg::PasteController(padded_source));
+        state.apply(Msg::RequestDeploy);
+
+        for _ in 0..20 {
+            if state.operation().is_some_and(|op| op.finished) {
+                break;
+            }
+            state.advance_running_operation();
+        }
+        assert!(
+            state.operation().unwrap().finished,
+            "should have reached the uplink well within 20 ticks"
+        );
+        state
+    }
+
+    #[test]
+    fn tab_toggles_the_run_inspector_between_timeline_and_source() {
+        use super::super::state::Msg;
+
+        let mut state = succeeded_state();
+        state.apply(Msg::Navigate(View::Operation));
+
+        let timeline = render(120, 40, &state);
+        assert!(buffer_contains(&timeline, "> TICK 08 [SUCCESS]"));
+        assert!(buffer_contains(&timeline, "DEPLOYED SOURCE"));
+
+        state.apply(Msg::ToggleRunInspectorMode);
+        let source = render(120, 40, &state);
+        assert!(!buffer_contains(&source, "> TICK 08 [SUCCESS]"));
+        assert!(!buffer_contains(&source, "DEPLOYED SOURCE"));
+        assert!(buffer_contains(&source, "function on_tick(observation)"));
+        assert!(!buffer_contains(&source, "TICK 08"));
+
+        state.apply(Msg::ToggleRunInspectorMode);
+        let timeline_again = render(120, 40, &state);
+        assert!(buffer_contains(&timeline_again, "> TICK 08 [SUCCESS]"));
+    }
+
+    #[test]
+    fn source_mode_shows_the_complete_deployed_source_without_the_timeline_excerpts_truncation() {
+        use super::super::state::Msg;
+
+        let mut state = long_source_succeeded_state();
+        state.apply(Msg::Navigate(View::Operation));
+        state.apply(Msg::ToggleRunInspectorMode);
+
+        // The very first padding line is visible at the top of a freshly
+        // entered SOURCE view (scroll starts at 0) — nothing above it was
+        // dropped the way `bounded_detail_lines` would cap at
+        // `MAX_DETAIL_LINES` (8) logical lines.
+        let terminal = render(120, 40, &state);
+        assert!(buffer_contains(&terminal, "-- padding line 000"));
+
+        // Jumping to the end reaches the real script past all 200 padding
+        // lines — far beyond what TIMELINE's excerpt would ever show.
+        state.apply(Msg::JumpSourceEnd);
+        let terminal = render(120, 40, &state);
+        assert!(buffer_contains(&terminal, "function on_tick(observation)"));
+        assert!(buffer_contains(&terminal, "end"));
+        assert!(
+            !buffer_contains(&terminal, "-- padding line 000"),
+            "the end of a long source should have scrolled the beginning \
+             out of view"
+        );
+    }
+
+    #[test]
+    fn source_mode_navigation_moves_by_row_page_and_jumps_to_the_ends() {
+        use super::super::state::Msg;
+
+        let mut state = long_source_succeeded_state();
+        state.apply(Msg::Navigate(View::Operation));
+        state.apply(Msg::ToggleRunInspectorMode);
+
+        // `Down` scrolls by exactly one row.
+        state.apply(Msg::ScrollSourceDown);
+        let terminal = render(120, 40, &state);
+        assert!(!buffer_contains(&terminal, "-- padding line 000"));
+        assert!(buffer_contains(&terminal, "-- padding line 001"));
+
+        // `Up` moves back by one row, and never scrolls above the start.
+        state.apply(Msg::ScrollSourceUp);
+        state.apply(Msg::ScrollSourceUp);
+        let terminal = render(120, 40, &state);
+        assert!(buffer_contains(&terminal, "-- padding line 000"));
+
+        // `PageDown` advances by a full screenful, landing well past the
+        // first page rather than by a single row.
+        let page = review_source_visible_rows(&state, 120, 40);
+        assert!(page > 1, "the source pane should show more than one row");
+        state.apply(Msg::ScrollSourcePageForward(page));
+        let terminal = render(120, 40, &state);
+        assert!(buffer_contains(
+            &terminal,
+            &format!("-- padding line {page:03}")
+        ));
+        assert!(!buffer_contains(&terminal, "-- padding line 000"));
+
+        // `Home` jumps straight back to the beginning.
+        state.apply(Msg::JumpSourceStart);
+        let terminal = render(120, 40, &state);
+        assert!(buffer_contains(&terminal, "-- padding line 000"));
+
+        // `End` jumps straight to the true end, not just one more page.
+        state.apply(Msg::JumpSourceEnd);
+        let terminal = render(120, 40, &state);
+        assert!(buffer_contains(&terminal, "end"));
+    }
+
+    #[test]
+    fn source_mode_is_unaffected_by_a_later_working_controller_edit() {
+        use super::super::editor::EditOp;
+        use super::super::state::Msg;
+
+        let mut state = succeeded_state();
+        state.apply(Msg::Navigate(View::Operation));
+        state.apply(Msg::ToggleRunInspectorMode);
+        let before_edit = render(120, 40, &state);
+        assert!(buffer_contains(
+            &before_edit,
+            "function on_tick(observation)"
+        ));
+
+        // Editing the working controller after the run finished must not
+        // change what SOURCE shows for the already-recorded deployment.
+        state.apply(Msg::Navigate(View::Controller));
+        state.apply(Msg::EditController(EditOp::Insert('!')));
+        state.apply(Msg::Navigate(View::Operation));
+
+        let after_edit = render(120, 40, &state);
+        assert!(buffer_contains(
+            &after_edit,
+            "function on_tick(observation)"
+        ));
+        assert!(
+            !buffer_contains(&after_edit, "on_tick(observation)!"),
+            "SOURCE must keep showing the frozen deployed text, not the \
+             edited working document"
+        );
+
+        // Returning to Controller shows the current working document,
+        // including the edit — not the deployed source SOURCE was just
+        // showing.
+        state.apply(Msg::Navigate(View::Controller));
+        let controller_view = render(120, 40, &state);
+        assert!(buffer_contains(&controller_view, "!"));
+    }
+
+    #[test]
+    fn redeploying_resets_the_run_inspector_to_timeline() {
+        use super::super::state::{Msg, RunInspectorMode};
+
+        let mut state = succeeded_state();
+        state.apply(Msg::Navigate(View::Operation));
+        state.apply(Msg::ToggleRunInspectorMode);
+        state.apply(Msg::ScrollSourceDown);
+        assert_eq!(state.run_inspector_mode(), RunInspectorMode::Source);
+        let source = render(120, 40, &state);
+        assert!(!buffer_contains(&source, "DEPLOYED SOURCE"));
+
+        state.apply(Msg::RequestDeploy);
+        while state.advance_running_operation() {}
+        state.apply(Msg::Navigate(View::Operation));
+
+        assert_eq!(
+            state.run_inspector_mode(),
+            RunInspectorMode::Timeline,
+            "a fresh deployment's run inspector must start in TIMELINE \
+             regardless of the previous run's mode"
+        );
+        let terminal = render(120, 40, &state);
+        assert!(buffer_contains(&terminal, "DEPLOYED SOURCE"));
+    }
+
     #[test]
     fn a_successful_operation_shows_the_foothold_report() {
         let state = succeeded_state();
@@ -4456,6 +4753,8 @@ end
             conclusion: None,
             review_points: Vec::new(),
             review_selected: None,
+            run_inspector_mode: RunInspectorMode::Timeline,
+            source_scroll: 0,
         }
     }
 
