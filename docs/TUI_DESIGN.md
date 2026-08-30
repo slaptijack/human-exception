@@ -909,7 +909,15 @@ The point that is the run's actual terminal boundary additionally carries the te
 
 A **zero-tick deployment/load failure** (the controller source itself never loaded) has no completed ticks and no pre-tick observation — nothing was ever legitimately discovered. Review Run states this explicitly (`NO RECORDED SATELLITE EXECUTION STATE`) rather than rendering any frame, including one derived from the fixed scenario's own public starting facts; inventing a frame here would misrepresent what the run actually observed.
 
-Moving the selected review point through a run's chronology (chronology navigation) and browsing the complete deployed source are not yet implemented; today the selected point is always the run's terminal one, matching where a finished run leaves off.
+The run inspector renders a compact **chronology index** above the selected point's evidence: one row per review point (`INITIAL`, `TICK 01`, `TICK 07 [SUCCESS]`, `FAILURE (after tick 02)`, and so on), with the selected row marked. While the run inspector pane is focused on a finished run:
+
+- `Up` / `Down` — select the previous/next review point, clamped at the first/last point (never wraps).
+- `PageUp` / `PageDown` — move backward/forward by one visible chronology page (as many rows as the index currently shows).
+- `Home` / `End` — jump straight to the first/terminal review point (a semantic chronology jump, not viewport scrolling).
+
+The chronology index's visible window always includes the selected row, derived purely from the selection and the index's visible-row count — there is no independently scrollable viewport to fall out of sync with it. `F8` pane focus, global `F`-key navigation, and live Operation's `Space`/`Enter` pacing controls are unaffected: chronology navigation only applies once the run inspector is focused and the run has finished.
+
+Browsing the complete deployed source (a separate `SOURCE` mode for the run inspector, reached via `Tab`) is not yet implemented.
 
 ### Next actions
 

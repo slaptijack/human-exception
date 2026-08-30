@@ -371,6 +371,27 @@ pub enum Msg {
     /// pane is focused when the message is applied.
     ScrollUp,
     ScrollDown,
+    /// Review Run chronology navigation (`event::review_run_focus_matches`):
+    /// moves `review_selected` by one review point, clamped at the first/
+    /// last point — never wraps. A no-op unless the focused run is
+    /// finished and has at least one review point (live Operation pacing
+    /// is unaffected; see `Msg::TogglePauseOperation`/`StepOperationTick`).
+    SelectPreviousReviewPoint,
+    SelectNextReviewPoint,
+    /// Jumps straight to the first/terminal review point — semantic
+    /// chronology jumps, not viewport movement.
+    SelectFirstReviewPoint,
+    SelectLastReviewPoint,
+    /// Moves `review_selected` backward/forward by one visible chronology
+    /// page, clamped at the first/last point. The carried count is the
+    /// number of chronology rows actually visible at the current frame
+    /// size; `event::map` has no access to rendered geometry, so it always
+    /// emits `0` here, and `console::mod`'s dispatch loop rewrites it from
+    /// `ui::review_chronology_visible_rows` before calling `apply` — the
+    /// same place that already recomputes `pane_max_scroll` to clamp
+    /// `ScrollUp`/`ScrollDown` after applying them.
+    SelectReviewPointPageBackward(usize),
+    SelectReviewPointPageForward(usize),
     /// An editing/cursor-movement key applied to the current controller
     /// source; a no-op if no controller is loaded.
     EditController(EditOp),
@@ -656,6 +677,20 @@ impl AppState {
         self.operation.as_ref().is_some_and(|op| !op.is_finished())
     }
 
+    /// The current review chronology's length, or `None` if there's nothing
+    /// to navigate: no deployment, a still-live run (chronology navigation
+    /// is Review Run-only — live pacing stays on `Space`/`Enter`), or a
+    /// deploy-time load failure that never produced a review point. The
+    /// gate every `Select*ReviewPoint*` handler in [`Self::apply`] shares.
+    fn review_chronology_len(&self) -> Option<usize> {
+        let op = self.operation.as_ref()?;
+        if !op.is_finished() {
+            return None;
+        }
+        let len = review_points(&op.initial_snapshot, &op.records, op.error.as_ref()).len();
+        (len > 0).then_some(len)
+    }
+
     /// Whether the current view should be advancing the active run one tick
     /// per timer wakeup, independent of any player key: `View::Operation`
     /// is showing, a deployment exists, and it's neither paused nor
@@ -837,6 +872,40 @@ impl AppState {
                 if pane_is_scrollable(pane) {
                     let offset = self.scroll_offsets.entry(pane).or_insert(0);
                     *offset = offset.saturating_add(1).min(MAX_PANE_SCROLL);
+                }
+            }
+            Msg::SelectPreviousReviewPoint => {
+                if let Some(len) = self.review_chronology_len() {
+                    let current = self.review_selected.unwrap_or(len - 1);
+                    self.review_selected = Some(current.saturating_sub(1));
+                }
+            }
+            Msg::SelectNextReviewPoint => {
+                if let Some(len) = self.review_chronology_len() {
+                    let current = self.review_selected.unwrap_or(len - 1);
+                    self.review_selected = Some((current + 1).min(len - 1));
+                }
+            }
+            Msg::SelectFirstReviewPoint => {
+                if self.review_chronology_len().is_some() {
+                    self.review_selected = Some(0);
+                }
+            }
+            Msg::SelectLastReviewPoint => {
+                if let Some(len) = self.review_chronology_len() {
+                    self.review_selected = Some(len - 1);
+                }
+            }
+            Msg::SelectReviewPointPageBackward(page) => {
+                if let Some(len) = self.review_chronology_len() {
+                    let current = self.review_selected.unwrap_or(len - 1);
+                    self.review_selected = Some(current.saturating_sub(page.max(1)));
+                }
+            }
+            Msg::SelectReviewPointPageForward(page) => {
+                if let Some(len) = self.review_chronology_len() {
+                    let current = self.review_selected.unwrap_or(len - 1);
+                    self.review_selected = Some((current + page.max(1)).min(len - 1));
                 }
             }
             Msg::EditController(op) => {
@@ -2355,6 +2424,164 @@ mod tests {
         let op = state.operation().unwrap();
         assert!(op.finished);
         assert_eq!(op.review_selected, Some(op.review_points.len() - 1));
+    }
+
+    /// A run with several review points to page/jump through: a completed
+    /// success run has `INITIAL` plus one point per tick, giving plenty of
+    /// room to exercise boundary clamping without wrapping.
+    fn deployed_and_run_to_completion(source: &str) -> AppState {
+        let mut state = working_state();
+        state.controller = Some(ControllerDocument::new(source));
+        state.apply(Msg::RequestDeploy);
+        while state.advance_running_operation() {}
+        state
+    }
+
+    #[test]
+    fn up_and_down_reach_every_review_point_in_order_without_wrapping() {
+        let mut state = deployed_and_run_to_completion(ROUTE_TO_UPLINK);
+        let last = state.operation().unwrap().review_points.len() - 1;
+        assert!(last > 1, "this route should complete in more than one tick");
+
+        state.apply(Msg::SelectFirstReviewPoint);
+        assert_eq!(state.review_selected(), Some(0));
+
+        for expected in 1..=last {
+            state.apply(Msg::SelectNextReviewPoint);
+            assert_eq!(state.review_selected(), Some(expected));
+        }
+        // Inert at the terminal point — never wraps back to the start.
+        state.apply(Msg::SelectNextReviewPoint);
+        assert_eq!(state.review_selected(), Some(last));
+
+        for expected in (0..last).rev() {
+            state.apply(Msg::SelectPreviousReviewPoint);
+            assert_eq!(state.review_selected(), Some(expected));
+        }
+        // Inert at the first point — never wraps back to the terminal one.
+        state.apply(Msg::SelectPreviousReviewPoint);
+        assert_eq!(state.review_selected(), Some(0));
+    }
+
+    #[test]
+    fn home_and_end_jump_straight_to_the_first_and_terminal_review_points() {
+        let mut state = deployed_and_run_to_completion(ROUTE_TO_UPLINK);
+        let last = state.operation().unwrap().review_points.len() - 1;
+        assert!(last > 1);
+
+        state.apply(Msg::SelectFirstReviewPoint);
+        assert_eq!(state.review_selected(), Some(0));
+
+        state.apply(Msg::SelectLastReviewPoint);
+        assert_eq!(state.review_selected(), Some(last));
+
+        state.apply(Msg::SelectPreviousReviewPoint);
+        assert_eq!(state.review_selected(), Some(last - 1));
+        state.apply(Msg::SelectFirstReviewPoint);
+        assert_eq!(
+            state.review_selected(),
+            Some(0),
+            "Home is a semantic jump to the first point, not one step back toward it"
+        );
+
+        state.apply(Msg::SelectLastReviewPoint);
+        assert_eq!(state.review_selected(), Some(last));
+    }
+
+    #[test]
+    fn page_moves_clamp_to_valid_review_points() {
+        let mut state = deployed_and_run_to_completion(ROUTE_TO_UPLINK);
+        let last = state.operation().unwrap().review_points.len() - 1;
+        assert!(
+            last >= 3,
+            "this route should complete in enough ticks to page through"
+        );
+
+        state.apply(Msg::SelectFirstReviewPoint);
+        state.apply(Msg::SelectReviewPointPageForward(2));
+        assert_eq!(state.review_selected(), Some(2));
+
+        // A page larger than the remaining chronology clamps to the
+        // terminal point rather than overshooting past it.
+        state.apply(Msg::SelectReviewPointPageForward(last + 10));
+        assert_eq!(state.review_selected(), Some(last));
+
+        state.apply(Msg::SelectReviewPointPageBackward(2));
+        assert_eq!(state.review_selected(), Some(last - 2));
+
+        // Same clamping backward, at the first point.
+        state.apply(Msg::SelectReviewPointPageBackward(last + 10));
+        assert_eq!(state.review_selected(), Some(0));
+
+        // A `0` page count (`event::map`'s placeholder before `console::mod`
+        // fills in the real visible-row count) still moves by at least one
+        // point rather than being a silent no-op.
+        state.apply(Msg::SelectReviewPointPageForward(0));
+        assert_eq!(state.review_selected(), Some(1));
+    }
+
+    #[test]
+    fn chronology_navigation_is_a_no_op_on_a_live_run() {
+        let mut state = working_state();
+        state.controller = Some(ControllerDocument::new(ALWAYS_WAITS));
+        state.apply(Msg::RequestDeploy);
+        assert!(
+            state.operation().is_some_and(|op| !op.finished),
+            "the run should still be live"
+        );
+
+        for msg in [
+            Msg::SelectPreviousReviewPoint,
+            Msg::SelectNextReviewPoint,
+            Msg::SelectFirstReviewPoint,
+            Msg::SelectLastReviewPoint,
+            Msg::SelectReviewPointPageBackward(1),
+            Msg::SelectReviewPointPageForward(1),
+        ] {
+            state.apply(msg.clone());
+            assert_eq!(
+                state.review_selected(),
+                None,
+                "{msg:?} must not select a review point on a live run"
+            );
+        }
+    }
+
+    #[test]
+    fn chronology_navigation_is_a_no_op_before_any_deployment() {
+        let mut state = working_state();
+        for msg in [
+            Msg::SelectPreviousReviewPoint,
+            Msg::SelectNextReviewPoint,
+            Msg::SelectFirstReviewPoint,
+            Msg::SelectLastReviewPoint,
+            Msg::SelectReviewPointPageBackward(1),
+            Msg::SelectReviewPointPageForward(1),
+        ] {
+            state.apply(msg);
+            assert_eq!(state.review_selected(), None);
+        }
+    }
+
+    #[test]
+    fn chronology_navigation_leaves_live_operation_pacing_unaffected_on_a_finished_run() {
+        // Preserve live Operation input behavior unchanged: chronology
+        // navigation and `Space`/`Enter` pacing are different messages
+        // entirely, but this guards against a shared no-op gate ever being
+        // (mis)wired to also swallow pacing on a finished run.
+        let mut state = deployed_and_run_to_completion(ALWAYS_WAITS);
+        assert!(state.operation().unwrap().finished);
+
+        state.apply(Msg::SelectNextReviewPoint);
+        let selected_after_nav = state.review_selected();
+
+        state.apply(Msg::TogglePauseOperation);
+        state.apply(Msg::StepOperationTick);
+        assert_eq!(
+            state.review_selected(),
+            selected_after_nav,
+            "pacing controls on a finished run must stay no-ops, not disturb review selection"
+        );
     }
 
     #[test]
