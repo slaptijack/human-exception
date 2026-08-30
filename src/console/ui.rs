@@ -505,6 +505,32 @@ fn draw_operation(frame: &mut Frame, area: Rect, state: &AppState) {
 
     let [left, right] =
         Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(area);
+
+    // `RunInspectorMode::Source` needs `Paragraph`'s own wrap-aware
+    // scrolling (see `draw_run_inspector_source_pane`'s doc comment), which
+    // `draw_pane`'s plain wrap-only rendering doesn't provide — handled as
+    // its own branch rather than folded into the `telemetry` lines below.
+    // Gated on `op.finished` alone, not on any review point existing: a
+    // zero-tick deploy-time load failure still has a frozen
+    // `deployed_source` worth inspecting in SOURCE even with nothing to
+    // browse in TIMELINE.
+    if op.finished && op.run_inspector_mode == RunInspectorMode::Source {
+        draw_pane(
+            frame,
+            left,
+            pane_title("COMPROMISED SATELLITE FEED", focused == PaneId::Satellite),
+            review_run_satellite_lines(&op),
+        );
+        draw_run_inspector_source_pane(
+            frame,
+            right,
+            &op,
+            op.source_scroll,
+            focused == PaneId::OperationTelemetry,
+        );
+        return;
+    }
+
     // Once the run is finished, this view is functioning as Review Run
     // rather than a live view (`docs/TUI_DESIGN.md` §5, "Review Run"): both
     // panes must describe the same selected review point, not whatever the
@@ -516,7 +542,6 @@ fn draw_operation(frame: &mut Frame, area: Rect, state: &AppState) {
             review_run_telemetry_lines(
                 &op,
                 review_chronology_visible_rows(state, frame_size.width, frame_size.height),
-                review_source_visible_rows(state, frame_size.width, frame_size.height),
             ),
         )
     } else {
@@ -984,25 +1009,21 @@ fn review_run_satellite_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
     satellite_lines(&point.snapshot)
 }
 
-/// The finished-run Review Run telemetry pane's content: the run identity,
-/// then either mode's body (`docs/TUI_DESIGN.md` §5, "Review Run"). For a
-/// deploy-time load failure (no review point exists at all), the body is
-/// the failure that stopped execution before any point existed, regardless
-/// of mode — there is nothing to browse in either TIMELINE or SOURCE.
-/// Otherwise `RunInspectorMode::Timeline` renders the chronology index
-/// ([`review_chronology_lines`]) followed by the selected review point's
-/// evidence via [`review_point_evidence_lines`] (unchanged by SOURCE's
-/// existence), and `RunInspectorMode::Source` renders the complete,
-/// unbounded `deployed_source` via [`review_source_lines`] — deliberately
-/// not [`review_point_evidence_lines`]'s `bounded_detail_lines` excerpt.
-/// `chronology_visible_rows`/`source_visible_rows` come from
-/// [`review_chronology_visible_rows`]/[`review_source_visible_rows`] at the
-/// real frame size — passed in rather than recomputed here so a test
+/// The finished-run Review Run telemetry pane's content in
+/// `RunInspectorMode::Timeline` — `RunInspectorMode::Source` is rendered
+/// entirely separately, by [`draw_run_inspector_source_pane`], since it
+/// needs `Paragraph`'s own wrap-aware scrolling rather than a pre-windowed
+/// `Vec<Line>` (see that function's doc comment). The run identity, then
+/// either the deploy-time load failure that stopped execution before any
+/// review point existed (`docs/TUI_DESIGN.md` §5, "Review Run") or the
+/// chronology index ([`review_chronology_lines`]) followed by the selected
+/// review point's evidence via [`review_point_evidence_lines`].
+/// `chronology_visible_rows` comes from [`review_chronology_visible_rows`]
+/// at the real frame size — passed in rather than recomputed here so a test
 /// exercising this function directly can pin an exact window.
 fn review_run_telemetry_lines(
     op: &OperationView<'_>,
     chronology_visible_rows: usize,
-    source_visible_rows: usize,
 ) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from(Span::styled(
@@ -1027,27 +1048,12 @@ fn review_run_telemetry_lines(
         return lines;
     };
 
-    match op.run_inspector_mode {
-        RunInspectorMode::Timeline => {
-            let chronology = review_chronology_lines(op, chronology_visible_rows);
-            if !chronology.is_empty() {
-                lines.extend(chronology);
-                lines.push(Line::from(""));
-            }
-            lines.extend(review_point_evidence_lines(op, point));
-        }
-        RunInspectorMode::Source => {
-            lines.push(Line::from(Span::styled(
-                "SOURCE",
-                Style::default().add_modifier(Modifier::BOLD),
-            )));
-            lines.extend(review_source_lines(
-                op,
-                op.source_scroll,
-                source_visible_rows,
-            ));
-        }
+    let chronology = review_chronology_lines(op, chronology_visible_rows);
+    if !chronology.is_empty() {
+        lines.extend(chronology);
+        lines.push(Line::from(""));
     }
+    lines.extend(review_point_evidence_lines(op, point));
     lines
 }
 
@@ -1608,35 +1614,50 @@ pub(crate) fn review_chronology_visible_rows(
         .saturating_sub(SEPARATOR_ROWS) as usize
 }
 
-/// How many rows of `deployed_source` the Run Inspector's `SOURCE` mode can
-/// show at once at this frame size: [`review_chronology_inner_dimensions`]'s
-/// content height, less the one extra `SOURCE` header row
-/// [`review_run_telemetry_lines`] renders in that mode (`REVIEW RUN`/
-/// `deployed rev run-NN` are already accounted for by
+/// The complete `deployed_source` as one raw (unwrapped, unhighlighted)
+/// `Line` per line, splitting on `\n` rather than [`str::lines`] so a
+/// source ending in a newline still yields a trailing empty line —
+/// `deployed_source` is normalized to bare `\n` (never `\r\n`/`\r`) by
+/// `Msg::PasteController` before it can ever reach a deployment, so this
+/// never mis-splits a CRLF-terminated line the way a raw `\n` split
+/// otherwise could. Preserving that trailing empty row matters
+/// specifically for SOURCE: it promises the *exact* deployed text, and
+/// `str::lines()` silently discards whether the source ended with a
+/// newline at all.
+fn deployed_source_lines(source: &str) -> Vec<Line<'static>> {
+    source
+        .split('\n')
+        .map(|line| Line::from(line.to_string()))
+        .collect()
+}
+
+/// How many rows the Run Inspector's `SOURCE` mode pane can show at once at
+/// this frame size: [`review_chronology_inner_dimensions`]'s content
+/// height, less the one extra `SOURCE` header row
+/// [`draw_run_inspector_source_pane`] renders above the scrollable source
+/// (`REVIEW RUN`/`deployed rev run-NN` are already accounted for by
 /// `review_chronology_inner_dimensions` — this is TIMELINE's chronology
 /// index's counterpart for SOURCE, so `console::mod`'s dispatch loop can
 /// page `PageUp`/`PageDown` by exactly one screenful the player can see, the
-/// same way it already does for chronology paging). `0` once no finished
-/// operation exists.
+/// same way it already does for chronology paging).
 pub(crate) fn review_source_visible_rows(
-    state: &AppState,
+    _state: &AppState,
     frame_width: u16,
     frame_height: u16,
 ) -> usize {
-    if state.operation().is_none() {
-        return 0;
-    }
     const SOURCE_HEADER_ROWS: u16 = 1; // the bold "SOURCE" line
     let (_, content_height) = review_chronology_inner_dimensions(frame_width, frame_height);
     content_height.saturating_sub(SOURCE_HEADER_ROWS) as usize
 }
 
 /// How far the Run Inspector's `source_scroll` can advance before it would
-/// scroll past the last line of `deployed_source` at this frame size — the
-/// same role [`after_action_max_scroll`] plays for the After Action report,
-/// except `deployed_source` is rendered one raw line per row (no wrapping),
-/// so this counts logical lines rather than [`wrapped_row_count`]. `0` once
-/// no finished operation exists.
+/// scroll past the last rendered row of `deployed_source` at this frame
+/// size — the same role [`after_action_max_scroll`] plays for the After
+/// Action report, and computed the same way: [`wrapped_row_count`] at the
+/// pane's real content width, not a raw logical-line count, so a single
+/// long logical line that itself wraps across several rendered rows still
+/// contributes its true rendered height instead of counting as one row
+/// content already fits in. `0` once no finished operation exists.
 pub(crate) fn review_source_max_scroll(
     state: &AppState,
     frame_width: u16,
@@ -1645,37 +1666,69 @@ pub(crate) fn review_source_max_scroll(
     let Some(op) = state.operation() else {
         return 0;
     };
+    let (content_width, _) = review_chronology_inner_dimensions(frame_width, frame_height);
     let visible_rows = review_source_visible_rows(state, frame_width, frame_height) as u16;
-    let total_rows = op.deployed_source.lines().count() as u16;
-    total_rows.saturating_sub(visible_rows)
+    let total_rows = wrapped_row_count(&deployed_source_lines(op.deployed_source), content_width);
+    (total_rows as u16).saturating_sub(visible_rows)
 }
 
-/// The complete, unbounded content of `op.deployed_source`, one raw
-/// (unwrapped, unhighlighted) line per row, windowed to the `visible_rows`
-/// starting at `scroll` — deliberately not [`bounded_detail_lines`], which
-/// caps at [`MAX_DETAIL_LINES`] logical lines and [`MAX_DETAIL_LINE_CHARS`]
+/// Draws the `OPERATION TELEMETRY` pane in `RunInspectorMode::Source`: a
+/// fixed `REVIEW RUN`/`deployed rev run-NN`/`SOURCE` header, then the
+/// complete, unbounded `deployed_source` in a scrollable body below it —
+/// deliberately not [`bounded_detail_lines`], which caps at
+/// [`MAX_DETAIL_LINES`] logical lines and [`MAX_DETAIL_LINE_CHARS`]
 /// characters and is reserved for TIMELINE's compact evidence excerpt.
-/// SOURCE must show the exact deployed text a player can page/jump through
-/// in full, per issue #136's explicit exclusion of syntax highlighting or
-/// other editor behavior. Re-clamps `scroll` itself against the real line
-/// count here, the same render-time backstop `draw_help`/
-/// `draw_after_action_report_pane` already apply on top of
-/// `console::should_redraw`'s post-dispatch clamp — needed because
-/// `JumpSourceEnd` stores a large sentinel for exactly this to bring back
-/// down to the true end (`Msg::JumpSourceEnd`'s doc comment).
-fn review_source_lines(
+///
+/// Uses `Paragraph`'s own `.scroll()` (like [`draw_after_action_report_pane`]/
+/// [`draw_help`]) over the *entire* un-windowed [`deployed_source_lines`],
+/// rather than pre-slicing a `[scroll, scroll + visible_rows)` window of
+/// logical lines the way an earlier version of this function did: `Paragraph`
+/// wraps each logical line at the pane's real width before scrolling, so a
+/// single long logical line (e.g. a minified script) that itself spans
+/// several rendered rows scrolls through all of them normally instead of
+/// only ever showing that line's first screenful with `review_source_max_scroll`
+/// wrongly reporting nothing left to scroll to.
+///
+/// Also re-clamps `scroll` against the real content height here, the same
+/// render-time backstop `draw_help`/`draw_after_action_report_pane` already
+/// apply on top of `console::should_redraw`'s post-dispatch clamp — needed
+/// because `Msg::JumpSourceEnd` stores a large sentinel for exactly this to
+/// bring back down to the true end.
+fn draw_run_inspector_source_pane(
+    frame: &mut Frame,
+    area: Rect,
     op: &OperationView<'_>,
     scroll: u16,
-    visible_rows: usize,
-) -> Vec<Line<'static>> {
-    let total_rows = op.deployed_source.lines().count() as u16;
-    let scroll = scroll.min(total_rows.saturating_sub(visible_rows as u16));
-    op.deployed_source
-        .lines()
-        .skip(scroll as usize)
-        .take(visible_rows)
-        .map(|line| Line::from(line.to_string()))
-        .collect()
+    focused: bool,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(pane_title("OPERATION TELEMETRY", focused));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let [header_area, content_area] =
+        Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(inner);
+    let header = vec![
+        Line::from(Span::styled(
+            "REVIEW RUN",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(format!("deployed rev  run-{:02}", op.run_id)),
+        Line::from(Span::styled(
+            "SOURCE",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+    ];
+    frame.render_widget(Paragraph::new(header), header_area);
+
+    let source_lines = deployed_source_lines(op.deployed_source);
+    let content_rows = wrapped_row_count(&source_lines, content_area.width);
+    let max_scroll = content_rows.saturating_sub(content_area.height as usize) as u16;
+    let paragraph = Paragraph::new(source_lines)
+        .wrap(Wrap { trim: false })
+        .scroll((scroll.min(max_scroll), 0));
+    frame.render_widget(paragraph, content_area);
 }
 
 /// The first review point index the chronology index should render at
@@ -2109,14 +2162,47 @@ fn view_specific_help(state: &AppState, view: View) -> Vec<Line<'static>> {
             Line::from("Ctrl+V      load the source and check for on_tick, without calling it"),
             Line::from("F8          move focus between source and reference"),
         ],
-        View::Operation if state.operation().is_some_and(|op| op.finished) => vec![
-            Line::from("This is Review Run: read-only inspection of a finished operation."),
-            Line::from("Up/Down      select the previous/next review point"),
-            Line::from("PageUp/Down  move by one visible chronology page"),
-            Line::from("Home/End     jump to the first/terminal review point"),
-            Line::from("F6           redeploy from a clean scenario state"),
-            Line::from("F8           move focus between feed and the run inspector"),
-        ],
+        View::Operation if state.operation().is_some_and(|op| op.finished) => {
+            let mode = state
+                .operation()
+                .expect("just matched Some above")
+                .run_inspector_mode;
+            let mut lines = vec![
+                Line::from("This is Review Run: read-only inspection of a finished operation."),
+                Line::from("Tab          toggle the run inspector between TIMELINE and SOURCE"),
+            ];
+            match mode {
+                RunInspectorMode::Timeline => {
+                    lines.push(Line::from(
+                        "Up/Down      select the previous/next review point",
+                    ));
+                    lines.push(Line::from(
+                        "PageUp/Down  move by one visible chronology page",
+                    ));
+                    lines.push(Line::from(
+                        "Home/End     jump to the first/terminal review point",
+                    ));
+                }
+                RunInspectorMode::Source => {
+                    lines.push(Line::from(
+                        "Up/Down      scroll the deployed source by one row",
+                    ));
+                    lines.push(Line::from(
+                        "PageUp/Down  scroll the deployed source by one visible page",
+                    ));
+                    lines.push(Line::from(
+                        "Home/End     jump to the beginning/end of the deployed source",
+                    ));
+                }
+            }
+            lines.push(Line::from(
+                "F6           redeploy from a clean scenario state",
+            ));
+            lines.push(Line::from(
+                "F8           move focus between feed and the run inspector",
+            ));
+            lines
+        }
         View::Operation => vec![
             Line::from("F6     deploy the current controller (confirms if a run is active)"),
             Line::from("Space  pause/resume the run"),
@@ -2654,6 +2740,45 @@ mod tests {
         assert!(buffer_contains(
             &terminal,
             "jump to the first/terminal review point"
+        ));
+        assert!(buffer_contains(
+            &terminal,
+            "toggle the run inspector between TIMELINE and SOURCE"
+        ));
+    }
+
+    #[test]
+    fn help_describes_source_mode_controls_not_stale_chronology_controls() {
+        use super::super::state::Msg;
+
+        let mut state = succeeded_state();
+        state.apply(Msg::Navigate(View::Operation));
+        state.apply(Msg::ToggleRunInspectorMode);
+        state.apply(Msg::OpenHelp);
+        let terminal = render(120, 40, &state);
+
+        // TIMELINE's chronology-navigation help text is stale once SOURCE
+        // is active — the same keys now scroll source instead, and the
+        // advertised controls must say so.
+        assert!(!buffer_contains(
+            &terminal,
+            "select the previous/next review point"
+        ));
+        assert!(!buffer_contains(
+            &terminal,
+            "move by one visible chronology page"
+        ));
+        assert!(buffer_contains(
+            &terminal,
+            "scroll the deployed source by one row"
+        ));
+        assert!(buffer_contains(
+            &terminal,
+            "scroll the deployed source by one visible page"
+        ));
+        assert!(buffer_contains(
+            &terminal,
+            "jump to the beginning/end of the deployed source"
         ));
     }
 
@@ -4399,6 +4524,72 @@ end
     }
 
     #[test]
+    fn source_mode_scrolls_through_a_single_long_wrapped_line_completely() {
+        use super::super::editor::EditOp;
+        use super::super::state::Msg;
+
+        // The first logical line is 2000+ characters — one line that must
+        // still wrap across many rendered rows and be fully scrollable
+        // through all of them, not windowed by logical-line count (which
+        // would see this as "1 row" and report nothing left to scroll).
+        let minified = format!(
+            "-- {}\n{}",
+            "x".repeat(2000),
+            "function on_tick(observation) return \"wait\" end"
+        );
+
+        let mut state = working_state();
+        for _ in 0..500 {
+            state.apply(Msg::EditController(EditOp::Backspace));
+        }
+        state.apply(Msg::PasteController(minified));
+        state.apply(Msg::RequestDeploy);
+        while state.advance_running_operation() {}
+        state.apply(Msg::Navigate(View::Operation));
+        state.apply(Msg::ToggleRunInspectorMode);
+
+        let max_scroll = review_source_max_scroll(&state, 120, 40);
+        assert!(
+            max_scroll > 0,
+            "a 2000-character wrapped comment line should need scrolling \
+             at 120 columns wide"
+        );
+
+        state.apply(Msg::JumpSourceEnd);
+        let terminal = render(120, 40, &state);
+        assert!(
+            buffer_contains(&terminal, "function on_tick(observation)"),
+            "the real script after the long wrapped comment must be \
+             reachable, not permanently clipped behind it"
+        );
+    }
+
+    #[test]
+    fn source_mode_is_reachable_for_a_zero_tick_deploy_failure() {
+        use super::super::editor::EditOp;
+        use super::super::state::Msg;
+
+        let mut state = working_state();
+        for _ in 0..500 {
+            state.apply(Msg::EditController(EditOp::Backspace));
+        }
+        state.apply(Msg::PasteController("function on_tick(".to_string()));
+        state.apply(Msg::RequestDeploy);
+        assert!(state.operation().unwrap().finished);
+        assert!(state.operation().unwrap().review_points.is_empty());
+
+        state.apply(Msg::Navigate(View::Operation));
+        state.apply(Msg::ToggleRunInspectorMode);
+
+        let terminal = render(120, 40, &state);
+        assert!(
+            buffer_contains(&terminal, "function on_tick("),
+            "SOURCE must show the exact source that failed to load, even \
+             though the failure produced no reviewable chronology point"
+        );
+    }
+
+    #[test]
     fn a_successful_operation_shows_the_foothold_report() {
         let state = succeeded_state();
         assert_eq!(state.current_view(), View::AfterAction);
@@ -4576,6 +4767,28 @@ end
 
         let truncated_lines = bounded_detail_lines(&many_lines);
         assert_eq!(truncated_lines.len(), MAX_DETAIL_LINES + 1);
+    }
+
+    #[test]
+    fn deployed_source_lines_preserves_a_trailing_newline_as_an_empty_final_line() {
+        // `str::lines()` would silently drop the fact that the source ended
+        // in a newline at all — SOURCE promises the *exact* deployed text,
+        // so a source ending in `\n` must still show one more (empty) row
+        // than the same source without it.
+        let without_trailing_newline = "a\nb";
+        let with_trailing_newline = "a\nb\n";
+
+        let lines = deployed_source_lines(without_trailing_newline);
+        assert_eq!(
+            lines.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            vec!["a".to_string(), "b".to_string()]
+        );
+
+        let lines = deployed_source_lines(with_trailing_newline);
+        assert_eq!(
+            lines.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            vec!["a".to_string(), "b".to_string(), String::new()]
+        );
     }
 
     #[test]

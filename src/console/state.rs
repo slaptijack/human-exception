@@ -758,6 +758,18 @@ impl AppState {
         (len > 0).then_some(len)
     }
 
+    /// Whether the Run Inspector's mode toggle and SOURCE scrolling apply
+    /// right now: an operation exists and has finished, regardless of
+    /// whether it produced any reviewable chronology point. Deliberately
+    /// broader than [`Self::review_chronology_len`] — a zero-tick
+    /// deploy-time load failure still has a frozen `deployed_source` worth
+    /// inspecting in SOURCE even though it has no chronology to browse in
+    /// TIMELINE, so gating SOURCE on chronology existing would make an
+    /// already-failed deployment's exact source unreachable.
+    fn run_inspector_available(&self) -> bool {
+        self.operation.as_ref().is_some_and(Operation::is_finished)
+    }
+
     /// Whether the current view should be advancing the active run one tick
     /// per timer wakeup, independent of any player key: `View::Operation`
     /// is showing, a deployment exists, and it's neither paused nor
@@ -1001,7 +1013,7 @@ impl AppState {
                 }
             }
             Msg::ToggleRunInspectorMode => {
-                if self.review_chronology_len().is_some() {
+                if self.run_inspector_available() {
                     self.run_inspector_mode = match self.run_inspector_mode {
                         RunInspectorMode::Timeline => RunInspectorMode::Source,
                         RunInspectorMode::Source => RunInspectorMode::Timeline,
@@ -1009,36 +1021,49 @@ impl AppState {
                 }
             }
             Msg::ScrollSourceUp => {
-                if self.review_chronology_len().is_some() {
+                if self.run_inspector_available() {
                     self.source_scroll = self.source_scroll.saturating_sub(1);
                 }
             }
             Msg::ScrollSourceDown => {
-                if self.review_chronology_len().is_some() {
-                    self.source_scroll = self.source_scroll.saturating_add(1).min(MAX_PANE_SCROLL);
+                if self.run_inspector_available() {
+                    // No upper bound here beyond `u16`'s own range: unlike
+                    // `ScrollUp`/`ScrollDown`'s shared `MAX_PANE_SCROLL`
+                    // cap (sized for authored Help/Report content),
+                    // `deployed_source` is arbitrary-length player Lua and
+                    // must stay reachable to its true end however long it
+                    // is. `console::should_redraw` re-clamps this down to
+                    // the real content height via `ui::review_source_max_scroll`
+                    // right after this runs, the same way it already does
+                    // for `ScrollUp`/`ScrollDown`.
+                    self.source_scroll = self.source_scroll.saturating_add(1);
                 }
             }
             Msg::ScrollSourcePageBackward(page) => {
-                if self.review_chronology_len().is_some() {
-                    let page = (page.max(1) as u16).min(MAX_PANE_SCROLL);
+                if self.run_inspector_available() {
+                    let page = page.max(1).min(u16::MAX as usize) as u16;
                     self.source_scroll = self.source_scroll.saturating_sub(page);
                 }
             }
             Msg::ScrollSourcePageForward(page) => {
-                if self.review_chronology_len().is_some() {
-                    let page = (page.max(1) as u16).min(MAX_PANE_SCROLL);
-                    self.source_scroll =
-                        self.source_scroll.saturating_add(page).min(MAX_PANE_SCROLL);
+                if self.run_inspector_available() {
+                    let page = page.max(1).min(u16::MAX as usize) as u16;
+                    self.source_scroll = self.source_scroll.saturating_add(page);
                 }
             }
             Msg::JumpSourceStart => {
-                if self.review_chronology_len().is_some() {
+                if self.run_inspector_available() {
                     self.source_scroll = 0;
                 }
             }
             Msg::JumpSourceEnd => {
-                if self.review_chronology_len().is_some() {
-                    self.source_scroll = MAX_PANE_SCROLL;
+                if self.run_inspector_available() {
+                    // A large sentinel, not the real end (this module has
+                    // no notion of pane width/height to compute it) — see
+                    // `ScrollSourceDown`'s comment above for the same
+                    // reasoning, and `Msg::JumpSourceEnd`'s doc comment for
+                    // where it gets clamped down to the true end.
+                    self.source_scroll = u16::MAX;
                 }
             }
             Msg::EditController(op) => {
@@ -2220,6 +2245,23 @@ mod tests {
     }
 
     #[test]
+    fn toggle_run_inspector_mode_works_for_a_zero_tick_deploy_failure() {
+        // A load failure never produces a review point, so TIMELINE has
+        // nothing to browse — but SOURCE must still reach the exact source
+        // that failed to load, not treat this deployment as unreachable.
+        let mut state = working_state();
+        state.controller = Some(ControllerDocument::new("function on_tick("));
+        state.apply(Msg::RequestDeploy);
+        let op = state.operation().expect("a deploy just happened");
+        assert!(op.finished);
+        assert!(op.review_points.is_empty());
+
+        state.apply(Msg::ToggleRunInspectorMode);
+
+        assert_eq!(state.run_inspector_mode(), RunInspectorMode::Source);
+    }
+
+    #[test]
     fn toggle_run_inspector_mode_switches_between_timeline_and_source_once_finished() {
         let mut state = working_state();
         state.apply(Msg::RequestDeploy);
@@ -2262,7 +2304,7 @@ mod tests {
         assert_eq!(state.source_scroll(), 3);
 
         state.apply(Msg::JumpSourceEnd);
-        assert_eq!(state.source_scroll(), MAX_PANE_SCROLL);
+        assert_eq!(state.source_scroll(), u16::MAX);
         state.apply(Msg::JumpSourceStart);
         assert_eq!(state.source_scroll(), 0);
     }

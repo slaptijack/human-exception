@@ -27,7 +27,13 @@ fn scroll_focus_matches(view: View, focused_pane: PaneId) -> bool {
 /// focused. Whether the run has actually finished is checked in
 /// `AppState::apply`, not here — the same split `operation_is_open` already
 /// uses for `Enter`/`Space`, which don't know finished-ness either.
-fn review_run_focus_matches(view: View, focused_pane: PaneId) -> bool {
+///
+/// `pub(crate)` so `console::mod`'s `should_redraw` can reuse this exact
+/// condition to decide whether a `Tab` in this position is acting as the
+/// TIMELINE/SOURCE mode toggle — and so should be treated as a press-only
+/// state transition (see `should_redraw`'s `kind_allowed` computation) —
+/// without duplicating or drifting from this gate.
+pub(crate) fn review_run_focus_matches(view: View, focused_pane: PaneId) -> bool {
     view == View::Operation && focused_pane == PaneId::OperationTelemetry
 }
 

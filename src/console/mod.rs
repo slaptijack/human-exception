@@ -335,10 +335,24 @@ fn should_redraw(
     // but it's free protection when the terminal does provide it (e.g.
     // Windows, which crossterm says always reports `kind`), so it stays.
     let is_ctrl_v = key.code == KeyCode::Char('v') && key.modifiers.contains(KeyModifiers::CONTROL);
+    // `Tab` is a repeatable edit (indent) in Controller but a state
+    // transition (the Run Inspector's TIMELINE/SOURCE toggle) in Review
+    // Run — `event::review_run_focus_matches` is the same condition
+    // `event::map`'s own `Tab` arm gates on, so this can't drift from
+    // which `Tab` actually means a mode flip. Without this, a terminal
+    // reporting `Repeat` for a held `Tab` would flip the mode back and
+    // forth on every repeat tick instead of just once per physical press.
+    let tab_is_run_inspector_toggle = key.code == KeyCode::Tab
+        && event::review_run_focus_matches(
+            state.current_view(),
+            state.focused_pane(state.current_view()),
+        );
     let kind_allowed = match key.kind {
         KeyEventKind::Press => true,
         KeyEventKind::Repeat => {
-            !is_ctrl_v && !matches!(key.code, KeyCode::Enter | KeyCode::Esc | KeyCode::F(_))
+            !is_ctrl_v
+                && !tab_is_run_inspector_toggle
+                && !matches!(key.code, KeyCode::Enter | KeyCode::Esc | KeyCode::F(_))
         }
         KeyEventKind::Release => false,
     };
@@ -1518,6 +1532,25 @@ mod tests {
         events
     }
 
+    /// Clears the starter controller the same way [`clear_and_type`] does,
+    /// but loads `source` as a single bracketed-paste event instead of one
+    /// `Event::Key` per character. Behaviorally equivalent for a large
+    /// fixture (`Msg::PasteController` inserts the whole normalized string
+    /// in one `apply`, exactly as a player pasting their script would) but
+    /// avoids `render`'s full per-event redraw for every one of a long
+    /// fixture's thousands of characters — needed for the SOURCE-mode
+    /// tests below, whose padded fixture is long by design (to prove
+    /// paging/end navigation actually has further content to reach).
+    fn clear_and_paste(source: &str) -> Vec<Event> {
+        let mut events: Vec<Event> = std::iter::repeat_n(
+            press(KeyCode::Backspace),
+            intel::STARTER_CONTROLLER.chars().count(),
+        )
+        .collect();
+        events.push(paste(source));
+        events
+    }
+
     #[test]
     fn completing_a_scripted_route_lands_on_after_action_with_recognizable_text() {
         // The run auto-advances only while unpaused, and `Enter` only
@@ -1638,9 +1671,46 @@ mod tests {
     }
 
     #[test]
+    fn a_held_tab_reported_as_repeat_does_not_oscillate_the_run_inspector_mode() {
+        use state::RunInspectorMode;
+
+        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
+        events.extend(clear_and_type(ROUTE_TO_UPLINK));
+        events.push(press(KeyCode::F(6)));
+        events.push(press(KeyCode::Char(' '))); // pause
+        events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
+        events.push(press(KeyCode::F(5))); // Review Run
+
+        let (mut state, _) = render(120, 40, &events);
+        assert_eq!(state.run_inspector_mode(), RunInspectorMode::Timeline);
+        let mut last_transition_press: TransitionKeyDebounce = None;
+
+        should_redraw(
+            &mut state,
+            press(KeyCode::Tab),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        assert_eq!(state.run_inspector_mode(), RunInspectorMode::Source);
+
+        // A terminal reporting the held key as `Repeat` must not flip the
+        // mode again on every repeat tick — held `Tab` should behave like
+        // a single press, not an oscillating toggle.
+        for _ in 0..5 {
+            should_redraw(
+                &mut state,
+                repeat(KeyCode::Tab),
+                (120, 40),
+                &mut last_transition_press,
+            );
+        }
+        assert_eq!(state.run_inspector_mode(), RunInspectorMode::Source);
+    }
+
+    #[test]
     fn up_down_scroll_source_instead_of_chronology_once_source_mode_is_active() {
         let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
-        events.extend(clear_and_type(&long_route_to_uplink()));
+        events.extend(clear_and_paste(&long_route_to_uplink()));
         events.push(press(KeyCode::F(6)));
         events.push(press(KeyCode::Char(' '))); // pause
         events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
@@ -1685,7 +1755,7 @@ mod tests {
     #[test]
     fn page_down_in_source_mode_moves_by_the_real_visible_source_page_size() {
         let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
-        events.extend(clear_and_type(&long_route_to_uplink()));
+        events.extend(clear_and_paste(&long_route_to_uplink()));
         events.push(press(KeyCode::F(6)));
         events.push(press(KeyCode::Char(' '))); // pause
         events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
@@ -1719,7 +1789,7 @@ mod tests {
     #[test]
     fn end_in_source_mode_clamps_to_the_real_max_scroll() {
         let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
-        events.extend(clear_and_type(&long_route_to_uplink()));
+        events.extend(clear_and_paste(&long_route_to_uplink()));
         events.push(press(KeyCode::F(6)));
         events.push(press(KeyCode::Char(' '))); // pause
         events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks

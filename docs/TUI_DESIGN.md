@@ -919,7 +919,7 @@ TIMELINE renders a compact **chronology index** above the selected point's evide
 
 The chronology index's visible window always includes the selected row, derived purely from the selection and the index's visible-row count — there is no independently scrollable viewport to fall out of sync with it. Chronology navigation only applies once the run inspector is focused, the run has finished, and TIMELINE is the active mode.
 
-SOURCE renders the complete, unbounded deployed source — not the bounded excerpt TIMELINE's evidence otherwise shows alongside it — and is strictly read-only: it never routes editor commands or paste, and can never mutate either the deployed source or the working Controller document. While SOURCE is active, the same keys instead scroll the source text:
+SOURCE renders the complete, unbounded deployed source — not the bounded excerpt TIMELINE's evidence otherwise shows alongside it — and is strictly read-only: it never routes editor commands or paste, and can never mutate either the deployed source or the working Controller document. SOURCE is reachable for any finished deployment, including a zero-tick load failure that has no review point for TIMELINE to browse — the source that failed to load is still the exact source worth inspecting. While SOURCE is active, the same keys instead scroll the source text:
 
 - `Up` / `Down` — scroll by one row.
 - `PageUp` / `PageDown` — scroll by one visible page.
