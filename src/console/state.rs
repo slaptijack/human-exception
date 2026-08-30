@@ -176,18 +176,12 @@ pub struct OperationView<'a> {
     /// The Review Run chronology: `INITIAL`, then one point per completed
     /// tick, then an optional terminal-failure boundary. Empty when deploy
     /// itself failed (no execution ever started) — see [`review_points`].
-    ///
-    /// Not yet read by any rendering code: Review Run's presentation is
-    /// #134, which lands on top of this projection and `review_selected`
-    /// below. Exercised directly by this module's tests until then.
-    #[allow(dead_code)]
     pub review_points: Vec<ReviewPoint<'a>>,
     /// The player's currently selected review point, as an index into
     /// `review_points` above. `None` before the run has finished, or if
     /// `review_points` is empty (a deploy-time load failure never produced
     /// a reviewable point). Re-clamped here against the freshly computed
     /// `review_points`, so a stale stored index can never be read as valid.
-    #[allow(dead_code)]
     pub review_selected: Option<usize>,
 }
 
@@ -252,11 +246,7 @@ fn observe_snapshot(live: &LiveOperation) -> OperationSnapshot {
 /// `error`) — never by replaying the simulation or consulting hidden
 /// scenario state (`docs/VISION.md`; epic #130's "Review chronology
 /// contract").
-// Not yet read by any rendering code: Review Run's selection and
-// presentation are #133/#134, which land on top of this projection.
-// Exercised directly by this module's tests until then.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ReviewPoint<'a> {
     pub kind: ReviewPointKind<'a>,
     /// The satellite-safe state at this point: drone position, budget, map
@@ -273,7 +263,6 @@ pub struct ReviewPoint<'a> {
 
 /// What kind of chronology boundary a [`ReviewPoint`] represents.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub enum ReviewPointKind<'a> {
     /// The legitimate pre-tick observation: no action, no events.
     Initial,

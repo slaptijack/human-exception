@@ -895,6 +895,22 @@ The initial After Action screen carries only the evidence needed to understand t
 
 Detailed tick-by-tick telemetry, full event chronology, and the exact deployed-source provenance are **Review Run**'s responsibility (`F5` from After Action), not After Action's. After Action answers "what happened and what does it mean"; Review Run answers "show me exactly what the code did." Neither view exposes hidden authoritative scenario state (§2, [Target information model](#target-information-model)) beyond what the run legitimately discovered.
 
+### Review Run
+
+Review Run is a finished `Operation` — the same two-pane layout (compromised satellite feed, run inspector) the live run used, not a new view. It is reachable the same way live Operation is, via `F5`, once the deployment it shows has concluded.
+
+A single **selected review point** drives both panes at once: the satellite feed renders that point's legitimate discovered snapshot, and the run inspector renders that same point's evidence. The two panes can never describe two different moments in the run. A review point is one of:
+
+- `INITIAL` — the legitimate pre-tick observation, with no action (no action was ever taken to reach it).
+- a completed tick — the recorded controller action, the resulting drone position, remaining budget against the starting budget, tiles newly discovered relative to the previous point, and any structured action-cost/hazard events from that tick.
+- a terminal failure boundary — a controller/runtime failure that ended the run without completing another tick. It carries the last known position and budget (the preceding point's), never a fabricated action or discovery, and is presented as clearly distinct from the tick that preceded it, naming which tick that was.
+
+The point that is the run's actual terminal boundary additionally carries the terminal evidence for its kind: the success or budget-exhaustion outcome headline, or the controller-failure explanation.
+
+A **zero-tick deployment/load failure** (the controller source itself never loaded) has no completed ticks and no pre-tick observation — nothing was ever legitimately discovered. Review Run states this explicitly (`NO RECORDED SATELLITE EXECUTION STATE`) rather than rendering any frame, including one derived from the fixed scenario's own public starting facts; inventing a frame here would misrepresent what the run actually observed.
+
+Moving the selected review point through a run's chronology (chronology navigation) and browsing the complete deployed source are not yet implemented; today the selected point is always the run's terminal one, matching where a finished run leaves off.
+
 ### Next actions
 
 From After Action, four next actions are available, using bindings already defined in [Overall navigation](#overall-navigation) — no new bindings are introduced for this contract:
