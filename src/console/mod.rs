@@ -422,10 +422,10 @@ fn should_redraw(
             // that has both the message and the current frame size.
             let msg = match msg {
                 Msg::SelectReviewPointPageBackward(_) => Msg::SelectReviewPointPageBackward(
-                    ui::review_chronology_visible_rows(frame_size.0, frame_size.1),
+                    ui::review_chronology_visible_rows(state, frame_size.0, frame_size.1),
                 ),
                 Msg::SelectReviewPointPageForward(_) => Msg::SelectReviewPointPageForward(
-                    ui::review_chronology_visible_rows(frame_size.0, frame_size.1),
+                    ui::review_chronology_visible_rows(state, frame_size.0, frame_size.1),
                 ),
                 other => other,
             };
@@ -1517,13 +1517,34 @@ mod tests {
         events.push(press(KeyCode::F(5))); // Review Run — already focused on
         // the run inspector pane, since finishing the run focuses it
         events.push(press(KeyCode::Home)); // jump to the first review point
-        events.push(press(KeyCode::PageDown));
 
-        let (state, _) = render(120, 40, &events);
+        let mut state = AppState::new();
+        let mut last_transition_press: TransitionKeyDebounce = None;
+        for event in &events {
+            should_redraw(
+                &mut state,
+                event.clone(),
+                (120, 40),
+                &mut last_transition_press,
+            );
+        }
+        assert_eq!(state.review_selected(), Some(0));
 
-        let page = ui::review_chronology_visible_rows(120, 40);
+        // The page size depends on the currently selected point's evidence
+        // (`ui::review_chronology_visible_rows`'s doc comment), so it must
+        // be read here — right after `Home`, before `PageDown` — matching
+        // what `should_redraw` itself will compute for that same keypress.
+        let page = ui::review_chronology_visible_rows(&state, 120, 40);
         assert!(page > 0);
         let last = state.operation().unwrap().review_points.len() - 1;
+
+        should_redraw(
+            &mut state,
+            press(KeyCode::PageDown),
+            (120, 40),
+            &mut last_transition_press,
+        );
+
         assert_eq!(
             state.review_selected(),
             Some(page.min(last)),
