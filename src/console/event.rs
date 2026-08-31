@@ -27,7 +27,13 @@ fn scroll_focus_matches(view: View, focused_pane: PaneId) -> bool {
 /// focused. Whether the run has actually finished is checked in
 /// `AppState::apply`, not here — the same split `operation_is_open` already
 /// uses for `Enter`/`Space`, which don't know finished-ness either.
-fn review_run_focus_matches(view: View, focused_pane: PaneId) -> bool {
+///
+/// `pub(crate)` so `console::mod`'s `should_redraw` can reuse this exact
+/// condition to decide whether a `Tab` in this position is acting as the
+/// TIMELINE/SOURCE mode toggle — and so should be treated as a press-only
+/// state transition (see `should_redraw`'s `kind_allowed` computation) —
+/// without duplicating or drifting from this gate.
+pub(crate) fn review_run_focus_matches(view: View, focused_pane: PaneId) -> bool {
     view == View::Operation && focused_pane == PaneId::OperationTelemetry
 }
 
@@ -169,6 +175,18 @@ pub fn map(
         }
         KeyCode::End if review_run_focus_matches(current_view, focused_pane) => {
             Some(Msg::SelectLastReviewPoint)
+        }
+        // Toggles the Run Inspector between TIMELINE and SOURCE
+        // (`docs/TUI_DESIGN.md`, "Review Run"). Always produces the same
+        // `Msg` regardless of which mode is currently active — the mode
+        // itself, and whether the run has actually finished, are decided in
+        // `AppState::apply`, matching the chronology keys above. Which
+        // family of `Msg` the *other* Run-Inspector keys above produce while
+        // SOURCE is active is decided in `console::mod`'s dispatch loop
+        // (it already has real `AppState` access to check the mode; this
+        // function deliberately doesn't take on that dependency), not here.
+        KeyCode::Tab if review_run_focus_matches(current_view, focused_pane) => {
+            Some(Msg::ToggleRunInspectorMode)
         }
         // Ordinary editing keys must not silently mutate the source unless
         // it's the pane actually focused — i.e. the reference pane, not the
@@ -1311,6 +1329,54 @@ mod tests {
             map_in(key(KeyCode::Home), View::Signals),
             None,
             "Signals has no Home binding of its own"
+        );
+    }
+
+    #[test]
+    fn tab_toggles_run_inspector_mode_only_while_the_telemetry_pane_is_focused() {
+        assert_eq!(
+            map(
+                key(KeyCode::Tab),
+                View::Operation,
+                false,
+                false,
+                false,
+                PaneId::OperationTelemetry,
+                true,
+            ),
+            Some(Msg::ToggleRunInspectorMode)
+        );
+        assert_eq!(
+            map(
+                key(KeyCode::Tab),
+                View::Operation,
+                false,
+                false,
+                false,
+                PaneId::Satellite,
+                true,
+            ),
+            None,
+            "Tab must not map while the Satellite pane is focused instead"
+        );
+    }
+
+    #[test]
+    fn tab_still_indents_the_controller_source_and_is_unaffected_by_the_new_run_inspector_arm() {
+        // The Run-Inspector `Tab` arm is gated on `View::Operation`, so it
+        // must never shadow `Tab`'s existing indent binding in Controller
+        // (`map_controller_edit`) — the two views can never both be current.
+        assert_eq!(
+            map(
+                key(KeyCode::Tab),
+                View::Controller,
+                false,
+                false,
+                false,
+                PaneId::ControllerSource,
+                true,
+            ),
+            Some(Msg::EditController(EditOp::Indent))
         );
     }
 

@@ -893,7 +893,7 @@ Returning to Signals does not imply abandoning or failing a formal assignment. I
 
 The initial After Action screen carries only the evidence needed to understand the result: final budget/ticks executed, tiles discovered, hazards entered, the run identifier (e.g. `deployed rev run-07`), and — where space allows — the final satellite frame. This evidence set is the same regardless of outcome.
 
-Detailed tick-by-tick telemetry, full event chronology, and the exact deployed-source provenance are **Review Run**'s responsibility (`F5` from After Action), not After Action's. After Action answers "what happened and what does it mean"; Review Run answers "show me exactly what the code did." Neither view exposes hidden authoritative scenario state (§2, [Target information model](#target-information-model)) beyond what the run legitimately discovered.
+Detailed tick-by-tick telemetry, full event chronology, and the exact deployed-source provenance are **Review Run**'s responsibility (`F5` from After Action), not After Action's. After Action answers "what happened and what does it mean"; Review Run answers "show me exactly what the code did," down to browsing the complete deployed source in the run inspector's `SOURCE` mode. Neither view exposes hidden authoritative scenario state (§2, [Target information model](#target-information-model)) beyond what the run legitimately discovered.
 
 ### Review Run
 
@@ -909,15 +909,23 @@ The point that is the run's actual terminal boundary additionally carries the te
 
 A **zero-tick deployment/load failure** (the controller source itself never loaded) has no completed ticks and no pre-tick observation — nothing was ever legitimately discovered. Review Run states this explicitly (`NO RECORDED SATELLITE EXECUTION STATE`) rather than rendering any frame, including one derived from the fixed scenario's own public starting facts; inventing a frame here would misrepresent what the run actually observed.
 
-The run inspector renders a compact **chronology index** above the selected point's evidence: one row per review point (`INITIAL`, `TICK 01`, `TICK 07 [SUCCESS]`, `FAILURE (after tick 02)`, and so on), with the selected row marked. While the run inspector pane is focused on a finished run:
+The run inspector has two read-only modes, **TIMELINE** (the default) and **SOURCE**. `Tab`, while the run inspector is focused on a finished run, switches between them; other pane focus, global `F`-key navigation, and live Operation's `Space`/`Enter` pacing controls are unaffected.
+
+TIMELINE renders a compact **chronology index** above the selected point's evidence: one row per review point (`INITIAL`, `TICK 01`, `TICK 07 [SUCCESS]`, `FAILURE (after tick 02)`, and so on), with the selected row marked. While TIMELINE is active:
 
 - `Up` / `Down` — select the previous/next review point, clamped at the first/last point (never wraps).
 - `PageUp` / `PageDown` — move backward/forward by one visible chronology page (as many rows as the index currently shows).
 - `Home` / `End` — jump straight to the first/terminal review point (a semantic chronology jump, not viewport scrolling).
 
-The chronology index's visible window always includes the selected row, derived purely from the selection and the index's visible-row count — there is no independently scrollable viewport to fall out of sync with it. `F8` pane focus, global `F`-key navigation, and live Operation's `Space`/`Enter` pacing controls are unaffected: chronology navigation only applies once the run inspector is focused and the run has finished.
+The chronology index's visible window always includes the selected row, derived purely from the selection and the index's visible-row count — there is no independently scrollable viewport to fall out of sync with it. Chronology navigation only applies once the run inspector is focused, the run has finished, and TIMELINE is the active mode.
 
-Browsing the complete deployed source (a separate `SOURCE` mode for the run inspector, reached via `Tab`) is not yet implemented.
+SOURCE renders the complete, unbounded deployed source — not the bounded excerpt TIMELINE's evidence otherwise shows alongside it — and is strictly read-only: it never routes editor commands or paste, and can never mutate either the deployed source or the working Controller document. SOURCE is reachable for any finished deployment, including a zero-tick load failure that has no review point for TIMELINE to browse — the source that failed to load is still the exact source worth inspecting. While SOURCE is active, the same keys instead scroll the source text:
+
+- `Up` / `Down` — scroll by one row.
+- `PageUp` / `PageDown` — scroll by one visible page.
+- `Home` / `End` — jump to the beginning/end of the deployed source.
+
+The displayed source stays tied to the reviewed run even if the player has since edited the working Controller — SOURCE always shows the source as it was actually deployed, never the current working document. Returning to Controller restores the current working document, unaffected by anything shown in SOURCE. Source-scroll position and the TIMELINE/SOURCE mode choice are preserved when leaving and returning to the same reviewed run, but a fresh deployment always resets the run inspector to TIMELINE.
 
 ### Next actions
 

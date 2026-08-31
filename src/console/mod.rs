@@ -37,7 +37,7 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
-use state::{AppState, Msg, PaneId};
+use state::{AppState, Msg, PaneId, RunInspectorMode};
 
 type PanicHook = dyn Fn(&PanicHookInfo<'_>) + Sync + Send + 'static;
 
@@ -335,10 +335,24 @@ fn should_redraw(
     // but it's free protection when the terminal does provide it (e.g.
     // Windows, which crossterm says always reports `kind`), so it stays.
     let is_ctrl_v = key.code == KeyCode::Char('v') && key.modifiers.contains(KeyModifiers::CONTROL);
+    // `Tab` is a repeatable edit (indent) in Controller but a state
+    // transition (the Run Inspector's TIMELINE/SOURCE toggle) in Review
+    // Run — `event::review_run_focus_matches` is the same condition
+    // `event::map`'s own `Tab` arm gates on, so this can't drift from
+    // which `Tab` actually means a mode flip. Without this, a terminal
+    // reporting `Repeat` for a held `Tab` would flip the mode back and
+    // forth on every repeat tick instead of just once per physical press.
+    let tab_is_run_inspector_toggle = key.code == KeyCode::Tab
+        && event::review_run_focus_matches(
+            state.current_view(),
+            state.focused_pane(state.current_view()),
+        );
     let kind_allowed = match key.kind {
         KeyEventKind::Press => true,
         KeyEventKind::Repeat => {
-            !is_ctrl_v && !matches!(key.code, KeyCode::Enter | KeyCode::Esc | KeyCode::F(_))
+            !is_ctrl_v
+                && !tab_is_run_inspector_toggle
+                && !matches!(key.code, KeyCode::Enter | KeyCode::Esc | KeyCode::F(_))
         }
         KeyEventKind::Release => false,
     };
@@ -419,8 +433,32 @@ fn should_redraw(
             // emits `0` as a placeholder page count for these two variants
             // (see `Msg::SelectReviewPointPageBackward`'s doc comment) —
             // filled in here with the real visible-row count, the one place
-            // that has both the message and the current frame size.
+            // that has both the message and the current frame size. It also
+            // doesn't know the Run Inspector's current mode (deliberately,
+            // per `event::map`'s `Tab` arm doc comment) — while
+            // `RunInspectorMode::Source` is active, the same chronology keys
+            // it emits are rewritten here into their SOURCE-scrolling
+            // equivalents instead of being applied as chronology navigation.
+            let source_mode = state.run_inspector_mode() == RunInspectorMode::Source;
             let msg = match msg {
+                Msg::SelectPreviousReviewPoint if source_mode => Msg::ScrollSourceUp,
+                Msg::SelectNextReviewPoint if source_mode => Msg::ScrollSourceDown,
+                Msg::SelectFirstReviewPoint if source_mode => Msg::JumpSourceStart,
+                Msg::SelectLastReviewPoint if source_mode => Msg::JumpSourceEnd,
+                Msg::SelectReviewPointPageBackward(_) if source_mode => {
+                    Msg::ScrollSourcePageBackward(ui::review_source_visible_rows(
+                        state,
+                        frame_size.0,
+                        frame_size.1,
+                    ))
+                }
+                Msg::SelectReviewPointPageForward(_) if source_mode => {
+                    Msg::ScrollSourcePageForward(ui::review_source_visible_rows(
+                        state,
+                        frame_size.0,
+                        frame_size.1,
+                    ))
+                }
                 Msg::SelectReviewPointPageBackward(_) => Msg::SelectReviewPointPageBackward(
                     ui::review_chronology_visible_rows(state, frame_size.0, frame_size.1),
                 ),
@@ -430,12 +468,25 @@ fn should_redraw(
                 other => other,
             };
             let is_pane_scroll = matches!(msg, Msg::ScrollUp | Msg::ScrollDown);
+            let is_source_scroll = matches!(
+                msg,
+                Msg::ScrollSourceUp
+                    | Msg::ScrollSourceDown
+                    | Msg::ScrollSourcePageBackward(_)
+                    | Msg::ScrollSourcePageForward(_)
+                    | Msg::JumpSourceStart
+                    | Msg::JumpSourceEnd
+            );
             state.apply(msg);
             if is_pane_scroll {
                 let pane = state.focused_pane(state.current_view());
                 if let Some(max) = pane_max_scroll(pane, state, frame_size.0, frame_size.1) {
                     state.clamp_scroll(pane, max);
                 }
+            }
+            if is_source_scroll {
+                let max = ui::review_source_max_scroll(state, frame_size.0, frame_size.1);
+                state.clamp_source_scroll(max);
             }
             true
         }
@@ -1481,6 +1532,25 @@ mod tests {
         events
     }
 
+    /// Clears the starter controller the same way [`clear_and_type`] does,
+    /// but loads `source` as a single bracketed-paste event instead of one
+    /// `Event::Key` per character. Behaviorally equivalent for a large
+    /// fixture (`Msg::PasteController` inserts the whole normalized string
+    /// in one `apply`, exactly as a player pasting their script would) but
+    /// avoids `render`'s full per-event redraw for every one of a long
+    /// fixture's thousands of characters — needed for the SOURCE-mode
+    /// tests below, whose padded fixture is long by design (to prove
+    /// paging/end navigation actually has further content to reach).
+    fn clear_and_paste(source: &str) -> Vec<Event> {
+        let mut events: Vec<Event> = std::iter::repeat_n(
+            press(KeyCode::Backspace),
+            intel::STARTER_CONTROLLER.chars().count(),
+        )
+        .collect();
+        events.push(paste(source));
+        events
+    }
+
     #[test]
     fn completing_a_scripted_route_lands_on_after_action_with_recognizable_text() {
         // The run auto-advances only while unpaused, and `Enter` only
@@ -1550,6 +1620,200 @@ mod tests {
             Some(page.min(last)),
             "PageDown from the first point should land exactly `page` points \
              forward, not stay at the placeholder `0` `event::map` emits"
+        );
+    }
+
+    /// A route script padded with enough leading comment lines that its
+    /// `deployed_source` needs more than one screenful to page/jump through
+    /// — the mod-level analog of `ui.rs`'s own `LONG_SOURCE_PADDING_LINES`
+    /// fixture, built here through real key events (`clear_and_type`)
+    /// instead of `Msg::PasteController` so this exercises the same
+    /// terminal-input pipeline the rest of this test module does.
+    fn long_route_to_uplink() -> String {
+        let mut source = String::new();
+        for line in 0..200 {
+            source.push_str(&format!("-- padding line {line:03}\n"));
+        }
+        source.push_str(ROUTE_TO_UPLINK);
+        source
+    }
+
+    #[test]
+    fn tab_toggles_the_run_inspector_mode_via_the_full_pipeline() {
+        use state::RunInspectorMode;
+
+        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
+        events.extend(clear_and_type(ROUTE_TO_UPLINK));
+        events.push(press(KeyCode::F(6)));
+        events.push(press(KeyCode::Char(' '))); // pause
+        events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
+        events.push(press(KeyCode::F(5))); // Review Run
+
+        let (mut state, _) = render(120, 40, &events);
+        assert_eq!(state.run_inspector_mode(), RunInspectorMode::Timeline);
+        let mut last_transition_press: TransitionKeyDebounce = None;
+
+        should_redraw(
+            &mut state,
+            press(KeyCode::Tab),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        assert_eq!(state.run_inspector_mode(), RunInspectorMode::Source);
+
+        should_redraw(
+            &mut state,
+            press(KeyCode::Tab),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        assert_eq!(state.run_inspector_mode(), RunInspectorMode::Timeline);
+    }
+
+    #[test]
+    fn a_held_tab_reported_as_repeat_does_not_oscillate_the_run_inspector_mode() {
+        use state::RunInspectorMode;
+
+        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
+        events.extend(clear_and_type(ROUTE_TO_UPLINK));
+        events.push(press(KeyCode::F(6)));
+        events.push(press(KeyCode::Char(' '))); // pause
+        events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
+        events.push(press(KeyCode::F(5))); // Review Run
+
+        let (mut state, _) = render(120, 40, &events);
+        assert_eq!(state.run_inspector_mode(), RunInspectorMode::Timeline);
+        let mut last_transition_press: TransitionKeyDebounce = None;
+
+        should_redraw(
+            &mut state,
+            press(KeyCode::Tab),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        assert_eq!(state.run_inspector_mode(), RunInspectorMode::Source);
+
+        // A terminal reporting the held key as `Repeat` must not flip the
+        // mode again on every repeat tick — held `Tab` should behave like
+        // a single press, not an oscillating toggle.
+        for _ in 0..5 {
+            should_redraw(
+                &mut state,
+                repeat(KeyCode::Tab),
+                (120, 40),
+                &mut last_transition_press,
+            );
+        }
+        assert_eq!(state.run_inspector_mode(), RunInspectorMode::Source);
+    }
+
+    #[test]
+    fn up_down_scroll_source_instead_of_chronology_once_source_mode_is_active() {
+        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
+        events.extend(clear_and_paste(&long_route_to_uplink()));
+        events.push(press(KeyCode::F(6)));
+        events.push(press(KeyCode::Char(' '))); // pause
+        events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
+        events.push(press(KeyCode::F(5))); // Review Run
+        events.push(press(KeyCode::Tab)); // TIMELINE -> SOURCE
+
+        let (mut state, _) = render(120, 40, &events);
+        assert_eq!(state.run_inspector_mode(), state::RunInspectorMode::Source);
+        let selected_before = state.review_selected();
+        let mut last_transition_press: TransitionKeyDebounce = None;
+
+        should_redraw(
+            &mut state,
+            press(KeyCode::Down),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        should_redraw(
+            &mut state,
+            press(KeyCode::Down),
+            (120, 40),
+            &mut last_transition_press,
+        );
+
+        assert_eq!(state.source_scroll(), 2);
+        assert_eq!(
+            state.review_selected(),
+            selected_before,
+            "Down in SOURCE mode must scroll source, not move the chronology \
+             selection the same key drives in TIMELINE"
+        );
+
+        should_redraw(
+            &mut state,
+            press(KeyCode::Up),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        assert_eq!(state.source_scroll(), 1);
+    }
+
+    #[test]
+    fn page_down_in_source_mode_moves_by_the_real_visible_source_page_size() {
+        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
+        events.extend(clear_and_paste(&long_route_to_uplink()));
+        events.push(press(KeyCode::F(6)));
+        events.push(press(KeyCode::Char(' '))); // pause
+        events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
+        events.push(press(KeyCode::F(5))); // Review Run
+        events.push(press(KeyCode::Tab)); // TIMELINE -> SOURCE
+
+        let (mut state, _) = render(120, 40, &events);
+        assert_eq!(state.source_scroll(), 0);
+        let page = ui::review_source_visible_rows(&state, 120, 40);
+        assert!(
+            page > 0,
+            "the source pane should show at least one row at this geometry"
+        );
+        let mut last_transition_press: TransitionKeyDebounce = None;
+
+        should_redraw(
+            &mut state,
+            press(KeyCode::PageDown),
+            (120, 40),
+            &mut last_transition_press,
+        );
+
+        assert_eq!(
+            state.source_scroll(),
+            page as u16,
+            "PageDown should move exactly one screenful, not stay at the \
+             placeholder `0` `event::map` emits"
+        );
+    }
+
+    #[test]
+    fn end_in_source_mode_clamps_to_the_real_max_scroll() {
+        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
+        events.extend(clear_and_paste(&long_route_to_uplink()));
+        events.push(press(KeyCode::F(6)));
+        events.push(press(KeyCode::Char(' '))); // pause
+        events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
+        events.push(press(KeyCode::F(5))); // Review Run
+        events.push(press(KeyCode::Tab)); // TIMELINE -> SOURCE
+
+        let (mut state, _) = render(120, 40, &events);
+        let mut last_transition_press: TransitionKeyDebounce = None;
+
+        should_redraw(
+            &mut state,
+            press(KeyCode::End),
+            (120, 40),
+            &mut last_transition_press,
+        );
+
+        let max_scroll = ui::review_source_max_scroll(&state, 120, 40);
+        assert!(max_scroll > 0, "the padded source should need scrolling");
+        assert_eq!(
+            state.source_scroll(),
+            max_scroll,
+            "End should clamp down to the real end of the source from the \
+             large sentinel `Msg::JumpSourceEnd` stores, not stay pinned \
+             near `MAX_PANE_SCROLL`"
         );
     }
 

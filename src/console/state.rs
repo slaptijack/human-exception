@@ -86,6 +86,21 @@ impl View {
     }
 }
 
+/// Which of the two read-only surfaces the Run Inspector (`PaneId::
+/// OperationTelemetry`, once a deployment has finished) currently shows —
+/// `docs/TUI_DESIGN.md`, "Review Run". `Tab`, while the Run Inspector is
+/// focused, toggles between them (`event::review_run_focus_matches`).
+/// `Timeline` is the chronology index plus the selected review point's
+/// evidence (unchanged by this mode's existence); `Source` is the complete,
+/// unbounded `Operation::deployed_source`, independently scrollable via
+/// [`AppState::source_scroll`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RunInspectorMode {
+    #[default]
+    Timeline,
+    Source,
+}
+
 /// A named pane within a multi-pane view (`docs/TUI_DESIGN.md`, "Pane
 /// focus"). Every view has one or two of these; which combinations are
 /// valid is defined by [`View::panes`], and the only place `AppState` writes
@@ -183,6 +198,12 @@ pub struct OperationView<'a> {
     /// a reviewable point). Re-clamped here against the freshly computed
     /// `review_points`, so a stale stored index can never be read as valid.
     pub review_selected: Option<usize>,
+    /// Which of the Run Inspector's two modes is currently showing.
+    pub run_inspector_mode: RunInspectorMode,
+    /// The Run Inspector's current scroll offset into `deployed_source`
+    /// while `run_inspector_mode` is [`RunInspectorMode::Source`]; ignored
+    /// in [`RunInspectorMode::Timeline`].
+    pub source_scroll: u16,
 }
 
 /// How a finished deployment ended, derived once from the authoritative
@@ -392,6 +413,32 @@ pub enum Msg {
     /// `ScrollUp`/`ScrollDown` after applying them.
     SelectReviewPointPageBackward(usize),
     SelectReviewPointPageForward(usize),
+    /// `Tab`, while the Run Inspector is focused on a finished run
+    /// (`event::review_run_focus_matches`): flips `run_inspector_mode`
+    /// between `Timeline` and `Source`. A no-op unless the focused run is
+    /// finished and has at least one review point — the same gate
+    /// chronology navigation shares (`AppState::review_chronology_len`).
+    ToggleRunInspectorMode,
+    /// Scrolls `source_scroll` by one row while `run_inspector_mode` is
+    /// `Source`. `event::map` only emits these when that mode is active
+    /// (the same key otherwise produces `SelectPrevious`/`NextReviewPoint`
+    /// in `Timeline`), so `apply` need only re-check the run-finished gate,
+    /// not the mode itself.
+    ScrollSourceUp,
+    ScrollSourceDown,
+    /// Moves `source_scroll` backward/forward by one visible source-pane
+    /// page. Carries a placeholder `0` from `event::map`, rewritten by
+    /// `console::mod`'s dispatch loop from `ui::review_source_visible_rows`
+    /// before calling `apply` — the same placeholder-and-rewrite pattern
+    /// `SelectReviewPointPageBackward`/`PageForward` already use.
+    ScrollSourcePageBackward(usize),
+    ScrollSourcePageForward(usize),
+    /// Jumps `source_scroll` straight to the beginning/end of
+    /// `deployed_source`. `JumpSourceEnd` sets a large sentinel value,
+    /// clamped down to the real end by `console::should_redraw` the same
+    /// way `ScrollDown` is clamped via `pane_max_scroll`/`clamp_scroll`.
+    JumpSourceStart,
+    JumpSourceEnd,
     /// An editing/cursor-movement key applied to the current controller
     /// source; a no-op if no controller is loaded.
     EditController(EditOp),
@@ -487,6 +534,22 @@ pub struct AppState {
     /// navigating away and back, and opening/dismissing Help, preserve it
     /// for free; a fresh deploy always resets it.
     review_selected: Option<usize>,
+    /// Which Run Inspector mode is currently showing (`docs/TUI_DESIGN.md`,
+    /// "Review Run"). Lives independently of `Operation`, the same way
+    /// `review_selected` does, and for the same reason: reset only where
+    /// `review_selected` itself is reset (`AppState::deploy`,
+    /// `AppState::step_operation`'s terminal branch), and otherwise left
+    /// untouched, so navigating away and back preserves it for free.
+    run_inspector_mode: RunInspectorMode,
+    /// The Run Inspector's scroll offset into `deployed_source` while
+    /// `run_inspector_mode` is [`RunInspectorMode::Source`]. Reset alongside
+    /// `run_inspector_mode`; otherwise preserved the same way, so leaving
+    /// and returning to the same reviewed run's SOURCE view keeps the
+    /// player's place. The real content-and-frame-size-aware bound is
+    /// `ui::review_source_max_scroll`, which `console::should_redraw`
+    /// re-clamps this against after every source-scroll key, mirroring
+    /// `scroll_offsets`/`clamp_scroll`.
+    source_scroll: u16,
     should_quit: bool,
 }
 
@@ -508,6 +571,8 @@ impl Default for AppState {
             scroll_offsets: HashMap::new(),
             focused_panes: HashMap::new(),
             review_selected: None,
+            run_inspector_mode: RunInspectorMode::Timeline,
+            source_scroll: 0,
             should_quit: false,
         }
     }
@@ -666,6 +731,8 @@ impl AppState {
                 conclusion,
                 review_points,
                 review_selected,
+                run_inspector_mode: self.run_inspector_mode,
+                source_scroll: self.source_scroll,
             }
         })
     }
@@ -689,6 +756,18 @@ impl AppState {
         }
         let len = review_points(&op.initial_snapshot, &op.records, op.error.as_ref()).len();
         (len > 0).then_some(len)
+    }
+
+    /// Whether the Run Inspector's mode toggle and SOURCE scrolling apply
+    /// right now: an operation exists and has finished, regardless of
+    /// whether it produced any reviewable chronology point. Deliberately
+    /// broader than [`Self::review_chronology_len`] — a zero-tick
+    /// deploy-time load failure still has a frozen `deployed_source` worth
+    /// inspecting in SOURCE even though it has no chronology to browse in
+    /// TIMELINE, so gating SOURCE on chronology existing would make an
+    /// already-failed deployment's exact source unreachable.
+    fn run_inspector_available(&self) -> bool {
+        self.operation.as_ref().is_some_and(Operation::is_finished)
     }
 
     /// Whether the current view should be advancing the active run one tick
@@ -737,6 +816,31 @@ impl AppState {
         if let Some(offset) = self.scroll_offsets.get_mut(&pane) {
             *offset = (*offset).min(max);
         }
+    }
+
+    /// Which Run Inspector mode is currently showing.
+    pub fn run_inspector_mode(&self) -> RunInspectorMode {
+        self.run_inspector_mode
+    }
+
+    /// The Run Inspector's current scroll offset into `deployed_source`.
+    ///
+    /// Not yet read by any rendering code — `ui.rs` reads
+    /// `OperationView::source_scroll` instead, the same split
+    /// `AppState::review_selected`'s doc comment documents — but exercised
+    /// directly by this module's tests.
+    #[allow(dead_code)]
+    pub fn source_scroll(&self) -> u16 {
+        self.source_scroll
+    }
+
+    /// Bounds the stored `source_scroll` against `max`, the same role
+    /// [`AppState::clamp_scroll`] plays for `scroll_offsets` — without this,
+    /// repeated `Down`/`PageDown` presses in `RunInspectorMode::Source`
+    /// could advance the offset arbitrarily far past the last visible
+    /// source line.
+    pub fn clamp_source_scroll(&mut self, max: u16) {
+        self.source_scroll = self.source_scroll.min(max);
     }
 
     /// The pane currently focused in `view`, or its documented default if
@@ -908,6 +1012,60 @@ impl AppState {
                     self.review_selected = Some((current + page.max(1)).min(len - 1));
                 }
             }
+            Msg::ToggleRunInspectorMode => {
+                if self.run_inspector_available() {
+                    self.run_inspector_mode = match self.run_inspector_mode {
+                        RunInspectorMode::Timeline => RunInspectorMode::Source,
+                        RunInspectorMode::Source => RunInspectorMode::Timeline,
+                    };
+                }
+            }
+            Msg::ScrollSourceUp => {
+                if self.run_inspector_available() {
+                    self.source_scroll = self.source_scroll.saturating_sub(1);
+                }
+            }
+            Msg::ScrollSourceDown => {
+                if self.run_inspector_available() {
+                    // No upper bound here beyond `u16`'s own range: unlike
+                    // `ScrollUp`/`ScrollDown`'s shared `MAX_PANE_SCROLL`
+                    // cap (sized for authored Help/Report content),
+                    // `deployed_source` is arbitrary-length player Lua and
+                    // must stay reachable to its true end however long it
+                    // is. `console::should_redraw` re-clamps this down to
+                    // the real content height via `ui::review_source_max_scroll`
+                    // right after this runs, the same way it already does
+                    // for `ScrollUp`/`ScrollDown`.
+                    self.source_scroll = self.source_scroll.saturating_add(1);
+                }
+            }
+            Msg::ScrollSourcePageBackward(page) => {
+                if self.run_inspector_available() {
+                    let page = page.max(1).min(u16::MAX as usize) as u16;
+                    self.source_scroll = self.source_scroll.saturating_sub(page);
+                }
+            }
+            Msg::ScrollSourcePageForward(page) => {
+                if self.run_inspector_available() {
+                    let page = page.max(1).min(u16::MAX as usize) as u16;
+                    self.source_scroll = self.source_scroll.saturating_add(page);
+                }
+            }
+            Msg::JumpSourceStart => {
+                if self.run_inspector_available() {
+                    self.source_scroll = 0;
+                }
+            }
+            Msg::JumpSourceEnd => {
+                if self.run_inspector_available() {
+                    // A large sentinel, not the real end (this module has
+                    // no notion of pane width/height to compute it) — see
+                    // `ScrollSourceDown`'s comment above for the same
+                    // reasoning, and `Msg::JumpSourceEnd`'s doc comment for
+                    // where it gets clamped down to the true end.
+                    self.source_scroll = u16::MAX;
+                }
+            }
             Msg::EditController(op) => {
                 if let Some(controller) = self.controller.as_mut()
                     && controller.apply(op)
@@ -1073,6 +1231,11 @@ impl AppState {
         } else {
             None
         };
+        // A fresh deploy always shows the new run's Run Inspector starting
+        // in TIMELINE, regardless of what mode/scroll the previous run was
+        // left in — `docs/TUI_DESIGN.md`, "Review Run".
+        self.run_inspector_mode = RunInspectorMode::Timeline;
+        self.source_scroll = 0;
         if operation.is_finished() {
             self.set_focused_pane(View::Operation, PaneId::OperationTelemetry);
         }
@@ -1124,6 +1287,8 @@ impl AppState {
             self.scroll_offsets.insert(PaneId::Report, 0);
             self.set_focused_pane(View::AfterAction, PaneId::Report);
             self.review_selected = terminal_review_point;
+            self.run_inspector_mode = RunInspectorMode::Timeline;
+            self.source_scroll = 0;
             self.set_focused_pane(View::Operation, PaneId::OperationTelemetry);
         }
         true
@@ -2046,6 +2211,154 @@ mod tests {
             "undo/redo on the working copy must never reach the frozen \
              deploy snapshot either"
         );
+    }
+
+    #[test]
+    fn run_inspector_starts_in_timeline_mode_once_a_run_finishes() {
+        let mut state = working_state();
+        state.apply(Msg::RequestDeploy);
+        while state.advance_running_operation() {}
+
+        assert!(state.operation().unwrap().finished);
+        assert_eq!(state.run_inspector_mode(), RunInspectorMode::Timeline);
+        assert_eq!(state.source_scroll(), 0);
+    }
+
+    #[test]
+    fn toggle_run_inspector_mode_is_a_noop_before_a_run_finishes() {
+        let mut state = working_state();
+        state.apply(Msg::RequestDeploy);
+        assert!(!state.operation().unwrap().finished);
+
+        state.apply(Msg::ToggleRunInspectorMode);
+
+        assert_eq!(state.run_inspector_mode(), RunInspectorMode::Timeline);
+    }
+
+    #[test]
+    fn toggle_run_inspector_mode_is_a_noop_with_no_deployment_at_all() {
+        let mut state = working_state();
+
+        state.apply(Msg::ToggleRunInspectorMode);
+
+        assert_eq!(state.run_inspector_mode(), RunInspectorMode::Timeline);
+    }
+
+    #[test]
+    fn toggle_run_inspector_mode_works_for_a_zero_tick_deploy_failure() {
+        // A load failure never produces a review point, so TIMELINE has
+        // nothing to browse — but SOURCE must still reach the exact source
+        // that failed to load, not treat this deployment as unreachable.
+        let mut state = working_state();
+        state.controller = Some(ControllerDocument::new("function on_tick("));
+        state.apply(Msg::RequestDeploy);
+        let op = state.operation().expect("a deploy just happened");
+        assert!(op.finished);
+        assert!(op.review_points.is_empty());
+
+        state.apply(Msg::ToggleRunInspectorMode);
+
+        assert_eq!(state.run_inspector_mode(), RunInspectorMode::Source);
+    }
+
+    #[test]
+    fn toggle_run_inspector_mode_switches_between_timeline_and_source_once_finished() {
+        let mut state = working_state();
+        state.apply(Msg::RequestDeploy);
+        while state.advance_running_operation() {}
+        assert!(state.operation().unwrap().finished);
+
+        state.apply(Msg::ToggleRunInspectorMode);
+        assert_eq!(state.run_inspector_mode(), RunInspectorMode::Source);
+
+        state.apply(Msg::ToggleRunInspectorMode);
+        assert_eq!(state.run_inspector_mode(), RunInspectorMode::Timeline);
+    }
+
+    #[test]
+    fn source_scroll_messages_move_the_scroll_offset_only_once_a_run_has_finished() {
+        let mut state = working_state();
+        state.apply(Msg::RequestDeploy);
+
+        // Not finished yet: every source-scroll `Msg` is a no-op.
+        state.apply(Msg::ScrollSourceDown);
+        assert_eq!(state.source_scroll(), 0);
+
+        while state.advance_running_operation() {}
+        assert!(state.operation().unwrap().finished);
+
+        state.apply(Msg::ScrollSourceDown);
+        assert_eq!(state.source_scroll(), 1);
+        state.apply(Msg::ScrollSourceDown);
+        assert_eq!(state.source_scroll(), 2);
+        state.apply(Msg::ScrollSourceUp);
+        assert_eq!(state.source_scroll(), 1);
+        // `Up` never goes negative.
+        state.apply(Msg::ScrollSourceUp);
+        state.apply(Msg::ScrollSourceUp);
+        assert_eq!(state.source_scroll(), 0);
+
+        state.apply(Msg::ScrollSourcePageForward(5));
+        assert_eq!(state.source_scroll(), 5);
+        state.apply(Msg::ScrollSourcePageBackward(2));
+        assert_eq!(state.source_scroll(), 3);
+
+        state.apply(Msg::JumpSourceEnd);
+        assert_eq!(state.source_scroll(), u16::MAX);
+        state.apply(Msg::JumpSourceStart);
+        assert_eq!(state.source_scroll(), 0);
+    }
+
+    #[test]
+    fn redeploying_resets_run_inspector_mode_and_source_scroll() {
+        let mut state = working_state();
+        state.apply(Msg::RequestDeploy);
+        while state.advance_running_operation() {}
+        assert!(state.operation().unwrap().finished);
+        state.apply(Msg::ToggleRunInspectorMode);
+        state.apply(Msg::ScrollSourceDown);
+        assert_eq!(state.run_inspector_mode(), RunInspectorMode::Source);
+        assert_eq!(state.source_scroll(), 1);
+
+        state.apply(Msg::ConfirmDeploy);
+
+        assert_eq!(state.run_inspector_mode(), RunInspectorMode::Timeline);
+        assert_eq!(state.source_scroll(), 0);
+    }
+
+    #[test]
+    fn a_run_finishing_over_several_ticks_resets_run_inspector_mode_and_source_scroll() {
+        let mut state = working_state();
+        state.controller = Some(ControllerDocument::new(ROUTE_TO_UPLINK));
+        state.apply(Msg::RequestDeploy);
+        assert!(!state.operation().unwrap().finished);
+
+        // Drive the run to completion via `step_operation`'s terminal
+        // branch (`ROUTE_TO_UPLINK` finishes in a bounded number of ticks),
+        // rather than `deploy`'s own reset, to prove both reset sites work.
+        while !state.operation().unwrap().finished {
+            state.advance_running_operation();
+        }
+
+        assert_eq!(state.run_inspector_mode(), RunInspectorMode::Timeline);
+        assert_eq!(state.source_scroll(), 0);
+    }
+
+    #[test]
+    fn navigating_away_and_back_preserves_run_inspector_mode_and_source_scroll() {
+        let mut state = working_state();
+        state.apply(Msg::RequestDeploy);
+        while state.advance_running_operation() {}
+        assert!(state.operation().unwrap().finished);
+        state.apply(Msg::ToggleRunInspectorMode);
+        state.apply(Msg::ScrollSourceDown);
+        state.apply(Msg::ScrollSourceDown);
+
+        state.apply(Msg::Navigate(View::Controller));
+        state.apply(Msg::Navigate(View::Operation));
+
+        assert_eq!(state.run_inspector_mode(), RunInspectorMode::Source);
+        assert_eq!(state.source_scroll(), 2);
     }
 
     #[test]
