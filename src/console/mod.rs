@@ -465,12 +465,14 @@ fn should_redraw(
                 Msg::ScrollPageBackward(_) => {
                     Msg::ScrollPageBackward(ui::scroll_pane_visible_rows(
                         state.focused_pane(state.current_view()),
+                        state,
                         frame_size.0,
                         frame_size.1,
                     ))
                 }
                 Msg::ScrollPageForward(_) => Msg::ScrollPageForward(ui::scroll_pane_visible_rows(
                     state.focused_pane(state.current_view()),
+                    state,
                     frame_size.0,
                     frame_size.1,
                 )),
@@ -2007,7 +2009,7 @@ mod tests {
         // `0`, and that `Home`/`End` reach the true start/end.
         let (mut state, _) = render(120, 40, &[press(KeyCode::F(1))]);
         let mut last_transition_press: TransitionKeyDebounce = None;
-        let page = ui::scroll_pane_visible_rows(PaneId::Help, 120, 40);
+        let page = ui::scroll_pane_visible_rows(PaneId::Help, &state, 120, 40);
         assert!(page > 0);
         let max = ui::help_max_scroll(&state, 120, 40);
         assert!(max > 0, "Help's content should need scrolling at this size");
@@ -2069,10 +2071,18 @@ mod tests {
         assert_eq!(state.focused_pane(View::AfterAction), PaneId::Report);
 
         let mut last_transition_press: TransitionKeyDebounce = None;
-        let page = ui::scroll_pane_visible_rows(PaneId::Report, width, height);
+        let page = ui::scroll_pane_visible_rows(PaneId::Report, &state, width, height);
         assert!(page > 0);
         let max = ui::after_action_max_scroll(&state, width, height);
         assert!(max > 0, "the long error report should need scrolling");
+        assert_eq!(
+            page,
+            ui::after_action_report_inner_dimensions(width, height).1 as usize - 1,
+            "a failed operation pins one extra recovery row below the \
+             scrollable text, so the page size must be one row shorter \
+             than the pane's raw content height, matching \
+             after_action_max_scroll's own reservation"
+        );
 
         should_redraw(
             &mut state,

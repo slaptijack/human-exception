@@ -1531,12 +1531,28 @@ pub(crate) fn help_max_scroll(state: &AppState, frame_width: u16, frame_height: 
 /// contributes `0`. This is the amount `PageUp`/`PageDown` move the offset
 /// by (`Msg::ScrollPageBackward`/`PageForward`) — the same
 /// visible-viewport-height role [`signals_list_visible_items`] and
-/// [`review_source_visible_rows`] play for their own surfaces.
-pub(crate) fn scroll_pane_visible_rows(pane: PaneId, frame_width: u16, frame_height: u16) -> usize {
+/// [`review_source_visible_rows`] play for their own surfaces. For Report,
+/// this must subtract the same pinned `F4` recovery row
+/// [`after_action_max_scroll`] already accounts for on a failed operation
+/// (`draw_after_action_report_pane` reserves it below the scrollable text),
+/// or paging would advance one row further than the player can actually
+/// see, skipping an unread row between pages.
+pub(crate) fn scroll_pane_visible_rows(
+    pane: PaneId,
+    state: &AppState,
+    frame_width: u16,
+    frame_height: u16,
+) -> usize {
     match pane {
         PaneId::Help => help_inner_dimensions(frame_width, frame_height).1 as usize,
         PaneId::Report => {
-            after_action_report_inner_dimensions(frame_width, frame_height).1 as usize
+            let (_, content_height) =
+                after_action_report_inner_dimensions(frame_width, frame_height);
+            let pinned_action_row = state
+                .operation()
+                .map(|op| u16::from(!after_action_succeeded(&op)))
+                .unwrap_or(0);
+            content_height.saturating_sub(pinned_action_row) as usize
         }
         _ => 0,
     }
