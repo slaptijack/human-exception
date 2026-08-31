@@ -380,6 +380,13 @@ pub enum Msg {
     DismissHelp,
     SelectPreviousSignal,
     SelectNextSignal,
+    SelectFirstSignal,
+    SelectLastSignal,
+    /// `0` is a placeholder page size, rewritten to the real visible list
+    /// page by `console::mod::should_redraw` — the same convention
+    /// `SelectReviewPointPageBackward`/`PageForward` already use.
+    SelectSignalPageBackward(usize),
+    SelectSignalPageForward(usize),
     /// Context-sensitive "Enter": inspects the selected signal in Signals,
     /// or commits to working the current dossier's opportunity in Target.
     Activate,
@@ -966,6 +973,19 @@ impl AppState {
                 let last = authored_signals().len().saturating_sub(1);
                 self.selected_signal = (self.selected_signal + 1).min(last);
             }
+            Msg::SelectFirstSignal => {
+                self.selected_signal = 0;
+            }
+            Msg::SelectLastSignal => {
+                self.selected_signal = authored_signals().len().saturating_sub(1);
+            }
+            Msg::SelectSignalPageBackward(page) => {
+                self.selected_signal = self.selected_signal.saturating_sub(page.max(1));
+            }
+            Msg::SelectSignalPageForward(page) => {
+                let last = authored_signals().len().saturating_sub(1);
+                self.selected_signal = (self.selected_signal + page.max(1)).min(last);
+            }
             Msg::Activate => self.activate(),
             Msg::FocusNextPane => self.focus_next_pane(),
             Msg::ScrollUp => {
@@ -1511,6 +1531,51 @@ mod tests {
             state.apply(Msg::SelectNextSignal);
         }
         assert_eq!(state.selected_signal(), authored_signals().len() - 1);
+    }
+
+    #[test]
+    fn home_and_end_jump_signal_selection_to_the_first_and_last_signal() {
+        let mut state = AppState::new();
+        let last = authored_signals().len() - 1;
+
+        state.apply(Msg::SelectLastSignal);
+        assert_eq!(state.selected_signal(), last);
+
+        state.apply(Msg::SelectFirstSignal);
+        assert_eq!(state.selected_signal(), 0);
+
+        // Inert at the boundary they already sit at.
+        state.apply(Msg::SelectFirstSignal);
+        assert_eq!(state.selected_signal(), 0);
+    }
+
+    #[test]
+    fn signal_page_movement_clamps_at_the_ends_without_wrapping() {
+        let mut state = AppState::new();
+        let last = authored_signals().len() - 1;
+
+        state.apply(Msg::SelectSignalPageForward(2));
+        assert_eq!(state.selected_signal(), 2.min(last));
+
+        state.apply(Msg::SelectSignalPageForward(last + 10));
+        assert_eq!(state.selected_signal(), last);
+
+        state.apply(Msg::SelectSignalPageBackward(2));
+        assert_eq!(state.selected_signal(), last.saturating_sub(2));
+
+        state.apply(Msg::SelectSignalPageBackward(last + 10));
+        assert_eq!(state.selected_signal(), 0);
+    }
+
+    #[test]
+    fn signal_page_movement_treats_a_zero_page_size_as_one() {
+        let mut state = AppState::new();
+
+        state.apply(Msg::SelectSignalPageForward(0));
+        assert_eq!(state.selected_signal(), 1.min(authored_signals().len() - 1));
+
+        state.apply(Msg::SelectSignalPageBackward(0));
+        assert_eq!(state.selected_signal(), 0);
     }
 
     #[test]

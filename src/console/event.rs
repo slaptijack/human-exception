@@ -687,6 +687,28 @@ mod tests {
     }
 
     #[test]
+    fn page_and_home_end_keys_move_signal_selection_only_in_signals() {
+        assert_eq!(
+            map_in(key(KeyCode::PageUp), View::Signals),
+            Some(Msg::SelectSignalPageBackward(0))
+        );
+        assert_eq!(
+            map_in(key(KeyCode::PageDown), View::Signals),
+            Some(Msg::SelectSignalPageForward(0))
+        );
+        assert_eq!(
+            map_in(key(KeyCode::Home), View::Signals),
+            Some(Msg::SelectFirstSignal)
+        );
+        assert_eq!(
+            map_in(key(KeyCode::End), View::Signals),
+            Some(Msg::SelectLastSignal)
+        );
+        assert_eq!(map_in(key(KeyCode::PageUp), View::Target), None);
+        assert_eq!(map_in(key(KeyCode::Home), View::Target), None);
+    }
+
+    #[test]
     fn arrows_scroll_help_when_help_is_open() {
         assert_eq!(map_in(key(KeyCode::Up), View::Help), Some(Msg::ScrollUp));
         assert_eq!(
@@ -734,6 +756,26 @@ mod tests {
             ),
             None
         );
+        for k in [
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+            KeyCode::Home,
+            KeyCode::End,
+        ] {
+            assert_eq!(
+                map(
+                    key(k),
+                    View::Signals,
+                    false,
+                    false,
+                    false,
+                    selected_signal_focused,
+                    true
+                ),
+                None,
+                "{k:?} should be inert while the Selected Signal pane is focused"
+            );
+        }
     }
 
     #[test]
@@ -1285,23 +1327,24 @@ mod tests {
 
     #[test]
     fn review_run_chronology_keys_do_not_leak_into_other_views() {
-        // Signals keeps its own Up/Down selection semantics even though it
-        // also uses `PaneId::SignalsList`, distinct from
-        // `PaneId::OperationTelemetry` — this just guards against the
-        // gate ever being loosened to match on the key alone.
+        // Signals keeps its own selection semantics even though it also
+        // uses `PaneId::SignalsList`, distinct from
+        // `PaneId::OperationTelemetry` — this guards against the gate ever
+        // being loosened to match on the key alone and produce Review Run's
+        // `Msg` variants for Signals instead of its own.
         assert_eq!(
             map_in(key(KeyCode::Up), View::Signals),
             Some(Msg::SelectPreviousSignal)
         );
         assert_eq!(
             map_in(key(KeyCode::PageUp), View::Signals),
-            None,
-            "Signals has no PageUp binding of its own"
+            Some(Msg::SelectSignalPageBackward(0)),
+            "Signals has its own PageUp binding, not Review Run's"
         );
         assert_eq!(
             map_in(key(KeyCode::Home), View::Signals),
-            None,
-            "Signals has no Home binding of its own"
+            Some(Msg::SelectFirstSignal),
+            "Signals has its own Home binding, not Review Run's"
         );
     }
 

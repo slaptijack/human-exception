@@ -467,6 +467,12 @@ fn should_redraw(
                 Msg::SelectReviewPointPageForward(_) => Msg::SelectReviewPointPageForward(
                     ui::review_chronology_visible_rows(state, frame_size.0, frame_size.1),
                 ),
+                Msg::SelectSignalPageBackward(_) => Msg::SelectSignalPageBackward(
+                    ui::signals_list_visible_items(frame_size.0, frame_size.1),
+                ),
+                Msg::SelectSignalPageForward(_) => Msg::SelectSignalPageForward(
+                    ui::signals_list_visible_items(frame_size.0, frame_size.1),
+                ),
                 other => other,
             };
             let is_pane_scroll = matches!(msg, Msg::ScrollUp | Msg::ScrollDown);
@@ -1623,6 +1629,86 @@ mod tests {
             "PageDown from the first point should land exactly `page` points \
              forward, not stay at the placeholder `0` `event::map` emits"
         );
+    }
+
+    #[test]
+    fn signals_page_and_home_end_navigation_uses_real_geometry_and_only_moves_while_focused() {
+        // Signals owns focus by default, so no F8/navigation is needed to
+        // reach it. `event::map` emits `Msg::SelectSignalPageForward(0)`/
+        // `PageBackward(0)` as placeholders — this exercises the full
+        // pipeline through `should_redraw`, confirming they're rewritten
+        // with the real `ui::signals_list_visible_items` count for this
+        // frame size before `apply` runs, not left at `0`.
+        let mut state = AppState::new();
+        assert_eq!(
+            state.focused_pane(state.current_view()),
+            PaneId::SignalsList
+        );
+        let last = intel::authored_signals().len() - 1;
+        let page = ui::signals_list_visible_items(120, 40);
+        assert!(page > 0);
+
+        let mut last_transition_press: TransitionKeyDebounce = None;
+        should_redraw(
+            &mut state,
+            press(KeyCode::PageDown),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        assert_eq!(
+            state.selected_signal(),
+            page.min(last),
+            "PageDown should land exactly `page` signals forward (clamped \
+             at the end), not stay at the placeholder `0` `event::map` emits"
+        );
+
+        should_redraw(
+            &mut state,
+            press(KeyCode::Home),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        assert_eq!(state.selected_signal(), 0);
+
+        should_redraw(
+            &mut state,
+            press(KeyCode::End),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        assert_eq!(state.selected_signal(), last);
+
+        should_redraw(
+            &mut state,
+            press(KeyCode::PageUp),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        assert_eq!(
+            state.selected_signal(),
+            last.saturating_sub(page),
+            "PageUp should move back `page` signals, clamped at the start"
+        );
+
+        // Moving focus off the Signals list makes every one of these keys
+        // inert, matching the console-wide focus-ownership contract.
+        state.apply(Msg::FocusNextPane);
+        assert_eq!(state.focused_pane(View::Signals), PaneId::SelectedSignal);
+        let before = state.selected_signal();
+        for key in [
+            KeyCode::PageDown,
+            KeyCode::PageUp,
+            KeyCode::Home,
+            KeyCode::End,
+        ] {
+            should_redraw(
+                &mut state,
+                press(key),
+                (120, 40),
+                &mut last_transition_press,
+            );
+        }
+        assert_eq!(state.selected_signal(), before);
     }
 
     /// A route script padded with enough leading comment lines that its

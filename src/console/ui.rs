@@ -1321,11 +1321,13 @@ fn draw_signals(frame: &mut Frame, area: Rect, state: &AppState) {
 
     let [left, right] =
         Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(area);
+    let frame_size = frame.area();
+    let visible_items = signals_list_visible_items(frame_size.width, frame_size.height);
     draw_pane(
         frame,
         left,
         pane_title("SIGNALS", focused == PaneId::SignalsList),
-        signal_list_lines(state),
+        signal_list_lines(state, visible_items),
     );
     draw_signal_detail_pane(frame, right, signal, focused == PaneId::SelectedSignal);
 }
@@ -1349,9 +1351,30 @@ fn signal_origin(signal: &Signal) -> String {
     format!("{} // {}", signal.source, signal.category.label())
 }
 
-fn signal_list_lines(state: &AppState) -> Vec<Line<'static>> {
+/// The fixed number of rendered rows [`signal_list_lines`] gives each
+/// signal: header, headline, blank separator.
+const SIGNAL_ROWS_PER_ITEM: usize = 3;
+
+/// The Signals list: one entry per signal, windowed to `visible_items`
+/// around the selected signal ([`list_window_start`]) so the selection
+/// always stays on-screen, with the selected entry marked the same `"> "`
+/// cursor + bold convention [`review_chronology_lines`] uses for Review
+/// Run's chronology index. `visible_items == 0` (an undersized terminal, or
+/// called outside render at frame size `(0, 0)`) falls back to rendering
+/// every signal unwindowed rather than nothing, since Signals has no
+/// separate fallback content the way Review Run does.
+fn signal_list_lines(state: &AppState, visible_items: usize) -> Vec<Line<'static>> {
+    let signals = authored_signals();
+    let (start, end) = if visible_items == 0 {
+        (0, signals.len())
+    } else {
+        let start = list_window_start(state.selected_signal(), signals.len(), visible_items);
+        (start, (start + visible_items).min(signals.len()))
+    };
+
     let mut lines = Vec::new();
-    for (index, signal) in authored_signals().iter().enumerate() {
+    for (index, signal) in signals[start..end].iter().enumerate() {
+        let index = start + index;
         let cursor = if index == state.selected_signal() {
             "> "
         } else {
@@ -1614,6 +1637,41 @@ pub(crate) fn review_chronology_visible_rows(
         .saturating_sub(SEPARATOR_ROWS) as usize
 }
 
+/// The Signals pane's content dimensions, matching the exact geometry
+/// [`draw_signals`] renders with — the same role
+/// [`review_chronology_inner_dimensions`] plays for Review Run. Reused by
+/// both the render path and `console::mod`'s dispatch loop (which only has
+/// the raw frame size, not a rendered [`Rect`]) so the selected signal's
+/// visible-item count can never drift between the two.
+fn signals_list_inner_dimensions(frame_width: u16, frame_height: u16) -> (u16, u16) {
+    if frame_width < MIN_COLUMNS || frame_height < MIN_ROWS {
+        return (0, 0);
+    }
+    const HEADER_AND_FOOTER_HEIGHT: u16 = 6; // draw()'s two Length(3) rows
+    const BORDER_INSET: u16 = 2; // the Signals pane's own Block::borders(ALL)
+    let body_height = frame_height.saturating_sub(HEADER_AND_FOOTER_HEIGHT);
+
+    let [left, _] = Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .areas(Rect::new(0, 0, frame_width, body_height));
+
+    (
+        left.width.saturating_sub(BORDER_INSET),
+        body_height.saturating_sub(BORDER_INSET),
+    )
+}
+
+/// How many signals the Signals list can show at once at this frame size —
+/// [`signals_list_inner_dimensions`]'s content height divided by
+/// [`SIGNAL_ROWS_PER_ITEM`], the fixed number of rendered rows
+/// [`signal_list_lines`] gives each signal. This is also the amount
+/// `PageUp`/`PageDown` move the selection by
+/// (`Msg::SelectSignalPageBackward`/`PageForward`) — the player pages
+/// exactly one screenful of the list they can currently see.
+pub(crate) fn signals_list_visible_items(frame_width: u16, frame_height: u16) -> usize {
+    let (_, content_height) = signals_list_inner_dimensions(frame_width, frame_height);
+    content_height as usize / SIGNAL_ROWS_PER_ITEM
+}
+
 /// The complete `deployed_source` as one raw (unwrapped, unhighlighted)
 /// `Line` per line, splitting on `\n` rather than [`str::lines`] so a
 /// source ending in a newline still yields a trailing empty line —
@@ -1731,17 +1789,19 @@ fn draw_run_inspector_source_pane(
     frame.render_widget(paragraph, content_area);
 }
 
-/// The first review point index the chronology index should render at
-/// `visible_rows` tall so that `selected` stays visible, without storing
-/// any independent viewport/scroll state (`docs/VISION.md`'s epic #130:
-/// "derive the viewport behavior from the selected point rather than
-/// adding a second independently authoritative selection"). Purely a
-/// function of `(selected, total, visible_rows)`: the chronology is split
-/// into fixed `visible_rows`-sized pages and whichever page contains
-/// `selected` is shown, so this lines up with how `PageUp`/`PageDown`
-/// themselves move — clamped so the window never runs past the end of a
-/// short chronology.
-fn chronology_window_start(selected: usize, total: usize, visible_rows: usize) -> usize {
+/// The first index a windowed list should render at `visible_rows` tall so
+/// that `selected` stays visible, without storing any independent
+/// viewport/scroll state (`docs/VISION.md`'s epic #130: "derive the
+/// viewport behavior from the selected point rather than adding a second
+/// independently authoritative selection"). Purely a function of
+/// `(selected, total, visible_rows)`: the list is split into fixed
+/// `visible_rows`-sized pages and whichever page contains `selected` is
+/// shown, so this lines up with how `PageUp`/`PageDown` themselves move —
+/// clamped so the window never runs past the end of a short list. Shared by
+/// every windowed list surface (Review Run's chronology index, Signals)
+/// rather than one helper per view, since the windowing rule itself doesn't
+/// vary by surface.
+fn list_window_start(selected: usize, total: usize, visible_rows: usize) -> usize {
     if visible_rows == 0 || total <= visible_rows {
         return 0;
     }
@@ -1780,8 +1840,8 @@ fn review_chronology_row_label(op: &OperationView<'_>, point: &ReviewPoint<'_>) 
 }
 
 /// The Review Run chronology index: one row per review point, windowed to
-/// `visible_rows` around the selected point ([`chronology_window_start`]),
-/// with the selected row marked the same `"> "` cursor + bold convention
+/// `visible_rows` around the selected point ([`list_window_start`]), with
+/// the selected row marked the same `"> "` cursor + bold convention
 /// [`signal_list_lines`] uses for Signals' own selection. Empty when
 /// `op.review_points` is empty (a deploy-time load failure never produced
 /// a reviewable point, so there's nothing to index).
@@ -1791,7 +1851,7 @@ fn review_chronology_lines(op: &OperationView<'_>, visible_rows: usize) -> Vec<L
     }
     let last = op.review_points.len() - 1;
     let selected = op.review_selected.unwrap_or(last).min(last);
-    let start = chronology_window_start(selected, op.review_points.len(), visible_rows);
+    let start = list_window_start(selected, op.review_points.len(), visible_rows);
     let end = (start + visible_rows).min(op.review_points.len());
 
     op.review_points[start..end]
@@ -2142,8 +2202,10 @@ fn help_lines(state: &AppState) -> Vec<Line<'static>> {
 fn view_specific_help(state: &AppState, view: View) -> Vec<Line<'static>> {
     match view {
         View::Signals => vec![
-            Line::from("Up/Down  move the selection"),
-            Line::from("Enter    open Target (only signals marked [OPEN] respond)"),
+            Line::from("Up/Down      select the previous/next signal"),
+            Line::from("PageUp/Down  move by one visible list page"),
+            Line::from("Home/End     jump to the first/last signal"),
+            Line::from("Enter        open Target (only signals marked [OPEN] respond)"),
             Line::from("Its detail shows alongside the list automatically;"),
             Line::from("F8 moves focus there"),
         ],
@@ -2383,6 +2445,66 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>()
             .contains(needle)
+    }
+
+    #[test]
+    fn list_window_start_is_stable_for_empty_and_single_item_lists() {
+        assert_eq!(list_window_start(0, 0, 5), 0);
+        assert_eq!(list_window_start(0, 1, 5), 0);
+        assert_eq!(list_window_start(0, 1, 1), 0);
+    }
+
+    #[test]
+    fn list_window_start_pages_and_clamps_at_the_end() {
+        // A 10-item list windowed 3 at a time: each 3-item page is shown
+        // for every selection within it, and the last page never runs past
+        // the end of the list even though it isn't a full page itself.
+        assert_eq!(list_window_start(0, 10, 3), 0);
+        assert_eq!(list_window_start(2, 10, 3), 0);
+        assert_eq!(list_window_start(3, 10, 3), 3);
+        assert_eq!(list_window_start(9, 10, 3), 7);
+    }
+
+    #[test]
+    fn signals_list_visible_items_uses_real_geometry_not_a_hard_coded_count() {
+        assert_eq!(signals_list_visible_items(120, 40), 10);
+        assert_eq!(signals_list_visible_items(150, 50), 14);
+        // Below the console's minimum terminal size, there is no rendered
+        // geometry to page against.
+        assert_eq!(signals_list_visible_items(100, 30), 0);
+    }
+
+    #[test]
+    fn signal_list_lines_windows_around_the_selection_and_keeps_it_visible() {
+        let mut state = AppState::new();
+        state.apply(super::super::state::Msg::SelectLastSignal);
+        let last = authored_signals().len() - 1;
+        assert_eq!(state.selected_signal(), last);
+
+        // Only 2 signals fit on screen; the window must still contain the
+        // selected (last) signal rather than always starting at the top.
+        let lines = signal_list_lines(&state, 2);
+        let visible_signals = authored_signals().len().min(2);
+        assert_eq!(lines.len(), visible_signals * SIGNAL_ROWS_PER_ITEM);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.to_string().contains(authored_signals()[last].source)),
+            "the selected signal must be part of the rendered window"
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.to_string().contains(authored_signals()[0].source)),
+            "an out-of-window signal must not render"
+        );
+    }
+
+    #[test]
+    fn signal_list_lines_renders_every_signal_when_geometry_is_unknown() {
+        let state = AppState::new();
+        let lines = signal_list_lines(&state, 0);
+        assert_eq!(lines.len(), authored_signals().len() * SIGNAL_ROWS_PER_ITEM);
     }
 
     #[test]
@@ -2709,6 +2831,22 @@ mod tests {
 
         assert!(!buffer_contains(&terminal, "follows automatically"));
         assert!(buffer_contains(&terminal, "F8 moves focus there"));
+    }
+
+    #[test]
+    fn signals_help_advertises_the_full_navigation_vocabulary() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::OpenHelp);
+        let terminal = render(120, 40, &state);
+
+        assert!(buffer_contains(
+            &terminal,
+            "select the previous/next signal"
+        ));
+        assert!(buffer_contains(&terminal, "move by one visible list page"));
+        assert!(buffer_contains(&terminal, "jump to the first/last signal"));
     }
 
     #[test]
