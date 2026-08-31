@@ -82,16 +82,24 @@ pub(crate) fn intent_for_key(code: KeyCode) -> Option<NavIntent> {
 
 /// Interprets `intent` for `surface`, returning the existing [`Msg`] that
 /// surface already used for that action, or `None` when this surface
-/// doesn't (yet) support that intent. Signals and the read-only scroll
-/// surfaces (Help, After Action's Report pane) only support `Previous`/
-/// `Next` today — `PageBackward`/`PageForward`/`First`/`Last` bindings for
-/// those are the job of later issues (#148, #149), not this one, so this
-/// function deliberately returns `None` for those combinations rather than
-/// inventing new behavior.
+/// doesn't (yet) support that intent. The read-only scroll surfaces (Help,
+/// After Action's Report pane) only support `Previous`/`Next` today —
+/// `PageBackward`/`PageForward`/`First`/`Last` bindings for those are the
+/// job of a later issue (#149), not this one, so this function deliberately
+/// returns `None` for those combinations rather than inventing new
+/// behavior. Signals and Review Run both support the full vocabulary.
 pub(crate) fn route(surface: NavSurface, intent: NavIntent) -> Option<Msg> {
     match (surface, intent) {
         (NavSurface::SignalsList, NavIntent::Previous) => Some(Msg::SelectPreviousSignal),
         (NavSurface::SignalsList, NavIntent::Next) => Some(Msg::SelectNextSignal),
+        (NavSurface::SignalsList, NavIntent::PageBackward(page)) => {
+            Some(Msg::SelectSignalPageBackward(page))
+        }
+        (NavSurface::SignalsList, NavIntent::PageForward(page)) => {
+            Some(Msg::SelectSignalPageForward(page))
+        }
+        (NavSurface::SignalsList, NavIntent::First) => Some(Msg::SelectFirstSignal),
+        (NavSurface::SignalsList, NavIntent::Last) => Some(Msg::SelectLastSignal),
         (NavSurface::Scroll, NavIntent::Previous) => Some(Msg::ScrollUp),
         (NavSurface::Scroll, NavIntent::Next) => Some(Msg::ScrollDown),
         (NavSurface::ReviewRun, NavIntent::Previous) => Some(Msg::SelectPreviousReviewPoint),
@@ -104,7 +112,7 @@ pub(crate) fn route(surface: NavSurface, intent: NavIntent) -> Option<Msg> {
         }
         (NavSurface::ReviewRun, NavIntent::First) => Some(Msg::SelectFirstReviewPoint),
         (NavSurface::ReviewRun, NavIntent::Last) => Some(Msg::SelectLastReviewPoint),
-        (NavSurface::SignalsList, _) | (NavSurface::Scroll, _) => None,
+        (NavSurface::Scroll, _) => None,
     }
 }
 
@@ -191,7 +199,7 @@ mod tests {
     }
 
     #[test]
-    fn signals_list_only_supports_previous_and_next_today() {
+    fn signals_list_supports_the_full_navigation_vocabulary() {
         assert_eq!(
             route(NavSurface::SignalsList, NavIntent::Previous),
             Some(Msg::SelectPreviousSignal)
@@ -202,14 +210,20 @@ mod tests {
         );
         assert_eq!(
             route(NavSurface::SignalsList, NavIntent::PageBackward(3)),
-            None
+            Some(Msg::SelectSignalPageBackward(3))
         );
         assert_eq!(
             route(NavSurface::SignalsList, NavIntent::PageForward(3)),
-            None
+            Some(Msg::SelectSignalPageForward(3))
         );
-        assert_eq!(route(NavSurface::SignalsList, NavIntent::First), None);
-        assert_eq!(route(NavSurface::SignalsList, NavIntent::Last), None);
+        assert_eq!(
+            route(NavSurface::SignalsList, NavIntent::First),
+            Some(Msg::SelectFirstSignal)
+        );
+        assert_eq!(
+            route(NavSurface::SignalsList, NavIntent::Last),
+            Some(Msg::SelectLastSignal)
+        );
     }
 
     #[test]
