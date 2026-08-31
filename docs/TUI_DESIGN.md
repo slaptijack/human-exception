@@ -202,6 +202,67 @@ panes, so a marker there would claim a choice that doesn't exist.
   hierarchy (§5) is what the player sees immediately, without requiring
   `F8`.
 
+### Console-wide navigation
+
+`Up`/`Down`, `PageUp`/`PageDown`, and `Home`/`End` are not per-view
+bindings invented independently by whichever view implements them first.
+They are a single console-wide interaction contract, applied per focused
+surface. Every pane-local surface in the console is one of four kinds:
+
+- **Selectable list** — a set of discrete items where one is the current
+  selection (for example, the Signals list).
+- **Read-only scroll surface** — a block of read-only text taller than its
+  viewport, positioned by a scroll offset rather than a selection (for
+  example, Help, or After Action's Report pane).
+- **Editor** — the Controller source pane, with its own cursor and
+  selection. Its keyboard contract is defined in full in [The editor
+  contract](#the-editor-contract) and is not redefined here — this section
+  only states how it maps onto the same physical keys so the console-wide
+  picture is complete.
+- **Chronology** — the Review Run inspector's `TIMELINE` mode, which steps
+  through a sequence of discrete review points rather than rows or items.
+  Its `SOURCE` mode is a read-only scroll surface over the deployed source,
+  not a second chronology. Both are defined in full in [Review
+  Run](#review-run).
+
+The convention, by surface kind:
+
+| Key | Selectable list | Read-only scroll surface | Editor | Chronology |
+| --- | --- | --- | --- | --- |
+| `Up`/`Down` | previous/next item | one row | cursor movement | previous/next review point |
+| `PageUp`/`PageDown` | ~one visible page | one visible page | editor page movement | one visible chronology page |
+| `Home`/`End` | first/last item | beginning/end | line start/end | first/terminal review point |
+
+A few rules apply across every surface kind:
+
+- **Focus ownership.** These keys only ever affect the currently focused
+  pane (§ [Input priority](#input-priority)). They never move or scroll an
+  unfocused pane, regardless of what that pane contains.
+- **Inert when unsupported.** If the focused surface has no meaning for a
+  key — including a key this contract describes but a given surface has not
+  yet implemented — the key does nothing. It never falls through to an
+  unfocused pane, a different view, or a fixed-position scroll. See [Pane-local
+  vs. view-level input today](#pane-local-vs-view-level-input-today) for
+  which surfaces currently implement which keys.
+- **Clamping, never wrapping.** Selection or scroll position clamps at the
+  first/last item, row, or review point. `Up` at the first item, or `Down`
+  at the last, stays put; it never wraps around.
+- **Page movement follows real viewport geometry.** `PageUp`/`PageDown`
+  moves by however many rows or items the surface's actual rendered
+  viewport currently shows, not a fixed arbitrary constant — so paging
+  behaves consistently regardless of terminal size. Review Run's chronology
+  and `SOURCE` paging (§ [Review Run](#review-run)) are the existing model
+  for this; any future implementation of paging on another surface follows
+  the same rule. **Exception:** the Controller editor's `PageUp`/`PageDown`
+  moves by a fixed 10-line jump (`PAGE_LINES` in `src/console/document.rs`),
+  independent of the pane's rendered height, because the underlying editor
+  document model has no concept of a viewport. This is a known, accepted
+  deviation from the geometry rule for the editor surface specifically, not
+  a gap for the console-navigation implementation issues to close.
+
+`F8` is unrelated to this contract: it remains pane-*focus* movement (§ [F8
+— next pane](#f8--next-pane)), not navigation within a pane.
+
 ### Read-only panes and unsupported input
 
 A pane with no pane-local input today (Target's two panes, Operation's
@@ -215,15 +276,22 @@ that every pane has something to do.
 
 | View | Pane-local input | View-level input |
 | --- | --- | --- |
-| Help | Up/Down scroll (its one pane) | — |
-| Signals | Up/Down select, Enter activate (Signals list); none (Selected signal) | — |
+| Help | Up/Down scroll (its one pane); PageUp/PageDown/Home/End **not yet bound** | — |
+| Signals | Up/Down select, Enter activate (Signals list); PageUp/PageDown/Home/End **not yet bound**; none (Selected signal) | — |
 | Target | none | Enter (work opportunity), Esc (back) |
-| Controller | Editing, cursor movement, selection, undo/redo, indent/unindent, typed text, paste (Controller source); none (Lua field reference) | Ctrl+V validate, F6 deploy, F7 reset |
-| Operation | none (either pane) | Space (pause/resume), Enter (step) |
-| After Action | Up/Down scroll (Report); none (Final satellite frame) | F2, F4, F5, F6 |
+| Controller | Full editor contract — see [The editor contract](#the-editor-contract) — including Up/Down/PageUp/PageDown/Home/End (Controller source); PageUp/PageDown are a fixed 10-line jump, not viewport-sized — see the [Console-wide navigation](#console-wide-navigation) exception; none (Lua field reference) | Ctrl+V validate, F6 deploy, F7 reset |
+| Operation | none (either pane); once a deployment has finished, Operation telemetry becomes the Review Run inspector with the full chronology/SOURCE contract — see [Review Run](#review-run) | Space (pause/resume), Enter (step) |
+| After Action | Up/Down scroll (Report); PageUp/PageDown/Home/End **not yet bound**; none (Final satellite frame) | F2, F4, F5, F6 |
 
 This table is a description of existing behavior, not a change to it. It exists
 so implementation issues know, for each key, whether focus should gate it.
+
+The rows marked **not yet bound** are exactly the gap between today's
+behavior and [Console-wide navigation](#console-wide-navigation): Signals
+(a selectable list), Help, and After Action's Report pane (both read-only
+scroll surfaces) currently implement only `Up`/`Down`. Closing that gap is
+the job of the console-navigation implementation issues, not this one —
+this table records the audit, it does not implement the fix.
 
 ## Persistent frame
 
