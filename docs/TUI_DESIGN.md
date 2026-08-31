@@ -276,23 +276,20 @@ that every pane has something to do.
 
 | View | Pane-local input | View-level input |
 | --- | --- | --- |
-| Help | Up/Down scroll (its one pane); PageUp/PageDown/Home/End **not yet bound** | — |
+| Help | Up/Down/PageUp/PageDown/Home/End scroll (its one pane) | — |
 | Signals | Up/Down/PageUp/PageDown/Home/End select, Enter activate (Signals list); none (Selected signal) | — |
 | Target | none | Enter (work opportunity), Esc (back) |
 | Controller | Full editor contract — see [The editor contract](#the-editor-contract) — including Up/Down/PageUp/PageDown/Home/End (Controller source); PageUp/PageDown are a fixed 10-line jump, not viewport-sized — see the [Console-wide navigation](#console-wide-navigation) exception; none (Lua field reference) | Ctrl+V validate, F6 deploy, F7 reset |
 | Operation | none (either pane); once a deployment has finished, Operation telemetry becomes the Review Run inspector with the full chronology/SOURCE contract — see [Review Run](#review-run) | Space (pause/resume), Enter (step) |
-| After Action | Up/Down scroll (Report); PageUp/PageDown/Home/End **not yet bound**; none (Final satellite frame) | F2, F4, F5, F6 |
+| After Action | Up/Down/PageUp/PageDown/Home/End scroll (Report); none (Final satellite frame) | F2, F4, F5, F6 |
 
 This table is a description of existing behavior, not a change to it. It exists
 so implementation issues know, for each key, whether focus should gate it.
 
-The rows marked **not yet bound** are exactly the gap between today's
-behavior and [Console-wide navigation](#console-wide-navigation): Help and
-After Action's Report pane (both read-only scroll surfaces) currently
-implement only `Up`/`Down`. Signals (a selectable list) closed this gap
-first; Help and After Action's Report pane remain for a later
-console-navigation implementation issue — this table records the audit, it
-does not implement the fix.
+Every read-only scroll surface — Help, After Action's Report pane, and
+Review Run's `SOURCE` mode (§ [Review Run](#review-run)) — now implements
+the full console-wide vocabulary, matching Signals (a selectable list) and
+Review Run's `TIMELINE` chronology.
 
 ## Persistent frame
 

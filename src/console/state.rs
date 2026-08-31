@@ -401,6 +401,24 @@ pub enum Msg {
     /// applied.
     ScrollUp,
     ScrollDown,
+    /// Moves the focused scrollable pane's offset backward/forward by one
+    /// visible page, clamped at the top/bottom the same way
+    /// `ScrollUp`/`ScrollDown` are. The carried count is the number of rows
+    /// actually visible at the current frame size; `event::map` has no
+    /// access to rendered geometry, so it always emits `0` here, and
+    /// `console::mod`'s dispatch loop rewrites it from
+    /// `ui::scroll_pane_visible_rows` before calling `apply` — the same
+    /// placeholder-and-rewrite pattern `SelectReviewPointPageBackward`/
+    /// `PageForward` and `ScrollSourcePageBackward`/`PageForward` already
+    /// use.
+    ScrollPageBackward(usize),
+    ScrollPageForward(usize),
+    /// Jumps the focused scrollable pane's offset straight to the
+    /// beginning/end of its content. `JumpScrollEnd` sets a large sentinel
+    /// value, clamped down to the real end by `console::should_redraw` the
+    /// same way `ScrollDown`/`JumpSourceEnd` are.
+    JumpScrollStart,
+    JumpScrollEnd,
     /// Review Run chronology navigation (`navigation::focused_nav_surface`
     /// returning `NavSurface::ReviewRun`): moves `review_selected` by one
     /// review point, clamped at the first/
@@ -1000,6 +1018,34 @@ impl AppState {
                 if pane_is_scrollable(pane) {
                     let offset = self.scroll_offsets.entry(pane).or_insert(0);
                     *offset = offset.saturating_add(1).min(MAX_PANE_SCROLL);
+                }
+            }
+            Msg::ScrollPageBackward(page) => {
+                let pane = self.focused_pane(self.current_view);
+                if pane_is_scrollable(pane) {
+                    let page = page.max(1).min(u16::MAX as usize) as u16;
+                    let offset = self.scroll_offsets.entry(pane).or_insert(0);
+                    *offset = offset.saturating_sub(page);
+                }
+            }
+            Msg::ScrollPageForward(page) => {
+                let pane = self.focused_pane(self.current_view);
+                if pane_is_scrollable(pane) {
+                    let page = page.max(1).min(u16::MAX as usize) as u16;
+                    let offset = self.scroll_offsets.entry(pane).or_insert(0);
+                    *offset = offset.saturating_add(page).min(MAX_PANE_SCROLL);
+                }
+            }
+            Msg::JumpScrollStart => {
+                let pane = self.focused_pane(self.current_view);
+                if pane_is_scrollable(pane) {
+                    self.scroll_offsets.insert(pane, 0);
+                }
+            }
+            Msg::JumpScrollEnd => {
+                let pane = self.focused_pane(self.current_view);
+                if pane_is_scrollable(pane) {
+                    self.scroll_offsets.insert(pane, MAX_PANE_SCROLL);
                 }
             }
             Msg::SelectPreviousReviewPoint => {
@@ -2114,6 +2160,93 @@ mod tests {
 
         state.apply(Msg::ScrollDown);
         state.apply(Msg::ScrollDown);
+
+        assert_eq!(state.scroll_offset(PaneId::FinalFrame), 0);
+        assert!(!state.scroll_offsets.contains_key(&PaneId::FinalFrame));
+    }
+
+    #[test]
+    fn help_page_movement_moves_by_the_carried_page_size_and_clamps_at_zero() {
+        let mut state = AppState::new();
+        state.apply(Msg::OpenHelp);
+
+        state.apply(Msg::ScrollPageForward(5));
+        assert_eq!(state.scroll_offset(PaneId::Help), 5);
+
+        state.apply(Msg::ScrollPageBackward(3));
+        assert_eq!(state.scroll_offset(PaneId::Help), 2);
+
+        state.apply(Msg::ScrollPageBackward(100));
+        assert_eq!(
+            state.scroll_offset(PaneId::Help),
+            0,
+            "paging backward past the start clamps to 0 rather than wrapping"
+        );
+    }
+
+    #[test]
+    fn help_page_movement_treats_a_zero_page_size_as_one() {
+        let mut state = AppState::new();
+        state.apply(Msg::OpenHelp);
+
+        state.apply(Msg::ScrollPageForward(0));
+        assert_eq!(state.scroll_offset(PaneId::Help), 1);
+
+        state.apply(Msg::ScrollPageBackward(0));
+        assert_eq!(state.scroll_offset(PaneId::Help), 0);
+    }
+
+    #[test]
+    fn help_page_forward_is_capped_by_max_pane_scroll() {
+        let mut state = AppState::new();
+        state.apply(Msg::OpenHelp);
+
+        state.apply(Msg::ScrollPageForward(10_000));
+        assert!(state.scroll_offset(PaneId::Help) <= 500);
+    }
+
+    #[test]
+    fn home_and_end_jump_the_scroll_offset_to_the_start_and_sentinel_end() {
+        let mut state = AppState::new();
+        state.apply(Msg::OpenHelp);
+        state.apply(Msg::ScrollDown);
+        state.apply(Msg::ScrollDown);
+
+        state.apply(Msg::JumpScrollStart);
+        assert_eq!(state.scroll_offset(PaneId::Help), 0);
+
+        state.apply(Msg::JumpScrollEnd);
+        assert_eq!(
+            state.scroll_offset(PaneId::Help),
+            500,
+            "JumpScrollEnd sets the MAX_PANE_SCROLL sentinel; console::mod \
+             clamps it down to the real content height after applying"
+        );
+    }
+
+    #[test]
+    fn report_page_and_home_end_movement_is_independent_of_help() {
+        let mut state = AppState::new();
+
+        state.set_focused_pane(View::AfterAction, PaneId::Report);
+        state.apply(Msg::Navigate(View::AfterAction));
+        state.apply(Msg::ScrollPageForward(4));
+        assert_eq!(state.scroll_offset(PaneId::Report), 4);
+        assert_eq!(state.scroll_offset(PaneId::Help), 0);
+
+        state.apply(Msg::JumpScrollEnd);
+        assert_eq!(state.scroll_offset(PaneId::Report), 500);
+        assert_eq!(state.scroll_offset(PaneId::Help), 0);
+    }
+
+    #[test]
+    fn page_and_home_end_movement_on_a_non_scrollable_pane_is_a_no_op() {
+        let mut state = AppState::new();
+        state.set_focused_pane(View::AfterAction, PaneId::FinalFrame);
+        state.apply(Msg::Navigate(View::AfterAction));
+
+        state.apply(Msg::ScrollPageForward(5));
+        state.apply(Msg::JumpScrollEnd);
 
         assert_eq!(state.scroll_offset(PaneId::FinalFrame), 0);
         assert!(!state.scroll_offsets.contains_key(&PaneId::FinalFrame));

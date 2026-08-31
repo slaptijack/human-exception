@@ -1449,25 +1449,65 @@ mod tests {
     }
 
     #[test]
-    fn help_has_no_page_or_home_end_bindings_yet() {
-        // Help is a read-only scroll surface and only implements Up/Down
-        // scrolling today. This locks that gap in place so a future change
-        // to it is a visible, intentional diff against this test rather
-        // than a silent drift from what docs/TUI_DESIGN.md's console-wide
-        // navigation contract audits.
-        assert_eq!(map_in(key(KeyCode::PageUp), View::Help), None);
-        assert_eq!(map_in(key(KeyCode::PageDown), View::Help), None);
-        assert_eq!(map_in(key(KeyCode::Home), View::Help), None);
-        assert_eq!(map_in(key(KeyCode::End), View::Help), None);
+    fn help_supports_the_full_page_and_home_end_vocabulary() {
+        assert_eq!(
+            map_in(key(KeyCode::PageUp), View::Help),
+            Some(Msg::ScrollPageBackward(0))
+        );
+        assert_eq!(
+            map_in(key(KeyCode::PageDown), View::Help),
+            Some(Msg::ScrollPageForward(0))
+        );
+        assert_eq!(
+            map_in(key(KeyCode::Home), View::Help),
+            Some(Msg::JumpScrollStart)
+        );
+        assert_eq!(
+            map_in(key(KeyCode::End), View::Help),
+            Some(Msg::JumpScrollEnd)
+        );
     }
 
     #[test]
-    fn after_action_report_has_no_page_or_home_end_bindings_yet() {
-        // Same gap as Help, on After Action's Report pane — see
-        // docs/TUI_DESIGN.md's console-wide navigation contract audit.
-        assert_eq!(map_in(key(KeyCode::PageUp), View::AfterAction), None);
-        assert_eq!(map_in(key(KeyCode::PageDown), View::AfterAction), None);
-        assert_eq!(map_in(key(KeyCode::Home), View::AfterAction), None);
-        assert_eq!(map_in(key(KeyCode::End), View::AfterAction), None);
+    fn after_action_report_supports_the_full_page_and_home_end_vocabulary() {
+        assert_eq!(
+            map_in(key(KeyCode::PageUp), View::AfterAction),
+            Some(Msg::ScrollPageBackward(0))
+        );
+        assert_eq!(
+            map_in(key(KeyCode::PageDown), View::AfterAction),
+            Some(Msg::ScrollPageForward(0))
+        );
+        assert_eq!(
+            map_in(key(KeyCode::Home), View::AfterAction),
+            Some(Msg::JumpScrollStart)
+        );
+        assert_eq!(
+            map_in(key(KeyCode::End), View::AfterAction),
+            Some(Msg::JumpScrollEnd)
+        );
+    }
+
+    #[test]
+    fn after_action_page_and_home_end_keys_are_inert_while_the_final_frame_pane_is_focused() {
+        for code in [
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+            KeyCode::Home,
+            KeyCode::End,
+        ] {
+            assert_eq!(
+                map(
+                    key(code),
+                    View::AfterAction,
+                    false,
+                    false,
+                    false,
+                    PaneId::FinalFrame,
+                    true
+                ),
+                None
+            );
+        }
     }
 }

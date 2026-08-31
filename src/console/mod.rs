@@ -431,42 +431,49 @@ fn should_redraw(
             if undersized && !is_quit_related {
                 return false;
             }
-            // `event::map` has no access to rendered geometry, so it always
-            // emits `0` as a placeholder page count for these two variants
-            // (see `Msg::SelectReviewPointPageBackward`'s doc comment) —
-            // filled in here with the real visible-row count, the one place
-            // that has both the message and the current frame size. It also
-            // doesn't know the Run Inspector's current mode (deliberately,
-            // per `event::map`'s `Tab` arm doc comment) — while
-            // `RunInspectorMode::Source` is active, the same chronology keys
-            // it emits are rewritten here into their SOURCE-scrolling
-            // equivalents instead of being applied as chronology navigation.
+            // `event::map` doesn't know the Run Inspector's current mode
+            // (deliberately, per `event::map`'s `Tab` arm doc comment) —
+            // while `RunInspectorMode::Source` is active, the chronology
+            // messages it emits are rewritten via
+            // `navigation::route_review_run_source` into their
+            // SOURCE-scrolling equivalents instead of being applied as
+            // chronology navigation. `event::map` also has no access to
+            // rendered geometry, so it always emits `0` as a placeholder
+            // page/row count for the page-move variants below (see
+            // `Msg::SelectReviewPointPageBackward`'s doc comment) — filled
+            // in here with the real visible-row count, the one place that
+            // has both the message and the current frame size.
             let source_mode = state.run_inspector_mode() == RunInspectorMode::Source;
+            let msg = if source_mode {
+                navigation::route_review_run_source(msg)
+            } else {
+                msg
+            };
             let msg = match msg {
-                Msg::SelectPreviousReviewPoint if source_mode => Msg::ScrollSourceUp,
-                Msg::SelectNextReviewPoint if source_mode => Msg::ScrollSourceDown,
-                Msg::SelectFirstReviewPoint if source_mode => Msg::JumpSourceStart,
-                Msg::SelectLastReviewPoint if source_mode => Msg::JumpSourceEnd,
-                Msg::SelectReviewPointPageBackward(_) if source_mode => {
-                    Msg::ScrollSourcePageBackward(ui::review_source_visible_rows(
-                        state,
-                        frame_size.0,
-                        frame_size.1,
-                    ))
-                }
-                Msg::SelectReviewPointPageForward(_) if source_mode => {
-                    Msg::ScrollSourcePageForward(ui::review_source_visible_rows(
-                        state,
-                        frame_size.0,
-                        frame_size.1,
-                    ))
-                }
                 Msg::SelectReviewPointPageBackward(_) => Msg::SelectReviewPointPageBackward(
                     ui::review_chronology_visible_rows(state, frame_size.0, frame_size.1),
                 ),
                 Msg::SelectReviewPointPageForward(_) => Msg::SelectReviewPointPageForward(
                     ui::review_chronology_visible_rows(state, frame_size.0, frame_size.1),
                 ),
+                Msg::ScrollSourcePageBackward(_) => Msg::ScrollSourcePageBackward(
+                    ui::review_source_visible_rows(state, frame_size.0, frame_size.1),
+                ),
+                Msg::ScrollSourcePageForward(_) => Msg::ScrollSourcePageForward(
+                    ui::review_source_visible_rows(state, frame_size.0, frame_size.1),
+                ),
+                Msg::ScrollPageBackward(_) => {
+                    Msg::ScrollPageBackward(ui::scroll_pane_visible_rows(
+                        state.focused_pane(state.current_view()),
+                        frame_size.0,
+                        frame_size.1,
+                    ))
+                }
+                Msg::ScrollPageForward(_) => Msg::ScrollPageForward(ui::scroll_pane_visible_rows(
+                    state.focused_pane(state.current_view()),
+                    frame_size.0,
+                    frame_size.1,
+                )),
                 Msg::SelectSignalPageBackward(_) => Msg::SelectSignalPageBackward(
                     ui::signals_list_visible_items(frame_size.0, frame_size.1),
                 ),
@@ -475,7 +482,15 @@ fn should_redraw(
                 ),
                 other => other,
             };
-            let is_pane_scroll = matches!(msg, Msg::ScrollUp | Msg::ScrollDown);
+            let is_pane_scroll = matches!(
+                msg,
+                Msg::ScrollUp
+                    | Msg::ScrollDown
+                    | Msg::ScrollPageBackward(_)
+                    | Msg::ScrollPageForward(_)
+                    | Msg::JumpScrollStart
+                    | Msg::JumpScrollEnd
+            );
             let is_source_scroll = matches!(
                 msg,
                 Msg::ScrollSourceUp
@@ -1979,6 +1994,134 @@ mod tests {
         );
 
         assert_eq!(state.scroll_offset(PaneId::Report), scrolled_offset);
+    }
+
+    #[test]
+    fn help_page_and_home_end_navigation_uses_real_geometry() {
+        // Help's built-in text is already long enough to need scrolling at
+        // this frame size (see `help_scroll_offset_stays_bounded_to_the_viewport_not_just_the_render`
+        // above). This exercises the full pipeline through `should_redraw`,
+        // confirming `Msg::ScrollPageForward(0)`/`PageBackward(0)` are
+        // rewritten with the real `ui::scroll_pane_visible_rows` count for
+        // this frame size before `apply` runs, not left at the placeholder
+        // `0`, and that `Home`/`End` reach the true start/end.
+        let (mut state, _) = render(120, 40, &[press(KeyCode::F(1))]);
+        let mut last_transition_press: TransitionKeyDebounce = None;
+        let page = ui::scroll_pane_visible_rows(PaneId::Help, 120, 40);
+        assert!(page > 0);
+        let max = ui::help_max_scroll(&state, 120, 40);
+        assert!(max > 0, "Help's content should need scrolling at this size");
+
+        should_redraw(
+            &mut state,
+            press(KeyCode::PageDown),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        assert_eq!(
+            state.scroll_offset(PaneId::Help),
+            (page as u16).min(max),
+            "PageDown should move exactly one visible page, not stay at the \
+             placeholder 0 event::map emits"
+        );
+
+        should_redraw(
+            &mut state,
+            press(KeyCode::End),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        assert_eq!(state.scroll_offset(PaneId::Help), max);
+
+        should_redraw(
+            &mut state,
+            press(KeyCode::Home),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        assert_eq!(state.scroll_offset(PaneId::Help), 0);
+
+        should_redraw(
+            &mut state,
+            press(KeyCode::PageUp),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        assert_eq!(
+            state.scroll_offset(PaneId::Help),
+            0,
+            "PageUp from the start should clamp at 0, not wrap"
+        );
+    }
+
+    #[test]
+    fn after_action_page_and_home_end_navigation_uses_real_geometry_and_only_moves_while_focused() {
+        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
+        events.extend(clear_and_type(LONG_ERROR_CONTROLLER));
+        events.push(press(KeyCode::F(6)));
+        events.push(press(KeyCode::Char(' '))); // pause
+        events.push(press(KeyCode::Enter)); // step the one tick that errors
+
+        let width = ui::MIN_COLUMNS;
+        let height = ui::MIN_ROWS;
+        let (mut state, _) = render(width, height, &events);
+        assert_eq!(state.current_view(), View::AfterAction);
+        assert_eq!(state.focused_pane(View::AfterAction), PaneId::Report);
+
+        let mut last_transition_press: TransitionKeyDebounce = None;
+        let page = ui::scroll_pane_visible_rows(PaneId::Report, width, height);
+        assert!(page > 0);
+        let max = ui::after_action_max_scroll(&state, width, height);
+        assert!(max > 0, "the long error report should need scrolling");
+
+        should_redraw(
+            &mut state,
+            press(KeyCode::PageDown),
+            (width, height),
+            &mut last_transition_press,
+        );
+        assert_eq!(state.scroll_offset(PaneId::Report), (page as u16).min(max));
+
+        should_redraw(
+            &mut state,
+            press(KeyCode::End),
+            (width, height),
+            &mut last_transition_press,
+        );
+        assert_eq!(state.scroll_offset(PaneId::Report), max);
+
+        should_redraw(
+            &mut state,
+            press(KeyCode::Home),
+            (width, height),
+            &mut last_transition_press,
+        );
+        assert_eq!(state.scroll_offset(PaneId::Report), 0);
+
+        // Moving focus to the final-frame satellite pane makes every one of
+        // these keys inert, matching the console-wide focus-ownership
+        // contract.
+        should_redraw(
+            &mut state,
+            press(KeyCode::F(8)),
+            (width, height),
+            &mut last_transition_press,
+        );
+        assert_eq!(state.focused_pane(View::AfterAction), PaneId::FinalFrame);
+        for key in [
+            KeyCode::PageDown,
+            KeyCode::PageUp,
+            KeyCode::Home,
+            KeyCode::End,
+        ] {
+            should_redraw(
+                &mut state,
+                press(key),
+                (width, height),
+                &mut last_transition_press,
+            );
+        }
+        assert_eq!(state.scroll_offset(PaneId::Report), 0);
     }
 
     #[test]
