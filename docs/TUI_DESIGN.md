@@ -253,7 +253,12 @@ A few rules apply across every surface kind:
   behaves consistently regardless of terminal size. Review Run's chronology
   and `SOURCE` paging (§ [Review Run](#review-run)) are the existing model
   for this; any future implementation of paging on another surface follows
-  the same rule.
+  the same rule. **Exception:** the Controller editor's `PageUp`/`PageDown`
+  moves by a fixed 10-line jump (`PAGE_LINES` in `src/console/document.rs`),
+  independent of the pane's rendered height, because the underlying editor
+  document model has no concept of a viewport. This is a known, accepted
+  deviation from the geometry rule for the editor surface specifically, not
+  a gap for the console-navigation implementation issues to close.
 
 `F8` is unrelated to this contract: it remains pane-*focus* movement (§ [F8
 — next pane](#f8--next-pane)), not navigation within a pane.
@@ -274,7 +279,7 @@ that every pane has something to do.
 | Help | Up/Down scroll (its one pane); PageUp/PageDown/Home/End **not yet bound** | — |
 | Signals | Up/Down select, Enter activate (Signals list); PageUp/PageDown/Home/End **not yet bound**; none (Selected signal) | — |
 | Target | none | Enter (work opportunity), Esc (back) |
-| Controller | Full editor contract — see [The editor contract](#the-editor-contract) — including Up/Down/PageUp/PageDown/Home/End (Controller source); none (Lua field reference) | Ctrl+V validate, F6 deploy, F7 reset |
+| Controller | Full editor contract — see [The editor contract](#the-editor-contract) — including Up/Down/PageUp/PageDown/Home/End (Controller source); PageUp/PageDown are a fixed 10-line jump, not viewport-sized — see the [Console-wide navigation](#console-wide-navigation) exception; none (Lua field reference) | Ctrl+V validate, F6 deploy, F7 reset |
 | Operation | none (either pane); once a deployment has finished, Operation telemetry becomes the Review Run inspector with the full chronology/SOURCE contract — see [Review Run](#review-run) | Space (pause/resume), Enter (step) |
 | After Action | Up/Down scroll (Report); PageUp/PageDown/Home/End **not yet bound**; none (Final satellite frame) | F2, F4, F5, F6 |
 
