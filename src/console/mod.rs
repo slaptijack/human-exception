@@ -2392,6 +2392,53 @@ mod tests {
             &mut last_transition_press,
         );
         assert_eq!(state.review_selected(), Some(0));
+
+        // Repeated `Down` must reach every point in order all the way to
+        // the terminal boundary, then clamp there rather than stopping
+        // short or overshooting.
+        for expected in 1..=last {
+            should_redraw(
+                &mut state,
+                press(KeyCode::Down),
+                (120, 40),
+                &mut last_transition_press,
+            );
+            assert_eq!(state.review_selected(), Some(expected));
+        }
+        should_redraw(
+            &mut state,
+            press(KeyCode::Down),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        assert_eq!(
+            state.review_selected(),
+            Some(last),
+            "Down past the terminal point must clamp there"
+        );
+
+        // Repeated `Up` must retrace every point in order all the way back
+        // to INITIAL, then clamp there.
+        for expected in (0..last).rev() {
+            should_redraw(
+                &mut state,
+                press(KeyCode::Up),
+                (120, 40),
+                &mut last_transition_press,
+            );
+            assert_eq!(state.review_selected(), Some(expected));
+        }
+        should_redraw(
+            &mut state,
+            press(KeyCode::Up),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        assert_eq!(
+            state.review_selected(),
+            Some(0),
+            "Up past INITIAL must clamp there"
+        );
     }
 
     #[test]
@@ -2520,11 +2567,21 @@ mod tests {
         events.push(press(KeyCode::Char(' '))); // pause
         events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
         events.push(press(KeyCode::F(5))); // Review Run
-        events.push(press(KeyCode::Down)); // move selection off Home
+        // Opening Review Run already selects the terminal point, so a
+        // `Down` from there would be a no-op — actually demonstrate a
+        // stale, nonterminal selection by returning to `Home` first, then
+        // moving one point off it.
+        events.push(press(KeyCode::Home));
+        events.push(press(KeyCode::Down));
         events.push(press(KeyCode::Tab)); // TIMELINE -> SOURCE
         events.push(press(KeyCode::Down)); // nonzero source_scroll
 
         let (state, _) = render(120, 40, &events);
+        assert_eq!(
+            state.review_selected(),
+            Some(1),
+            "setup should leave a demonstrably nonterminal chronology selection"
+        );
         assert_eq!(state.run_inspector_mode(), RunInspectorMode::Source);
         assert!(state.source_scroll() > 0);
 
@@ -2543,6 +2600,12 @@ mod tests {
         let (state, _) = render(120, 40, &redeploy);
         assert_eq!(state.current_view(), View::Operation);
         assert_eq!(
+            state.review_selected(),
+            None,
+            "a fresh active deployment must not carry over the previous \
+             run's chronology index"
+        );
+        assert_eq!(
             state.run_inspector_mode(),
             RunInspectorMode::Timeline,
             "a fresh deployment's run inspector must start in TIMELINE \
@@ -2551,11 +2614,51 @@ mod tests {
         assert_eq!(state.source_scroll(), 0);
     }
 
+    /// An owned, comparable form of [`state::ReviewPointKind`], which
+    /// itself borrows from the recorded run and so can't be stored in a
+    /// snapshot directly.
+    #[derive(Debug, Clone, PartialEq)]
+    enum ReviewPointKindFingerprint {
+        Initial,
+        Tick(crate::lua_controller::TickRecord),
+        TerminalFailure(String),
+    }
+
+    /// An owned, comparable form of one [`state::ReviewPoint`] — kind,
+    /// snapshot, and discovery delta — so a corrupted point is caught even
+    /// when the chronology's overall length is unchanged.
+    #[derive(Debug, PartialEq)]
+    struct ReviewPointFingerprint {
+        kind: ReviewPointKindFingerprint,
+        snapshot: state::OperationSnapshot,
+        newly_discovered: Vec<crate::simulation::DiscoveredTile>,
+    }
+
+    fn fingerprint_review_point(point: &state::ReviewPoint<'_>) -> ReviewPointFingerprint {
+        let kind = match point.kind {
+            state::ReviewPointKind::Initial => ReviewPointKindFingerprint::Initial,
+            state::ReviewPointKind::Tick(record) => {
+                ReviewPointKindFingerprint::Tick(record.clone())
+            }
+            state::ReviewPointKind::TerminalFailure(error) => {
+                ReviewPointKindFingerprint::TerminalFailure(error.to_string())
+            }
+        };
+        ReviewPointFingerprint {
+            kind,
+            snapshot: point.snapshot.clone(),
+            newly_discovered: point.newly_discovered.clone(),
+        }
+    }
+
     /// A comparable snapshot of everything Review Run's "must never mutate
     /// the recorded run" guarantee cares about. `OperationView` itself
     /// borrows from `AppState`, so it can't outlive a later `should_redraw`
     /// call — this owns just enough of it to prove equality before and
-    /// after a navigation barrage.
+    /// after a navigation barrage, including every review point's own
+    /// content (not just how many there are), so navigation that corrupts
+    /// one point's `kind`/`snapshot`/`newly_discovered` without changing
+    /// the chronology's length is still caught.
     #[derive(Debug, PartialEq)]
     struct OperationFingerprint {
         records: Vec<crate::lua_controller::TickRecord>,
@@ -2564,7 +2667,7 @@ mod tests {
         run_id: u32,
         finished: bool,
         current: state::OperationSnapshot,
-        review_points_len: usize,
+        review_points: Vec<ReviewPointFingerprint>,
     }
 
     fn snapshot_operation(state: &AppState) -> OperationFingerprint {
@@ -2576,7 +2679,11 @@ mod tests {
             run_id: op.run_id,
             finished: op.finished,
             current: op.current.clone(),
-            review_points_len: op.review_points.len(),
+            review_points: op
+                .review_points
+                .iter()
+                .map(fingerprint_review_point)
+                .collect(),
         }
     }
 
