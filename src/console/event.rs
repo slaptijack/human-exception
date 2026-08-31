@@ -7,35 +7,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::editor::EditOp;
+use super::navigation;
 use super::state::{Msg, PaneId, View};
-
-/// Whether `view`'s scrollable pane is focused, and so `Up`/`Down` should
-/// scroll it via `Msg::ScrollUp`/`Msg::ScrollDown`. Help has only one pane,
-/// so it's always scrollable; After Action's report pane must be focused
-/// (rather than the final-frame pane `F8` can swap in).
-fn scroll_focus_matches(view: View, focused_pane: PaneId) -> bool {
-    match view {
-        View::Help => true,
-        View::AfterAction => focused_pane == PaneId::Report,
-        _ => false,
-    }
-}
-
-/// Whether the Run Inspector pane owns chronology-navigation keys: Operation
-/// is showing and `PaneId::OperationTelemetry` (there is no separate
-/// "Run Inspector" pane id — it doubles as the live telemetry pane) is
-/// focused. Whether the run has actually finished is checked in
-/// `AppState::apply`, not here — the same split `operation_is_open` already
-/// uses for `Enter`/`Space`, which don't know finished-ness either.
-///
-/// `pub(crate)` so `console::mod`'s `should_redraw` can reuse this exact
-/// condition to decide whether a `Tab` in this position is acting as the
-/// TIMELINE/SOURCE mode toggle — and so should be treated as a press-only
-/// state transition (see `should_redraw`'s `kind_allowed` computation) —
-/// without duplicating or drifting from this gate.
-pub(crate) fn review_run_focus_matches(view: View, focused_pane: PaneId) -> bool {
-    view == View::Operation && focused_pane == PaneId::OperationTelemetry
-}
 
 /// Maps a key event to a player intent, given the view currently showing
 /// (several keys are context-sensitive: `F1`/`Esc` need to know whether
@@ -146,35 +119,32 @@ pub fn map(
         // paused, so `Enter` here doesn't fast-forward a running operation.
         KeyCode::Enter if !ctrl && operation_is_open => Some(Msg::StepOperationTick),
         KeyCode::Char(' ') if !ctrl && operation_is_open => Some(Msg::TogglePauseOperation),
-        KeyCode::Up if current_view == View::Signals && focused_pane == PaneId::SignalsList => {
-            Some(Msg::SelectPreviousSignal)
-        }
-        KeyCode::Down if current_view == View::Signals && focused_pane == PaneId::SignalsList => {
-            Some(Msg::SelectNextSignal)
-        }
-        KeyCode::Up if scroll_focus_matches(current_view, focused_pane) => Some(Msg::ScrollUp),
-        KeyCode::Down if scroll_focus_matches(current_view, focused_pane) => Some(Msg::ScrollDown),
-        // Review Run chronology navigation. The page-move variants carry a
-        // placeholder `0`; `console::mod`'s dispatch loop rewrites it from
-        // real frame geometry before calling `apply` (see `Msg`'s doc
-        // comment) since this function has no access to rendered geometry.
-        KeyCode::Up if review_run_focus_matches(current_view, focused_pane) => {
-            Some(Msg::SelectPreviousReviewPoint)
-        }
-        KeyCode::Down if review_run_focus_matches(current_view, focused_pane) => {
-            Some(Msg::SelectNextReviewPoint)
-        }
-        KeyCode::PageUp if review_run_focus_matches(current_view, focused_pane) => {
-            Some(Msg::SelectReviewPointPageBackward(0))
-        }
-        KeyCode::PageDown if review_run_focus_matches(current_view, focused_pane) => {
-            Some(Msg::SelectReviewPointPageForward(0))
-        }
-        KeyCode::Home if review_run_focus_matches(current_view, focused_pane) => {
-            Some(Msg::SelectFirstReviewPoint)
-        }
-        KeyCode::End if review_run_focus_matches(current_view, focused_pane) => {
-            Some(Msg::SelectLastReviewPoint)
+        // The shared, focus-aware navigation vocabulary
+        // (`docs/TUI_DESIGN.md`, "Console-wide navigation") for every
+        // non-editor surface: which surface, if any, owns these keys is
+        // decided once by `navigation::focused_nav_surface` rather than by
+        // a separate ad hoc `(View, PaneId)` gate per view, and each
+        // surface interprets the resulting intent as the same `Msg` it
+        // always has. The page-move intents carry a placeholder `0`;
+        // `console::mod`'s dispatch loop rewrites it from real frame
+        // geometry before calling `apply` (see `Msg`'s doc comment) since
+        // this function has no access to rendered geometry. A surface with
+        // no meaning for a given intent (e.g. Signals has no PageUp/Home
+        // binding yet) falls out as `None` from `navigation::route` itself,
+        // not from this arm's guard.
+        KeyCode::Up
+        | KeyCode::Down
+        | KeyCode::PageUp
+        | KeyCode::PageDown
+        | KeyCode::Home
+        | KeyCode::End
+            if navigation::focused_nav_surface(current_view, focused_pane).is_some() =>
+        {
+            let surface = navigation::focused_nav_surface(current_view, focused_pane)
+                .expect("guard just checked this is Some");
+            let intent = navigation::intent_for_key(key.code)
+                .expect("key.code is one of the arm's patterns");
+            navigation::route(surface, intent)
         }
         // Toggles the Run Inspector between TIMELINE and SOURCE
         // (`docs/TUI_DESIGN.md`, "Review Run"). Always produces the same
@@ -185,7 +155,10 @@ pub fn map(
         // SOURCE is active is decided in `console::mod`'s dispatch loop
         // (it already has real `AppState` access to check the mode; this
         // function deliberately doesn't take on that dependency), not here.
-        KeyCode::Tab if review_run_focus_matches(current_view, focused_pane) => {
+        KeyCode::Tab
+            if navigation::focused_nav_surface(current_view, focused_pane)
+                == Some(navigation::NavSurface::ReviewRun) =>
+        {
             Some(Msg::ToggleRunInspectorMode)
         }
         // Ordinary editing keys must not silently mutate the source unless

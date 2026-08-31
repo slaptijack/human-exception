@@ -89,7 +89,8 @@ impl View {
 /// Which of the two read-only surfaces the Run Inspector (`PaneId::
 /// OperationTelemetry`, once a deployment has finished) currently shows —
 /// `docs/TUI_DESIGN.md`, "Review Run". `Tab`, while the Run Inspector is
-/// focused, toggles between them (`event::review_run_focus_matches`).
+/// focused, toggles between them (`navigation::focused_nav_surface`
+/// returning `NavSurface::ReviewRun`).
 /// `Timeline` is the chronology index plus the selected review point's
 /// evidence (unchanged by this mode's existence); `Source` is the complete,
 /// unbounded `Operation::deployed_source`, independently scrollable via
@@ -388,12 +389,14 @@ pub enum Msg {
     /// focus marker and input ownership.
     FocusNextPane,
     /// Scrolls the current view's focused pane up/down by one row, if it's
-    /// scrollable (see `event::scroll_focus_matches`). Applies to whichever
-    /// pane is focused when the message is applied.
+    /// scrollable (see `navigation::focused_nav_surface`'s `NavSurface::
+    /// Scroll`). Applies to whichever pane is focused when the message is
+    /// applied.
     ScrollUp,
     ScrollDown,
-    /// Review Run chronology navigation (`event::review_run_focus_matches`):
-    /// moves `review_selected` by one review point, clamped at the first/
+    /// Review Run chronology navigation (`navigation::focused_nav_surface`
+    /// returning `NavSurface::ReviewRun`): moves `review_selected` by one
+    /// review point, clamped at the first/
     /// last point — never wraps. A no-op unless the focused run is
     /// finished and has at least one review point (live Operation pacing
     /// is unaffected; see `Msg::TogglePauseOperation`/`StepOperationTick`).
@@ -414,7 +417,8 @@ pub enum Msg {
     SelectReviewPointPageBackward(usize),
     SelectReviewPointPageForward(usize),
     /// `Tab`, while the Run Inspector is focused on a finished run
-    /// (`event::review_run_focus_matches`): flips `run_inspector_mode`
+    /// (`navigation::focused_nav_surface` returning `NavSurface::
+    /// ReviewRun`): flips `run_inspector_mode`
     /// between `Timeline` and `Source`. A no-op unless the focused run is
     /// finished and has at least one review point — the same gate
     /// chronology navigation shares (`AppState::review_chronology_len`).

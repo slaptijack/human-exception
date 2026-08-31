@@ -14,6 +14,7 @@ pub(crate) mod document;
 pub(crate) mod editor;
 pub(crate) mod event;
 pub(crate) mod intel;
+pub(crate) mod navigation;
 pub(crate) mod state;
 pub(crate) mod ui;
 
@@ -337,16 +338,17 @@ fn should_redraw(
     let is_ctrl_v = key.code == KeyCode::Char('v') && key.modifiers.contains(KeyModifiers::CONTROL);
     // `Tab` is a repeatable edit (indent) in Controller but a state
     // transition (the Run Inspector's TIMELINE/SOURCE toggle) in Review
-    // Run — `event::review_run_focus_matches` is the same condition
-    // `event::map`'s own `Tab` arm gates on, so this can't drift from
-    // which `Tab` actually means a mode flip. Without this, a terminal
-    // reporting `Repeat` for a held `Tab` would flip the mode back and
-    // forth on every repeat tick instead of just once per physical press.
+    // Run — `navigation::focused_nav_surface` returning `ReviewRun` is the
+    // same condition `event::map`'s own `Tab` arm gates on, so this can't
+    // drift from which `Tab` actually means a mode flip. Without this, a
+    // terminal reporting `Repeat` for a held `Tab` would flip the mode back
+    // and forth on every repeat tick instead of just once per physical
+    // press.
     let tab_is_run_inspector_toggle = key.code == KeyCode::Tab
-        && event::review_run_focus_matches(
+        && navigation::focused_nav_surface(
             state.current_view(),
             state.focused_pane(state.current_view()),
-        );
+        ) == Some(navigation::NavSurface::ReviewRun);
     let kind_allowed = match key.kind {
         KeyEventKind::Press => true,
         KeyEventKind::Repeat => {

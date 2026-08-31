@@ -599,7 +599,7 @@ fn draw_after_action(frame: &mut Frame, area: Rect, state: &AppState) {
 /// filling [`MAX_DETAIL_LINES`] can never push it off the bottom of the
 /// pane at the console's supported minimum geometry, and scrolling its
 /// content by `scroll` rows (`PaneId::Report`'s entry in
-/// `event::scroll_focus_matches`, #76/#77) so the success report's outcome
+/// `navigation::focused_nav_surface`, #76/#77) so the success report's outcome
 /// hierarchy spacing can't be clipped there either. Built inline rather
 /// than through `draw_pane`/`draw_pane_with_pinned_action`, matching
 /// `draw_help`'s own scroll-aware rendering, since neither shared helper
