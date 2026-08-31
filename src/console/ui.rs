@@ -1524,6 +1524,40 @@ pub(crate) fn help_max_scroll(state: &AppState, frame_width: u16, frame_height: 
     content_rows.saturating_sub(content_height as usize) as u16
 }
 
+/// How many rows a generic read-only scroll pane (Help, After Action's
+/// Report pane — `navigation::NavSurface::Scroll`) can show at once at this
+/// frame size. Dispatches on `pane` since Help and Report have different
+/// inner-dimension geometry; any other pane has no such vocabulary and
+/// contributes `0`. This is the amount `PageUp`/`PageDown` move the offset
+/// by (`Msg::ScrollPageBackward`/`PageForward`) — the same
+/// visible-viewport-height role [`signals_list_visible_items`] and
+/// [`review_source_visible_rows`] play for their own surfaces. For Report,
+/// this must subtract the same pinned `F4` recovery row
+/// [`after_action_max_scroll`] already accounts for on a failed operation
+/// (`draw_after_action_report_pane` reserves it below the scrollable text),
+/// or paging would advance one row further than the player can actually
+/// see, skipping an unread row between pages.
+pub(crate) fn scroll_pane_visible_rows(
+    pane: PaneId,
+    state: &AppState,
+    frame_width: u16,
+    frame_height: u16,
+) -> usize {
+    match pane {
+        PaneId::Help => help_inner_dimensions(frame_width, frame_height).1 as usize,
+        PaneId::Report => {
+            let (_, content_height) =
+                after_action_report_inner_dimensions(frame_width, frame_height);
+            let pinned_action_row = state
+                .operation()
+                .map(|op| u16::from(!after_action_succeeded(&op)))
+                .unwrap_or(0);
+            content_height.saturating_sub(pinned_action_row) as usize
+        }
+        _ => 0,
+    }
+}
+
 /// The AFTER-ACTION REPORT pane's inner (content) dimensions for a given
 /// full frame size, matching the header/footer/border/two-pane-split
 /// geometry [`draw`] and [`draw_after_action`] actually use — the same role
@@ -2009,7 +2043,7 @@ fn help_lines(state: &AppState) -> Vec<Line<'static>> {
         Style::default().add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from(
-        "Up/Down  scroll this pane for the Lua reference, terminology, and symbols below",
+        "Up/Down/PageUp/PageDown/Home/End  scroll this pane for the Lua reference, terminology, and symbols below",
     ));
     lines.push(Line::from(""));
 
@@ -2273,7 +2307,9 @@ fn view_specific_help(state: &AppState, view: View) -> Vec<Line<'static>> {
             Line::from("Leaving via F2/F3/F4 pauses the run; F5 returns to it as you left it."),
         ],
         View::AfterAction => vec![
-            Line::from("Up/Down  scroll the report if it doesn't fully fit"),
+            Line::from(
+                "Up/Down/PageUp/PageDown/Home/End  scroll the report if it doesn't fully fit",
+            ),
             Line::from("F2       back to Signals"),
             Line::from("F4       edit the controller (your edits are preserved)"),
             Line::from("F5       review this run's frozen source and telemetry (Review Run)"),
@@ -2581,7 +2617,10 @@ mod tests {
         state.apply(Msg::OpenHelp);
         let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
 
-        assert!(buffer_contains(&terminal, "Up/Down  scroll this pane"));
+        assert!(buffer_contains(
+            &terminal,
+            "Up/Down/PageUp/PageDown/Home/End  scroll this pane"
+        ));
     }
 
     #[test]

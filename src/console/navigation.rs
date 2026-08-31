@@ -81,13 +81,9 @@ pub(crate) fn intent_for_key(code: KeyCode) -> Option<NavIntent> {
 }
 
 /// Interprets `intent` for `surface`, returning the existing [`Msg`] that
-/// surface already used for that action, or `None` when this surface
-/// doesn't (yet) support that intent. The read-only scroll surfaces (Help,
-/// After Action's Report pane) only support `Previous`/`Next` today —
-/// `PageBackward`/`PageForward`/`First`/`Last` bindings for those are the
-/// job of a later issue (#149), not this one, so this function deliberately
-/// returns `None` for those combinations rather than inventing new
-/// behavior. Signals and Review Run both support the full vocabulary.
+/// surface already used for that action. Signals, the read-only scroll
+/// surfaces (Help, After Action's Report pane), and Review Run's chronology
+/// all support the full vocabulary.
 pub(crate) fn route(surface: NavSurface, intent: NavIntent) -> Option<Msg> {
     match (surface, intent) {
         (NavSurface::SignalsList, NavIntent::Previous) => Some(Msg::SelectPreviousSignal),
@@ -102,6 +98,10 @@ pub(crate) fn route(surface: NavSurface, intent: NavIntent) -> Option<Msg> {
         (NavSurface::SignalsList, NavIntent::Last) => Some(Msg::SelectLastSignal),
         (NavSurface::Scroll, NavIntent::Previous) => Some(Msg::ScrollUp),
         (NavSurface::Scroll, NavIntent::Next) => Some(Msg::ScrollDown),
+        (NavSurface::Scroll, NavIntent::PageBackward(page)) => Some(Msg::ScrollPageBackward(page)),
+        (NavSurface::Scroll, NavIntent::PageForward(page)) => Some(Msg::ScrollPageForward(page)),
+        (NavSurface::Scroll, NavIntent::First) => Some(Msg::JumpScrollStart),
+        (NavSurface::Scroll, NavIntent::Last) => Some(Msg::JumpScrollEnd),
         (NavSurface::ReviewRun, NavIntent::Previous) => Some(Msg::SelectPreviousReviewPoint),
         (NavSurface::ReviewRun, NavIntent::Next) => Some(Msg::SelectNextReviewPoint),
         (NavSurface::ReviewRun, NavIntent::PageBackward(page)) => {
@@ -112,7 +112,31 @@ pub(crate) fn route(surface: NavSurface, intent: NavIntent) -> Option<Msg> {
         }
         (NavSurface::ReviewRun, NavIntent::First) => Some(Msg::SelectFirstReviewPoint),
         (NavSurface::ReviewRun, NavIntent::Last) => Some(Msg::SelectLastReviewPoint),
-        (NavSurface::Scroll, _) => None,
+    }
+}
+
+/// Rewrites a `NavSurface::ReviewRun` chronology [`Msg`] (as produced by
+/// [`route`]`(NavSurface::ReviewRun, _)`) into its `SOURCE`-mode scrolling
+/// equivalent, using the `ScrollSource*`/`JumpSource*` message family that
+/// already existed before this shared vocabulary did (see epic #130).
+/// `console::mod`'s dispatch loop calls this once it knows
+/// `run_inspector_mode` — a `View`/`PaneId` snapshot alone (all `route`
+/// itself sees) can't distinguish `TIMELINE` from `SOURCE`. Kept as a
+/// distinct family, not folded into `route`'s `NavSurface::Scroll` arm,
+/// because `source_scroll` is `Operation`-scoped state, not a
+/// `PaneId`-keyed scrollable pane (`pane_is_scrollable`) — it needs its own
+/// `Msg` variants and its own clamping (`ui::review_source_max_scroll`),
+/// exactly as before this extraction. Non-chronology `Msg`s pass through
+/// unchanged.
+pub(crate) fn route_review_run_source(msg: Msg) -> Msg {
+    match msg {
+        Msg::SelectPreviousReviewPoint => Msg::ScrollSourceUp,
+        Msg::SelectNextReviewPoint => Msg::ScrollSourceDown,
+        Msg::SelectFirstReviewPoint => Msg::JumpSourceStart,
+        Msg::SelectLastReviewPoint => Msg::JumpSourceEnd,
+        Msg::SelectReviewPointPageBackward(page) => Msg::ScrollSourcePageBackward(page),
+        Msg::SelectReviewPointPageForward(page) => Msg::ScrollSourcePageForward(page),
+        other => other,
     }
 }
 
@@ -227,7 +251,7 @@ mod tests {
     }
 
     #[test]
-    fn scroll_surface_only_supports_previous_and_next_today() {
+    fn scroll_surface_supports_the_full_navigation_vocabulary() {
         assert_eq!(
             route(NavSurface::Scroll, NavIntent::Previous),
             Some(Msg::ScrollUp)
@@ -236,10 +260,22 @@ mod tests {
             route(NavSurface::Scroll, NavIntent::Next),
             Some(Msg::ScrollDown)
         );
-        assert_eq!(route(NavSurface::Scroll, NavIntent::PageBackward(3)), None);
-        assert_eq!(route(NavSurface::Scroll, NavIntent::PageForward(3)), None);
-        assert_eq!(route(NavSurface::Scroll, NavIntent::First), None);
-        assert_eq!(route(NavSurface::Scroll, NavIntent::Last), None);
+        assert_eq!(
+            route(NavSurface::Scroll, NavIntent::PageBackward(3)),
+            Some(Msg::ScrollPageBackward(3))
+        );
+        assert_eq!(
+            route(NavSurface::Scroll, NavIntent::PageForward(3)),
+            Some(Msg::ScrollPageForward(3))
+        );
+        assert_eq!(
+            route(NavSurface::Scroll, NavIntent::First),
+            Some(Msg::JumpScrollStart)
+        );
+        assert_eq!(
+            route(NavSurface::Scroll, NavIntent::Last),
+            Some(Msg::JumpScrollEnd)
+        );
     }
 
     #[test]
@@ -267,6 +303,43 @@ mod tests {
         assert_eq!(
             route(NavSurface::ReviewRun, NavIntent::Last),
             Some(Msg::SelectLastReviewPoint)
+        );
+    }
+
+    #[test]
+    fn route_review_run_source_rewrites_each_chronology_message_to_its_source_equivalent() {
+        assert_eq!(
+            route_review_run_source(Msg::SelectPreviousReviewPoint),
+            Msg::ScrollSourceUp
+        );
+        assert_eq!(
+            route_review_run_source(Msg::SelectNextReviewPoint),
+            Msg::ScrollSourceDown
+        );
+        assert_eq!(
+            route_review_run_source(Msg::SelectFirstReviewPoint),
+            Msg::JumpSourceStart
+        );
+        assert_eq!(
+            route_review_run_source(Msg::SelectLastReviewPoint),
+            Msg::JumpSourceEnd
+        );
+        assert_eq!(
+            route_review_run_source(Msg::SelectReviewPointPageBackward(7)),
+            Msg::ScrollSourcePageBackward(7)
+        );
+        assert_eq!(
+            route_review_run_source(Msg::SelectReviewPointPageForward(7)),
+            Msg::ScrollSourcePageForward(7)
+        );
+    }
+
+    #[test]
+    fn route_review_run_source_passes_through_non_chronology_messages_unchanged() {
+        assert_eq!(route_review_run_source(Msg::ScrollUp), Msg::ScrollUp);
+        assert_eq!(
+            route_review_run_source(Msg::ToggleRunInspectorMode),
+            Msg::ToggleRunInspectorMode
         );
     }
 }
