@@ -1995,4 +1995,797 @@ mod tests {
             "function on_tick(observation) return \"wait\" end"
         );
     }
+
+    // Issue #137's remaining coverage: composition-level e2e proof that
+    // Review Run behaves correctly across every meaningful First Contact
+    // outcome, its full chronology/source navigation, source divergence,
+    // and the required terminal geometries. Unit-level ownership for each
+    // subsystem stays with its own issue (#131-#136); everything below
+    // exercises the real key-event pipeline (`should_redraw`/`render`)
+    // rather than duplicating that lower-level coverage.
+
+    /// Two valid moves onto floor tiles adjacent to the fixed First Contact
+    /// drone start, then an unconditional error — the same fixture
+    /// `console::state`'s own `FAILS_AFTER_TWO_TICKS` uses, exercising a
+    /// controller failure that happens after some ticks have already
+    /// completed.
+    const FAILS_AFTER_TWO_TICKS: &str = r#"
+        local step = 0
+        function on_tick(observation)
+            step = step + 1
+            if step > 2 then error('boom') end
+            return "north"
+        end
+    "#;
+
+    /// Waits forever, exhausting the fixed First Contact scenario's
+    /// 15-point budget in exactly 15 ticks (`crate::simulation`'s
+    /// `waiting_until_budget_exhausted_fails`).
+    const ALWAYS_WAITS: &str = "function on_tick(observation) return \"wait\" end";
+
+    /// Returns an action name `lua_controller` doesn't recognize on the
+    /// very first tick — a first-tick `ControllerError::InvalidAction`,
+    /// mirroring `lua_controller.rs`'s `parse_action_rejects_unknown_names`.
+    const INVALID_ACTION_FIRST_TICK: &str =
+        "function on_tick(observation) return \"north-east\" end";
+
+    /// Never returns, on the very first tick — a first-tick
+    /// `ControllerError::ExecutionLimitExceeded`, caught synchronously by
+    /// the instruction hook (`lua_controller.rs`'s
+    /// `live_operation_bounds_a_runaway_on_tick_instead_of_hanging`), not
+    /// the thread-leaking variant `tests/lua_controller_execution_limit.rs`
+    /// quarantines away from the rest of the suite.
+    const RUNAWAY_FIRST_TICK: &str = "function on_tick(observation) while true do end end";
+
+    #[test]
+    fn review_run_first_contact_success_is_navigable_from_initial_to_terminal_tick() {
+        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
+        events.extend(clear_and_type(ROUTE_TO_UPLINK));
+        events.push(press(KeyCode::F(6)));
+        events.push(press(KeyCode::Char(' '))); // pause
+        events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
+        events.push(press(KeyCode::F(5))); // Review Run
+
+        let mut at_initial = events.clone();
+        at_initial.push(press(KeyCode::Home));
+        let mut at_terminal = events.clone();
+        at_terminal.push(press(KeyCode::End));
+
+        for (width, height) in [(120, 40), (150, 50)] {
+            let (state, terminal) = render(width, height, &at_initial);
+            assert_eq!(state.review_selected(), Some(0));
+            assert!(buffer_contains(&terminal, "INITIAL"));
+
+            let (state, terminal) = render(width, height, &at_terminal);
+            let op = state.operation().unwrap();
+            let last = op.review_points.len() - 1;
+            assert_eq!(state.review_selected(), Some(last));
+            match op.review_points[last].kind {
+                state::ReviewPointKind::Tick(record) => {
+                    assert_eq!(record.outcome, crate::simulation::TickOutcome::Succeeded)
+                }
+                other => {
+                    panic!("expected the terminal point to be a completed tick, got {other:?}")
+                }
+            }
+            assert!(buffer_contains(&terminal, "> TICK 08 [SUCCESS]"));
+            assert!(buffer_contains(&terminal, "FOOTHOLD ESTABLISHED"));
+        }
+    }
+
+    #[test]
+    fn review_run_budget_exhaustion_lands_on_the_real_terminal_tick_with_evidence() {
+        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
+        events.extend(clear_and_type(ALWAYS_WAITS));
+        events.push(press(KeyCode::F(6)));
+        events.push(press(KeyCode::Char(' '))); // pause
+        events.extend(std::iter::repeat_n(press(KeyCode::Enter), 15)); // exhaust the budget
+        events.push(press(KeyCode::F(5))); // Review Run
+        events.push(press(KeyCode::End));
+
+        for (width, height) in [(120, 40), (150, 50)] {
+            let (state, terminal) = render(width, height, &events);
+            let op = state.operation().unwrap();
+            assert_eq!(
+                op.review_points.len(),
+                1 + op.records.len(),
+                "budget exhaustion must not add a synthetic terminal point \
+                 beyond the real last tick"
+            );
+            let last = op.review_points.last().unwrap();
+            match last.kind {
+                state::ReviewPointKind::Tick(record) => assert_eq!(
+                    record.outcome,
+                    crate::simulation::TickOutcome::Failed(
+                        crate::simulation::FailureReason::BudgetExhausted
+                    )
+                ),
+                other => {
+                    panic!("expected the terminal point to be a completed tick, got {other:?}")
+                }
+            }
+            assert!(buffer_contains(&terminal, "budget        0 / 15"));
+            assert!(buffer_contains(
+                &terminal,
+                "OPERATION FAILED: budget exhausted"
+            ));
+        }
+    }
+
+    #[test]
+    fn review_run_hazard_entry_shows_action_and_hazard_cost_evidence() {
+        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
+        events.extend(clear_and_type(ROUTE_TO_UPLINK));
+        events.push(press(KeyCode::F(6)));
+        events.push(press(KeyCode::Char(' '))); // pause
+        events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
+        events.push(press(KeyCode::F(5))); // Review Run
+
+        let (state, _) = render(120, 40, &events);
+        let op = state.operation().unwrap();
+        let hazard_index = op
+            .review_points
+            .iter()
+            .position(|point| {
+                matches!(point.kind, state::ReviewPointKind::Tick(record)
+                if record.events.iter().any(|event| matches!(
+                    event,
+                    crate::simulation::SimEvent::HazardEntered { .. }
+                )))
+            })
+            .expect("the route to the uplink passes through the one hazard tile");
+        let discovered_at_hazard = op.review_points[hazard_index].newly_discovered.len();
+        assert!(
+            discovered_at_hazard > 0,
+            "entering the hazard tile should discover at least that tile"
+        );
+
+        let mut navigate = events.clone();
+        navigate.push(press(KeyCode::Home));
+        navigate.extend(std::iter::repeat_n(press(KeyCode::Down), hazard_index));
+
+        let (state, terminal) = render(120, 40, &navigate);
+        assert_eq!(state.review_selected(), Some(hazard_index));
+        assert!(buffer_contains(&terminal, "[HAZARD]"));
+        assert!(buffer_contains(&terminal, "hazard entered — cost 5"));
+    }
+
+    #[test]
+    fn review_run_callback_failure_after_completed_ticks_shows_the_real_last_tick_not_a_fabricated_one()
+     {
+        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
+        events.extend(clear_and_type(FAILS_AFTER_TWO_TICKS));
+        events.push(press(KeyCode::F(6)));
+        events.push(press(KeyCode::Char(' '))); // pause
+        events.extend(std::iter::repeat_n(press(KeyCode::Enter), 3)); // 2 succeed, the 3rd fails
+        events.push(press(KeyCode::F(5))); // Review Run
+        events.push(press(KeyCode::End));
+
+        for (width, height) in [(120, 40), (150, 50)] {
+            let (mut state, terminal) = render(width, height, &events);
+            let op = state.operation().unwrap();
+            assert_eq!(
+                op.records.len(),
+                2,
+                "exactly two ticks should have completed before the failure"
+            );
+            assert_eq!(
+                op.review_points.len(),
+                1 + 2 + 1,
+                "INITIAL, two ticks, one failure point"
+            );
+            assert!(buffer_contains(&terminal, "FAILURE (after tick 02)"));
+            assert!(buffer_contains(
+                &terminal,
+                "action        (none — execution stopped)"
+            ));
+            assert!(buffer_contains(
+                &terminal,
+                "OPERATION FAILED: controller runtime error"
+            ));
+
+            // Stepping back once from the failure boundary must land on the
+            // real completed tick 02, not a fabricated tick 03.
+            let mut last_transition_press: TransitionKeyDebounce = None;
+            should_redraw(
+                &mut state,
+                press(KeyCode::Up),
+                (width, height),
+                &mut last_transition_press,
+            );
+            let op = state.operation().unwrap();
+            assert_eq!(state.review_selected(), Some(2));
+            match op.review_points[2].kind {
+                state::ReviewPointKind::Tick(record) => assert_eq!(record.tick, 2),
+                other => panic!("expected the last completed tick, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn review_run_invalid_action_on_the_first_tick_shows_a_failure_boundary_with_no_completed_ticks()
+     {
+        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
+        events.extend(clear_and_type(INVALID_ACTION_FIRST_TICK));
+        events.push(press(KeyCode::F(6)));
+        events.push(press(KeyCode::Char(' '))); // pause
+        events.push(press(KeyCode::Enter)); // the one tick that fails
+        events.push(press(KeyCode::F(5))); // Review Run
+
+        let (state, terminal) = render(120, 40, &events);
+        let op = state.operation().unwrap();
+        assert_eq!(
+            op.records.len(),
+            0,
+            "no tick should have completed before the failure"
+        );
+        assert_eq!(
+            op.review_points.len(),
+            2,
+            "INITIAL and the failure point only"
+        );
+        assert!(matches!(
+            op.review_points[0].kind,
+            state::ReviewPointKind::Initial
+        ));
+        assert!(matches!(
+            op.review_points[1].kind,
+            state::ReviewPointKind::TerminalFailure(
+                crate::lua_controller::ControllerError::InvalidAction(_)
+            )
+        ));
+        assert!(buffer_contains(
+            &terminal,
+            "FAILURE (before any tick completed)"
+        ));
+        assert!(buffer_contains(
+            &terminal,
+            "action        (none — execution stopped)"
+        ));
+        assert!(buffer_contains(
+            &terminal,
+            "OPERATION FAILED: invalid controller action"
+        ));
+    }
+
+    #[test]
+    fn review_run_execution_limit_on_the_first_tick_shows_a_failure_boundary_with_no_completed_ticks()
+     {
+        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
+        events.extend(clear_and_type(RUNAWAY_FIRST_TICK));
+        events.push(press(KeyCode::F(6)));
+        events.push(press(KeyCode::Char(' '))); // pause
+        events.push(press(KeyCode::Enter)); // the one tick that fails
+        events.push(press(KeyCode::F(5))); // Review Run
+
+        let (state, terminal) = render(120, 40, &events);
+        let op = state.operation().unwrap();
+        assert_eq!(
+            op.records.len(),
+            0,
+            "no tick should have completed before the failure"
+        );
+        assert_eq!(
+            op.review_points.len(),
+            2,
+            "INITIAL and the failure point only"
+        );
+        assert!(matches!(
+            op.review_points[1].kind,
+            state::ReviewPointKind::TerminalFailure(
+                crate::lua_controller::ControllerError::ExecutionLimitExceeded
+            )
+        ));
+        assert!(buffer_contains(
+            &terminal,
+            "FAILURE (before any tick completed)"
+        ));
+        assert!(buffer_contains(
+            &terminal,
+            "action        (none — execution stopped)"
+        ));
+        assert!(buffer_contains(
+            &terminal,
+            "OPERATION FAILED: controller execution limit"
+        ));
+    }
+
+    #[test]
+    fn review_run_deployment_failure_shows_no_recorded_satellite_state_and_no_invented_chronology()
+    {
+        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
+        events.extend(clear_and_type("function on_tick("));
+        events.push(press(KeyCode::F(6)));
+        events.push(press(KeyCode::F(5))); // Review Run
+
+        for (width, height) in [(120, 40), (150, 50)] {
+            let (state, terminal) = render(width, height, &events);
+            let op = state.operation().unwrap();
+            assert!(
+                op.review_points.is_empty(),
+                "a deployment that never started execution must have no \
+                 fabricated INITIAL, tick, or satellite snapshot"
+            );
+            assert!(buffer_contains(
+                &terminal,
+                "NO RECORDED SATELLITE EXECUTION STATE"
+            ));
+            assert!(!buffer_contains(&terminal, "legend: D drone"));
+            assert!(buffer_contains(
+                &terminal,
+                "OPERATION FAILED: controller script error"
+            ));
+        }
+    }
+
+    #[test]
+    fn review_run_timeline_navigation_reaches_every_boundary_via_every_key() {
+        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
+        events.extend(clear_and_type(ROUTE_TO_UPLINK));
+        events.push(press(KeyCode::F(6)));
+        events.push(press(KeyCode::Char(' '))); // pause
+        events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
+        events.push(press(KeyCode::F(5))); // Review Run
+
+        let (mut state, _) = render(120, 40, &events);
+        let last = state.operation().unwrap().review_points.len() - 1;
+        let mut last_transition_press: TransitionKeyDebounce = None;
+
+        should_redraw(
+            &mut state,
+            press(KeyCode::Home),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        assert_eq!(state.review_selected(), Some(0));
+
+        should_redraw(
+            &mut state,
+            press(KeyCode::Down),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        assert_eq!(state.review_selected(), Some(1));
+
+        should_redraw(
+            &mut state,
+            press(KeyCode::Up),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        assert_eq!(state.review_selected(), Some(0));
+
+        let page = ui::review_chronology_visible_rows(&state, 120, 40);
+        assert!(page > 0);
+        should_redraw(
+            &mut state,
+            press(KeyCode::PageDown),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        assert_eq!(state.review_selected(), Some(page.min(last)));
+
+        should_redraw(
+            &mut state,
+            press(KeyCode::End),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        assert_eq!(state.review_selected(), Some(last));
+
+        let page_from_end = ui::review_chronology_visible_rows(&state, 120, 40);
+        should_redraw(
+            &mut state,
+            press(KeyCode::PageUp),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        assert_eq!(
+            state.review_selected(),
+            Some(last.saturating_sub(page_from_end))
+        );
+
+        should_redraw(
+            &mut state,
+            press(KeyCode::Home),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        assert_eq!(state.review_selected(), Some(0));
+
+        // Repeated `Down` must reach every point in order all the way to
+        // the terminal boundary, then clamp there rather than stopping
+        // short or overshooting.
+        for expected in 1..=last {
+            should_redraw(
+                &mut state,
+                press(KeyCode::Down),
+                (120, 40),
+                &mut last_transition_press,
+            );
+            assert_eq!(state.review_selected(), Some(expected));
+        }
+        should_redraw(
+            &mut state,
+            press(KeyCode::Down),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        assert_eq!(
+            state.review_selected(),
+            Some(last),
+            "Down past the terminal point must clamp there"
+        );
+
+        // Repeated `Up` must retrace every point in order all the way back
+        // to INITIAL, then clamp there.
+        for expected in (0..last).rev() {
+            should_redraw(
+                &mut state,
+                press(KeyCode::Up),
+                (120, 40),
+                &mut last_transition_press,
+            );
+            assert_eq!(state.review_selected(), Some(expected));
+        }
+        should_redraw(
+            &mut state,
+            press(KeyCode::Up),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        assert_eq!(
+            state.review_selected(),
+            Some(0),
+            "Up past INITIAL must clamp there"
+        );
+    }
+
+    #[test]
+    fn review_run_source_mode_pages_and_jumps_through_the_full_deployed_source() {
+        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
+        events.extend(clear_and_paste(&long_route_to_uplink()));
+        events.push(press(KeyCode::F(6)));
+        events.push(press(KeyCode::Char(' '))); // pause
+        events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
+        events.push(press(KeyCode::F(5))); // Review Run
+        events.push(press(KeyCode::Tab)); // TIMELINE -> SOURCE
+
+        let (mut state, _) = render(120, 40, &events);
+        let mut last_transition_press: TransitionKeyDebounce = None;
+
+        should_redraw(
+            &mut state,
+            press(KeyCode::Home),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        assert_eq!(state.source_scroll(), 0);
+
+        let page = ui::review_source_visible_rows(&state, 120, 40);
+        assert!(page > 0, "the source pane should show at least one row");
+        should_redraw(
+            &mut state,
+            press(KeyCode::PageDown),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        assert_eq!(state.source_scroll(), page as u16);
+
+        should_redraw(
+            &mut state,
+            press(KeyCode::End),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        let max_scroll = ui::review_source_max_scroll(&state, 120, 40);
+        assert!(max_scroll > 0, "the padded source should need scrolling");
+        assert_eq!(state.source_scroll(), max_scroll);
+
+        should_redraw(
+            &mut state,
+            press(KeyCode::Up),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        assert_eq!(state.source_scroll(), max_scroll - 1);
+
+        should_redraw(
+            &mut state,
+            press(KeyCode::Home),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        assert_eq!(state.source_scroll(), 0);
+    }
+
+    #[test]
+    fn review_run_source_mode_is_unaffected_by_a_later_working_controller_edit() {
+        let mut deploy_events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
+        deploy_events.extend(clear_and_type(ROUTE_TO_UPLINK));
+        deploy_events.push(press(KeyCode::F(6)));
+        deploy_events.push(press(KeyCode::Char(' '))); // pause
+        deploy_events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
+        let (state, _) = render(120, 40, &deploy_events);
+        let deployed_before = state.operation().unwrap().deployed_source.to_string();
+
+        let mut events = deploy_events.clone();
+        events.push(press(KeyCode::F(4))); // back to Controller, edits intact
+        events.extend(clear_and_type(
+            "function on_tick(observation) return \"wait\" end",
+        ));
+        events.push(press(KeyCode::F(5))); // Review Run
+        events.push(press(KeyCode::Tab)); // TIMELINE -> SOURCE
+
+        let (state, terminal) = render(120, 40, &events);
+        assert!(buffer_contains(&terminal, "local route"));
+        assert!(
+            !buffer_contains(&terminal, "return \"wait\""),
+            "SOURCE must keep showing the frozen deployed text, not the \
+             edited working document"
+        );
+        assert_eq!(state.operation().unwrap().deployed_source, deployed_before);
+    }
+
+    #[test]
+    fn review_run_returning_to_controller_preserves_the_working_source_and_cursor() {
+        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
+        events.extend(clear_and_type(ROUTE_TO_UPLINK));
+        events.push(press(KeyCode::F(6)));
+        events.push(press(KeyCode::Char(' '))); // pause
+        events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
+        events.push(press(KeyCode::F(4))); // back to Controller
+        events.extend(clear_and_type(
+            "function on_tick(observation) return \"wait\" end",
+        ));
+        events.push(press(KeyCode::Left));
+        events.push(press(KeyCode::Left));
+        events.push(press(KeyCode::Left));
+
+        let (state, _) = render(120, 40, &events);
+        let expected_source = state.controller_source().unwrap();
+        let expected_cursor = state.controller().unwrap().cursor_line_col();
+
+        let mut round_trip = events.clone();
+        round_trip.push(press(KeyCode::F(5))); // Review Run
+        round_trip.push(press(KeyCode::F(4))); // back to Controller
+
+        let (state, _) = render(120, 40, &round_trip);
+        assert_eq!(state.current_view(), View::Controller);
+        assert_eq!(state.controller_source(), Some(expected_source));
+        assert_eq!(
+            state.controller().unwrap().cursor_line_col(),
+            expected_cursor
+        );
+    }
+
+    #[test]
+    fn review_run_redeploying_resets_the_run_inspector_to_timeline_via_the_full_pipeline() {
+        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
+        events.extend(clear_and_paste(&long_route_to_uplink()));
+        events.push(press(KeyCode::F(6)));
+        events.push(press(KeyCode::Char(' '))); // pause
+        events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
+        events.push(press(KeyCode::F(5))); // Review Run
+        // Opening Review Run already selects the terminal point, so a
+        // `Down` from there would be a no-op — actually demonstrate a
+        // stale, nonterminal selection by returning to `Home` first, then
+        // moving one point off it.
+        events.push(press(KeyCode::Home));
+        events.push(press(KeyCode::Down));
+        events.push(press(KeyCode::Tab)); // TIMELINE -> SOURCE
+        events.push(press(KeyCode::Down)); // nonzero source_scroll
+
+        let (state, _) = render(120, 40, &events);
+        assert_eq!(
+            state.review_selected(),
+            Some(1),
+            "setup should leave a demonstrably nonterminal chronology selection"
+        );
+        assert_eq!(state.run_inspector_mode(), RunInspectorMode::Source);
+        assert!(state.source_scroll() > 0);
+
+        let mut redeploy = events.clone();
+        redeploy.push(press(KeyCode::F(4))); // back to Controller
+        // The working document is the long padded fixture at this point,
+        // far longer than `clear_and_type`'s starter-length backspacing
+        // clears — select-all then delete wipes it regardless of length.
+        redeploy.push(press_ctrl(KeyCode::Char('a')));
+        redeploy.push(press(KeyCode::Backspace));
+        redeploy.extend(clear_and_type(
+            "function on_tick(observation) return \"wait\" end",
+        ));
+        redeploy.push(press(KeyCode::F(6))); // redeploy
+
+        let (state, _) = render(120, 40, &redeploy);
+        assert_eq!(state.current_view(), View::Operation);
+        assert_eq!(
+            state.review_selected(),
+            None,
+            "a fresh active deployment must not carry over the previous \
+             run's chronology index"
+        );
+        assert_eq!(
+            state.run_inspector_mode(),
+            RunInspectorMode::Timeline,
+            "a fresh deployment's run inspector must start in TIMELINE \
+             regardless of the previous run's mode"
+        );
+        assert_eq!(state.source_scroll(), 0);
+    }
+
+    /// An owned, comparable form of [`state::ReviewPointKind`], which
+    /// itself borrows from the recorded run and so can't be stored in a
+    /// snapshot directly.
+    #[derive(Debug, Clone, PartialEq)]
+    enum ReviewPointKindFingerprint {
+        Initial,
+        Tick(crate::lua_controller::TickRecord),
+        TerminalFailure(String),
+    }
+
+    /// An owned, comparable form of one [`state::ReviewPoint`] — kind,
+    /// snapshot, and discovery delta — so a corrupted point is caught even
+    /// when the chronology's overall length is unchanged.
+    #[derive(Debug, PartialEq)]
+    struct ReviewPointFingerprint {
+        kind: ReviewPointKindFingerprint,
+        snapshot: state::OperationSnapshot,
+        newly_discovered: Vec<crate::simulation::DiscoveredTile>,
+    }
+
+    fn fingerprint_review_point(point: &state::ReviewPoint<'_>) -> ReviewPointFingerprint {
+        let kind = match point.kind {
+            state::ReviewPointKind::Initial => ReviewPointKindFingerprint::Initial,
+            state::ReviewPointKind::Tick(record) => {
+                ReviewPointKindFingerprint::Tick(record.clone())
+            }
+            state::ReviewPointKind::TerminalFailure(error) => {
+                ReviewPointKindFingerprint::TerminalFailure(error.to_string())
+            }
+        };
+        ReviewPointFingerprint {
+            kind,
+            snapshot: point.snapshot.clone(),
+            newly_discovered: point.newly_discovered.clone(),
+        }
+    }
+
+    /// A comparable snapshot of everything Review Run's "must never mutate
+    /// the recorded run" guarantee cares about. `OperationView` itself
+    /// borrows from `AppState`, so it can't outlive a later `should_redraw`
+    /// call — this owns just enough of it to prove equality before and
+    /// after a navigation barrage, including every review point's own
+    /// content (not just how many there are), so navigation that corrupts
+    /// one point's `kind`/`snapshot`/`newly_discovered` without changing
+    /// the chronology's length is still caught.
+    #[derive(Debug, PartialEq)]
+    struct OperationFingerprint {
+        records: Vec<crate::lua_controller::TickRecord>,
+        error_display: Option<String>,
+        deployed_source: String,
+        run_id: u32,
+        finished: bool,
+        current: state::OperationSnapshot,
+        review_points: Vec<ReviewPointFingerprint>,
+    }
+
+    fn snapshot_operation(state: &AppState) -> OperationFingerprint {
+        let op = state.operation().unwrap();
+        OperationFingerprint {
+            records: op.records.to_vec(),
+            error_display: op.error.map(|error| error.to_string()),
+            deployed_source: op.deployed_source.to_string(),
+            run_id: op.run_id,
+            finished: op.finished,
+            current: op.current.clone(),
+            review_points: op
+                .review_points
+                .iter()
+                .map(fingerprint_review_point)
+                .collect(),
+        }
+    }
+
+    /// Drives a barrage of every review-navigation key — deliberately
+    /// over-driven past both ends of the chronology/source, and across a
+    /// `Tab` mode switch — and asserts the recorded run itself never
+    /// changes: Review Run inspection must never resume, step, rerun,
+    /// mutate, or branch the simulation or recorded run (epic #130's
+    /// "Review chronology contract").
+    fn assert_navigation_never_mutates_the_run(width: u16, height: u16, setup: &[Event]) {
+        let (mut state, _) = render(width, height, setup);
+        let before = snapshot_operation(&state);
+
+        let mut last_transition_press: TransitionKeyDebounce = None;
+        let barrage = [
+            press(KeyCode::Up),
+            press(KeyCode::Up),
+            press(KeyCode::Down),
+            press(KeyCode::PageUp),
+            press(KeyCode::PageDown),
+            press(KeyCode::PageDown),
+            press(KeyCode::Home),
+            press(KeyCode::End),
+            press(KeyCode::End),
+            press(KeyCode::Tab),
+            press(KeyCode::Up),
+            press(KeyCode::Down),
+            press(KeyCode::PageUp),
+            press(KeyCode::Home),
+            press(KeyCode::Tab),
+        ];
+        for event in barrage {
+            should_redraw(
+                &mut state,
+                event,
+                (width, height),
+                &mut last_transition_press,
+            );
+        }
+
+        let after = snapshot_operation(&state);
+        assert_eq!(
+            before, after,
+            "Review Run navigation must never mutate the recorded run"
+        );
+    }
+
+    #[test]
+    fn review_run_navigation_never_mutates_a_successful_run() {
+        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
+        events.extend(clear_and_type(ROUTE_TO_UPLINK));
+        events.push(press(KeyCode::F(6)));
+        events.push(press(KeyCode::Char(' ')));
+        events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8));
+        events.push(press(KeyCode::F(5)));
+
+        assert_navigation_never_mutates_the_run(120, 40, &events);
+    }
+
+    #[test]
+    fn review_run_navigation_never_mutates_a_budget_exhausted_run() {
+        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
+        events.extend(clear_and_type(ALWAYS_WAITS));
+        events.push(press(KeyCode::F(6)));
+        events.push(press(KeyCode::Char(' ')));
+        events.extend(std::iter::repeat_n(press(KeyCode::Enter), 15));
+        events.push(press(KeyCode::F(5)));
+
+        assert_navigation_never_mutates_the_run(120, 40, &events);
+    }
+
+    #[test]
+    fn review_run_navigation_never_mutates_a_mid_run_callback_failure() {
+        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
+        events.extend(clear_and_type(FAILS_AFTER_TWO_TICKS));
+        events.push(press(KeyCode::F(6)));
+        events.push(press(KeyCode::Char(' ')));
+        events.extend(std::iter::repeat_n(press(KeyCode::Enter), 3));
+        events.push(press(KeyCode::F(5)));
+
+        assert_navigation_never_mutates_the_run(120, 40, &events);
+    }
+
+    #[test]
+    fn review_run_navigation_never_mutates_a_first_tick_failure() {
+        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
+        events.extend(clear_and_type(INVALID_ACTION_FIRST_TICK));
+        events.push(press(KeyCode::F(6)));
+        events.push(press(KeyCode::Char(' ')));
+        events.push(press(KeyCode::Enter));
+        events.push(press(KeyCode::F(5)));
+
+        assert_navigation_never_mutates_the_run(120, 40, &events);
+    }
+
+    #[test]
+    fn review_run_navigation_never_mutates_a_zero_tick_deployment_failure() {
+        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
+        events.extend(clear_and_type("function on_tick("));
+        events.push(press(KeyCode::F(6)));
+        events.push(press(KeyCode::F(5)));
+
+        assert_navigation_never_mutates_the_run(120, 40, &events);
+    }
 }
