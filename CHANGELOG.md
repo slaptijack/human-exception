@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2](https://github.com/slaptijack/human-exception/compare/v0.4.1...v0.4.2) - 2026-08-31
+
+### Added
+
+- *(console)* make the exact deployed source fully inspectable ([#152](https://github.com/slaptijack/human-exception/pull/152))
+- *(console)* navigate the complete Review Run chronology ([#144](https://github.com/slaptijack/human-exception/pull/144))
+- *(console)* render the selected Review Run point ([#143](https://github.com/slaptijack/human-exception/pull/143))
+- *(console)* track Review Run selection independently of the recorded run ([#142](https://github.com/slaptijack/human-exception/pull/142))
+- *(console)* project completed operations into review points ([#141](https://github.com/slaptijack/human-exception/pull/141))
+- *(console)* persist the deployment's initial observed state ([#140](https://github.com/slaptijack/human-exception/pull/140))
+- *(tui)* remove the obsolete narrow console layout ([#139](https://github.com/slaptijack/human-exception/pull/139))
+- *(tui)* require a 120x40 resistance console ([#138](https://github.com/slaptijack/human-exception/pull/138))
+
+### Other
+
+- *(console)* prove Review Run across terminal and failure boundaries ([#153](https://github.com/slaptijack/human-exception/pull/153))
+- *(tui)* qualify the wide-glyph cursor viewport guarantee ([#128](https://github.com/slaptijack/human-exception/pull/128))
+
 ## [0.4.1](https://github.com/slaptijack/human-exception/compare/v0.4.0...v0.4.1) - 2026-08-26
 
 ### Added
