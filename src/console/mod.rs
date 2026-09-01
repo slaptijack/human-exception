@@ -2740,6 +2740,251 @@ mod tests {
         assert_eq!(state.source_scroll(), 0);
     }
 
+    /// Every viewport-derived paging surface (`docs/TUI_DESIGN.md`, "Page
+    /// movement follows real viewport geometry") must actually re-derive
+    /// its page size from the live frame, not merely accept whatever
+    /// `ui::*_visible_*` happens to return at the one geometry
+    /// (`120x40`) every other navigation test exercises. `150x50` is the
+    /// same "larger supported geometry" already used elsewhere
+    /// (`ui.rs`'s `signals_list_visible_items_uses_real_geometry_not_a_
+    /// hard_coded_count`, and the `review_run_*_shows_...` evidence tests
+    /// in this module). Help and Signals are excluded from the
+    /// distinguishing assertion below for reasons specific to each: Help's
+    /// content is short enough that its exact page/max-scroll values still
+    /// exercise this check meaningfully, but Signals' authored list has
+    /// only 6 entries, fewer than even the 120x40 page size, so both
+    /// geometries clamp to the same last-item landing spot regardless of
+    /// how many items would theoretically fit — that non-difference is
+    /// already the correct, tested behavior
+    /// (`signals_page_and_home_end_navigation_uses_real_geometry_and_only_
+    /// moves_while_focused` above), not a gap this test needs to re-prove.
+    #[test]
+    fn navigation_page_movement_scales_with_a_larger_terminal_geometry() {
+        const LARGER: (u16, u16) = (150, 50);
+
+        // Help: PageDown from the top lands at `min(visible_rows, max_scroll)`
+        // for each geometry, and the two geometries land at different rows.
+        let mut help_landings = Vec::new();
+        for (width, height) in [(120, 40), LARGER] {
+            let (mut state, _) = render(width, height, &[press(KeyCode::F(1))]);
+            let mut last_transition_press: TransitionKeyDebounce = None;
+            let expected = ui::scroll_pane_visible_rows(PaneId::Help, &state, width, height)
+                .min(ui::help_max_scroll(&state, width, height) as usize);
+            should_redraw(
+                &mut state,
+                press(KeyCode::PageDown),
+                (width, height),
+                &mut last_transition_press,
+            );
+            assert_eq!(state.scroll_offset(PaneId::Help) as usize, expected);
+            help_landings.push(expected);
+        }
+        assert_ne!(
+            help_landings[0], help_landings[1],
+            "the two tested geometries should page Help to different rows"
+        );
+
+        // Review Run TIMELINE and SOURCE: build one deployed run long/long-
+        // running enough to page meaningfully at both geometries, then
+        // compare each surface's page-key landing spot at each geometry.
+        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
+        events.extend(clear_and_paste(&long_route_to_uplink()));
+        events.push(press(KeyCode::F(6)));
+        events.push(press(KeyCode::Char(' '))); // pause
+        events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
+        events.push(press(KeyCode::F(5))); // Review Run
+
+        let mut timeline_landings = Vec::new();
+        let mut source_landings = Vec::new();
+        for (width, height) in [(120, 40), LARGER] {
+            let (mut state, _) = render(width, height, &events);
+            let last = state.operation().unwrap().review_points.len() - 1;
+            let mut last_transition_press: TransitionKeyDebounce = None;
+
+            // A freshly reviewed run starts selected on the terminal review
+            // point (`last`) at every geometry, so `PageUp` from there is
+            // the geometry-comparable move: it always starts from the same
+            // place. `Home` then `PageDown` would not be comparable across
+            // geometries, since the page size itself depends on whichever
+            // point ends up selected, and `Home` changes that selection.
+            assert_eq!(state.review_selected(), Some(last));
+            let timeline_page = ui::review_chronology_visible_rows(&state, width, height);
+            assert!(timeline_page > 0);
+            should_redraw(
+                &mut state,
+                press(KeyCode::PageUp),
+                (width, height),
+                &mut last_transition_press,
+            );
+            assert_eq!(
+                state.review_selected(),
+                Some(last.saturating_sub(timeline_page))
+            );
+            timeline_landings.push(state.review_selected());
+
+            should_redraw(
+                &mut state,
+                press(KeyCode::Tab),
+                (width, height),
+                &mut last_transition_press,
+            );
+            assert_eq!(state.run_inspector_mode(), state::RunInspectorMode::Source);
+            let source_page = ui::review_source_visible_rows(&state, width, height);
+            assert!(source_page > 0);
+            should_redraw(
+                &mut state,
+                press(KeyCode::PageDown),
+                (width, height),
+                &mut last_transition_press,
+            );
+            assert_eq!(state.source_scroll() as usize, source_page);
+            source_landings.push(state.source_scroll());
+        }
+        assert_ne!(
+            timeline_landings[0], timeline_landings[1],
+            "TIMELINE PageUp should land on a different review point at \
+             each geometry"
+        );
+        assert_ne!(
+            source_landings[0], source_landings[1],
+            "SOURCE PageDown should land at a different row at each geometry"
+        );
+    }
+
+    /// The Review Run counterpart to `after_action_arrows_do_not_scroll_
+    /// the_report_while_its_satellite_pane_is_focused` above: Signals and
+    /// After Action both already have a dedicated F8-leak test, but nothing
+    /// proved the same for Operation's Run Inspector before this. `F8`
+    /// moves focus from `OperationTelemetry` to `Satellite`, after which
+    /// every navigation key — and `Tab`, since mode-switching is also
+    /// scoped to the focused Run Inspector — must be inert.
+    #[test]
+    fn review_run_f8_to_satellite_makes_navigation_and_tab_inert() {
+        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
+        events.extend(clear_and_type(ROUTE_TO_UPLINK));
+        events.push(press(KeyCode::F(6)));
+        events.push(press(KeyCode::Char(' '))); // pause
+        events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
+        events.push(press(KeyCode::F(5))); // Review Run
+
+        let (mut state, _) = render(120, 40, &events);
+        assert_eq!(
+            state.focused_pane(View::Operation),
+            PaneId::OperationTelemetry
+        );
+        let mut last_transition_press: TransitionKeyDebounce = None;
+
+        // With the Run Inspector focused (Review Run's default), Up
+        // actually moves the chronology selection.
+        should_redraw(
+            &mut state,
+            press(KeyCode::Up),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        let selected_before = state.review_selected();
+
+        should_redraw(
+            &mut state,
+            press(KeyCode::F(8)),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        assert_eq!(state.focused_pane(View::Operation), PaneId::Satellite);
+
+        for key in [
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+            KeyCode::Home,
+            KeyCode::End,
+            KeyCode::Tab,
+        ] {
+            should_redraw(
+                &mut state,
+                press(key),
+                (120, 40),
+                &mut last_transition_press,
+            );
+        }
+
+        assert_eq!(state.review_selected(), selected_before);
+        assert_eq!(state.source_scroll(), 0);
+        assert_eq!(
+            state.run_inspector_mode(),
+            state::RunInspectorMode::Timeline
+        );
+    }
+
+    /// The Controller editor's `PageUp`/`PageDown` are the console-wide
+    /// navigation contract's one documented, permanent exception
+    /// (`docs/TUI_DESIGN.md`, "Page movement follows real viewport
+    /// geometry"): a fixed `PAGE_LINES = 10` jump (`document.rs`) rather
+    /// than the visible-viewport-derived page every migrated surface uses.
+    /// `event.rs` already unit-tests that these keys map to `EditOp::Page*`
+    /// rather than `navigation::route`; this proves the fixed jump also
+    /// holds end-to-end through `should_redraw`, and — the actual point of
+    /// this test — that it doesn't vary with frame size the way every
+    /// other surface's page movement now does.
+    #[test]
+    fn controller_page_movement_stays_fixed_at_ten_lines_regardless_of_terminal_size() {
+        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
+        events.extend(clear_and_paste(&long_route_to_uplink()));
+
+        let (mut state, _) = render(120, 40, &events);
+        assert_eq!(
+            state.focused_pane(View::Controller),
+            PaneId::ControllerSource
+        );
+        let mut last_transition_press: TransitionKeyDebounce = None;
+
+        // Climb all the way back to the first line, regardless of geometry
+        // (`PageUp` clamps at 0 rather than wrapping or overshooting).
+        for _ in 0..30 {
+            should_redraw(
+                &mut state,
+                press(KeyCode::PageUp),
+                (120, 40),
+                &mut last_transition_press,
+            );
+        }
+        assert_eq!(state.controller().unwrap().cursor_line_col().0, 0);
+
+        should_redraw(
+            &mut state,
+            press(KeyCode::PageDown),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        assert_eq!(
+            state.controller().unwrap().cursor_line_col().0,
+            10,
+            "PageDown at 120x40 should move exactly 10 lines"
+        );
+
+        should_redraw(
+            &mut state,
+            press(KeyCode::PageUp),
+            (120, 40),
+            &mut last_transition_press,
+        );
+        assert_eq!(state.controller().unwrap().cursor_line_col().0, 0);
+
+        should_redraw(
+            &mut state,
+            press(KeyCode::PageDown),
+            (150, 50),
+            &mut last_transition_press,
+        );
+        assert_eq!(
+            state.controller().unwrap().cursor_line_col().0,
+            10,
+            "PageDown at a larger 150x50 geometry should still move exactly \
+             10 lines, unlike every viewport-derived surface"
+        );
+    }
+
     #[test]
     fn review_run_source_mode_is_unaffected_by_a_later_working_controller_edit() {
         let mut deploy_events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
