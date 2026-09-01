@@ -2784,6 +2784,55 @@ mod tests {
             "the two tested geometries should page Help to different rows"
         );
 
+        // After Action's Report pane shares `NavSurface::Scroll`'s message
+        // handling with Help, but its own `scroll_pane_visible_rows` and
+        // `after_action_max_scroll` arms are separate code paths keyed on
+        // `PaneId::Report` — a regression there wouldn't be caught by only
+        // exercising Help above.
+        //
+        // Report can't reuse `LARGER` (150x50) here: its player-controlled
+        // diagnostic text is deliberately capped (`MAX_DETAIL_LINES`,
+        // `MAX_DETAIL_LINE_CHARS`), so the whole report already fits
+        // without scrolling once the pane is tall enough — by design, the
+        // same reason Help stops needing to scroll at a sufficiently tall
+        // viewport (`help_at_a_tall_viewport_does_not_scroll_past_its_own_
+        // content` in `ui.rs`). `150x42` is still larger than 120x40 in
+        // both dimensions while staying under that fits-without-scrolling
+        // threshold, so `LONG_ERROR_CONTROLLER` still needs scrolling at
+        // both geometries tested.
+        const LARGER_FOR_REPORT: (u16, u16) = (150, 42);
+        let mut report_landings = Vec::new();
+        for (width, height) in [(120, 40), LARGER_FOR_REPORT] {
+            let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
+            events.extend(clear_and_type(LONG_ERROR_CONTROLLER));
+            events.push(press(KeyCode::F(6)));
+            events.push(press(KeyCode::Char(' '))); // pause
+            events.push(press(KeyCode::Enter)); // step the one tick that errors
+
+            let (mut state, _) = render(width, height, &events);
+            assert_eq!(state.focused_pane(View::AfterAction), PaneId::Report);
+            let mut last_transition_press: TransitionKeyDebounce = None;
+            assert!(
+                ui::after_action_max_scroll(&state, width, height) > 0,
+                "the long error report should still need scrolling at {width}x{height}"
+            );
+            let expected = ui::scroll_pane_visible_rows(PaneId::Report, &state, width, height)
+                .min(ui::after_action_max_scroll(&state, width, height) as usize);
+            should_redraw(
+                &mut state,
+                press(KeyCode::PageDown),
+                (width, height),
+                &mut last_transition_press,
+            );
+            assert_eq!(state.scroll_offset(PaneId::Report) as usize, expected);
+            report_landings.push(expected);
+        }
+        assert_ne!(
+            report_landings[0], report_landings[1],
+            "the two tested geometries should page the Report pane to \
+             different rows"
+        );
+
         // Review Run TIMELINE and SOURCE: build one deployed run long/long-
         // running enough to page meaningfully at both geometries, then
         // compare each surface's page-key landing spot at each geometry.
