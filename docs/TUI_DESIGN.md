@@ -405,7 +405,7 @@ Representative 120×40 layout before connectivity:
 ┌ HUMAN EXCEPTION // RESISTANCE CONSOLE ─────────────────────────────────────────────────────────────────────────┐
 │ MESH: NONE             SATLINK: COMPROMISED        LOCAL LOG: 03        WORKING SET: none                      │
 ├───────────────────────────────────────────────────────────────┬────────────────────────────────────────────────┤
-│ LOCAL LOG                                                     │ SELECTED ENTRY                                 │
+│ » LOCAL LOG                                                   │ SELECTED ENTRY                                 │
 │                                                               │                                                │
 │ > 11:42  MACHINE INTERCEPT                                    │ MACHINE INTERCEPT // sector 7                  │
 │   Fabricator node 31B resumed local control after mesh loss.  │ confidence: HIGH                               │
@@ -421,7 +421,7 @@ Representative 120×40 layout before connectivity:
 │                                                               │ Enter  inspect opportunity                     │
 │                                                               │                                                │
 ├────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│ ↑↓ Select   Enter Inspect   F1 Help   F2 Local Log                                           Ctrl+Q Quit       │
+│ ↑↓ Select   Enter Inspect   F1 Help   F2 Local Log   F8 Switch Pane                          Ctrl+Q Quit       │
 └────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -433,9 +433,9 @@ Representative 120×40 layout after First Contact succeeds:
 
 ```text
 ┌ HUMAN EXCEPTION // RESISTANCE CONSOLE ─────────────────────────────────────────────────────────────────────────┐
-│ MESH: DEGRADED        SATLINK: COMPROMISED        SIGNALS: 04        WORKING SET: none                         │
+│ MESH: DEGRADED   WORKING SET: FIRST CONTACT   SATLINK: COMPROMISED   SIGNALS: 04                                │
 ├───────────────────────────────────────────────────────────────┬────────────────────────────────────────────────┤
-│ SIGNALS                                                       │ SELECTED SIGNAL                                │
+│ » SIGNALS                                                     │ SELECTED SIGNAL                                │
 │                                                               │                                                │
 │ > 12:03  rook@pacific // SHARED INTEL                         │ SHARED INTEL // rook@pacific                   │
 │   Lost my relay before I could trace the uplink. Dumping      │ confidence: MED                                │
@@ -451,9 +451,11 @@ Representative 120×40 layout after First Contact succeeds:
 │   10:57  PASSIVE SENSOR // ANOMALY                            │                                                │
 │   Burst traffic from an offline municipal control cluster.    │                                                │
 ├────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│ ↑↓ Select   Enter Inspect   F1 Help   F2 Signals                                             Ctrl+Q Quit       │
+│ ↑↓ Select   F1 Help   F2 Signals   F8 Switch Pane                                            Ctrl+Q Quit       │
 └────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
+
+`WORKING SET: FIRST CONTACT` persists here because the state rules keep the current working set for the session regardless of view (§ [State and information rules](#state-and-information-rules)); it only reads `none` again after First Contact's working set is explicitly cleared or a fresh, connectivity-persisted relaunch begins before any working set has been chosen this session. `Enter` has no listed hint because nothing in this feed is currently actionable (below); selecting a row with `↑↓` alone already updates the detail pane.
 
 Once connected, the front door genuinely carries operator-network traffic — shared intel and cell requests from other independent hackers are now legitimate, because the resistance mesh is actually reachable. First Contact does not reappear here as an actionable item: it is already complete, and re-offering it as an undiscovered opportunity would be dishonest (§5, § [Network Bootstrap](#network-bootstrap)). For the first playable slice, no signal in the connected feed is actionable; they exist to make the wider network feel real, per § [Opportunity design principles beyond First Contact](#opportunity-design-principles-beyond-first-contact).
 
@@ -477,6 +479,8 @@ Selecting an actionable entry and pressing `Enter` opens **Target**. It does not
 
 If the player already has First Contact as the current working set, selecting it again must preserve the current controller source. Re-entering Target never reloads or replaces source by itself.
 
+The `»` before a pane title in the mockups above is the non-color focus cue (§ [Non-color focus cue](#non-color-focus-cue)) — deliberately a different glyph from the `>` that marks the selected row within the list pane, so the two choices (which pane has focus, which entry is selected) stay visually distinct.
+
 ## 2. Target
 
 Target is the dossier for an opportunity the player is considering or has chosen to work. Its behavior does not depend on connectivity (§ [Bootstrap and network connectivity](#bootstrap-and-network-connectivity)); First Contact is presented from bootstrap `LOCAL LOG` in the current playable slice, but nothing here is conditioned on that.
@@ -487,7 +491,7 @@ Representative layout:
 
 ```text
 ┌ HUMAN EXCEPTION // RESISTANCE CONSOLE ─────────────────────────────────────────────────────────────────────┐
-│ MESH: DEGRADED        TARGET: FIRST CONTACT        CONFIDENCE: MED/HIGH        WORKING SET: none           │
+│ MESH: NONE            TARGET: FIRST CONTACT        CONFIDENCE: MED/HIGH        WORKING SET: none           │
 ├───────────────────────────────────────────────────────────────┬────────────────────────────────────────────┤
 │ TARGET INTELLIGENCE                                           │ PROVENANCE / ACCESS                        │
 │                                                               │                                            │
@@ -508,9 +512,9 @@ Representative layout:
 │ If the drone reaches the uplink, we may obtain a foothold     │ No one is waiting for us to do this.       │
 │ in the facility network before the access window closes.      │ The window may not last.                   │
 │                                                               │                                            │
-│ Enter  work this opportunity                                  │ Esc  back to signals                       │
+│ Enter  work this opportunity                                  │ Esc  back to local log                     │
 ├────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│ F1 Help   F2 Signals   Enter Work Opportunity                                                   Ctrl+Q Quit│
+│ F1 Help   F2 Local Log   Enter Work Opportunity                                                  Ctrl+Q Quit│
 └────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -565,7 +569,7 @@ The editor owns most of the screen. API help is secondary.
 │ 11    return "wait"                                                        │ F1 opens complete reference          │
 │ 12  end                                                                    │                                      │
 ├───────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│ F1 Help   F2 Signals   F3 Target   F4 Controller   F5 Operation   F6 Deploy   F7 Reset                 Ctrl+Q Quit│
+│ F1 Help   F2 Local Log   F3 Target   F4 Controller   F5 Operation   F6 Deploy   F7 Reset                Ctrl+Q Quit│
 └───────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -872,7 +876,7 @@ The compromised satellite feed is visually dominant. Telemetry exists to explain
 │ ? unknown   · floor   # wall   ~ hazard   U uplink                   │ Space pause                                │
 │                                                                      │ Enter step (paused)                        │
 ├───────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│ F1 Help   F2 Signals   F3 Target   F4 Controller   F5 Operation   F6 Redeploy   Space Pause            Ctrl+Q Quit│
+│ F1 Help   F2 Local Log   F3 Target   F4 Controller   F5 Operation   F6 Redeploy   Space Pause           Ctrl+Q Quit│
 └───────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -967,7 +971,7 @@ This hierarchy is a presentation contract, not a new state machine: it governs w
 
 ### Success
 
-**Routing exception:** the first time First Contact succeeds, Operation does not automatically land here. It enters the one-time [Network Bootstrap](#network-bootstrap) transition instead, landing on connected `SIGNALS` once that completes. This screen's content is unchanged by that exception — it still exists, and is reached afterward via the normal `F4`/`F5` bindings against the same (now-connected) working set, exactly as any other After Action screen would be. A player who somehow re-reaches this screen for an already-recorded success (e.g. via Review Run) sees the same content below and gains nothing further from it; success cannot be granted a second time. Every other terminal outcome — including a *second* First Contact success after connectivity already exists, which cannot occur because the opportunity is withdrawn once complete (§1) — auto-lands here exactly as documented.
+**Routing exception:** the first time First Contact succeeds, Operation does not automatically land here. It enters the one-time [Network Bootstrap](#network-bootstrap) transition instead, landing on connected `SIGNALS` once that completes. This screen's content is unchanged by that exception — it still exists, and stays reachable afterward: `F4` reopens Controller against the same working set, and `F5` reopens this exact report (§ [Review Run](#review-run) explains how `F5` is overloaded between the report and its deeper Review Run once a deployment has concluded). Re-reaching this screen for an already-recorded success shows the same content below and grants nothing further; success cannot be recorded a second time. Every other terminal outcome — including a *second* First Contact success after connectivity already exists, which cannot occur because the opportunity is withdrawn once complete (§1) — auto-lands here exactly as documented.
 
 A successful run leads with `FOOTHOLD ESTABLISHED` and states `FIRST CONTACT COMPLETE` as the explicit completion line. The meaning line echoes the language already used when the opportunity was first offered in Target (§2): reaching the uplink means resistance access to the facility network was established before the operational window closed. It does **not** mean the facility was captured, owned, brought under resistance control, or made persistently operable — the report must not claim or imply any of those.
 
@@ -1033,9 +1037,9 @@ Unlike success, failure has no routing exception: it always auto-lands here imme
 │                                                                      │ No further operation is available at  │
 │                                                                      │ this facility either way. Revise the  │
 │                                                                      │ controller and try again, or return   │
-│                                                                      │ to Signals.                           │
+│                                                                      │ to the Local Log.                     │
 ├───────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│ F2 Signals   F4 Edit Controller   F5 Review Run   F6 Redeploy                                      Ctrl+Q Quit│
+│ F2 Local Log   F4 Edit Controller   F5 Review Run   F6 Redeploy                                    Ctrl+Q Quit│
 └───────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1055,7 +1059,9 @@ Detailed tick-by-tick telemetry, full event chronology, and the exact deployed-s
 
 ### Review Run
 
-Review Run is a finished `Operation` — the same two-pane layout (compromised satellite feed, run inspector) the live run used, not a new view. It is reachable the same way live Operation is, via `F5`, once the deployment it shows has concluded.
+Review Run is a finished `Operation` — the same two-pane layout (compromised satellite feed, run inspector) the live run used, not a new view.
+
+`F5` against a working set whose most recent deployment has concluded first reopens that run's **After Action** report — exactly as the automatic terminal landing did the moment the run finished, and this is how a completed run's report stays reachable after leaving it (§5, § [Success](#success)'s routing exception included). Review Run is one level further in: pressing `F5` again while already viewing After Action opens it, per § [Evidence: After Action vs. Review Run](#evidence-after-action-vs-review-run). No new binding is introduced by this: `F5` still means "show me this working set's Operation state," it is only reached in two contexts (a concluded run's report, then that report's own frozen telemetry) instead of one.
 
 A single **selected review point** drives both panes at once: the satellite feed renders that point's legitimate discovered snapshot, and the run inspector renders that same point's evidence. The two panes can never describe two different moments in the run. A review point is one of:
 
@@ -1089,7 +1095,7 @@ The displayed source stays tied to the reviewed run even if the player has since
 
 From After Action, four next actions are available, using bindings already defined in [Overall navigation](#overall-navigation) — no new bindings are introduced for this contract:
 
-- `F2` — return to Signals.
+- `F2` — return to the front door: `LOCAL LOG` while still in bootstrap (the only case for a failure/error outcome), or connected `SIGNALS` afterward (§ [Bootstrap and network connectivity](#bootstrap-and-network-connectivity)).
 - `F4` — edit the Controller (current source, including edits from prior sessions this run, is preserved).
 - `F5` — Review Run: inspect this run's frozen telemetry and deployed source.
 - `F6` — redeploy from a clean scenario state.
@@ -1106,7 +1112,7 @@ Product requirements:
 - it shows an ordered sequence of plausible synchronization/update steps and a visible, advancing progress indicator; representative steps include uplink established, peer network reachable, console package/index synchronization, module or package verification, operator-key synchronization, shared index/feed synchronization, and network services becoming available — exact wording, step count, and styling are implementation details left to a later issue;
 - `slaptijack@` may appear through restrained package/signature metadata during the sequence, consistent with § [Bootstrap and network connectivity](#bootstrap-and-network-connectivity); he is never a narrator or commander here either;
 - ordinary gameplay/navigation/editing input is suppressed while it owns the interface; the only input honored is the existing quit-safety behavior (§ [Quit safety](#quit-safety)) — quitting mid-sequence does not lose the connectivity already recorded (see below);
-- presentation timing must be deterministic and testable, consistent with the "Engineering principles" in AGENTS.md — it must not depend on wall-clock time or real network activity;
+- presentation advances on an injectable tick/cadence, mirroring Operation's own boundary (§ [Pacing controls](#pacing-controls)): production may schedule that cadence by wall-clock time same as Operation's presentation layer already does, but nothing about *which step is showing* may depend on real network activity, and a test must be able to drive the same cadence directly without waiting on wall-clock time, so the sequence stays deterministic and testable rather than depending on uncontrolled real-world timing;
 - it never replays: once operator-network connectivity is durable (§ [State and information rules](#state-and-information-rules)), no subsequent launch or navigation shows this sequence again;
 - on completion, the console lands on connected `SIGNALS` (§1) — not After Action. After Action and Review Run for the completed First Contact run remain reachable afterward exactly as documented in §5.
 
