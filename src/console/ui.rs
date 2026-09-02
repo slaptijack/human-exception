@@ -611,7 +611,14 @@ fn draw_after_action(frame: &mut Frame, area: Rect, state: &AppState) {
         pane_title("FINAL SATELLITE FRAME", focused == PaneId::FinalFrame),
         satellite_lines(&op.current),
     );
-    draw_after_action_report_pane(frame, right, &op, scroll, focused == PaneId::Report);
+    draw_after_action_report_pane(
+        frame,
+        right,
+        &op,
+        scroll,
+        focused == PaneId::Report,
+        state.connected(),
+    );
 }
 
 /// Draws the AFTER-ACTION REPORT pane, pinning the `F4` recovery hint to a
@@ -630,8 +637,9 @@ fn draw_after_action_report_pane(
     op: &OperationView<'_>,
     scroll: u16,
     focused: bool,
+    connected: bool,
 ) {
-    let lines = after_action_report_lines(op);
+    let lines = after_action_report_lines(op, connected);
     let block = Block::default()
         .borders(Borders::ALL)
         .title(pane_title("AFTER-ACTION REPORT", focused));
@@ -765,14 +773,28 @@ const FIRST_CONTACT_INCOMPLETE: &str = "FIRST CONTACT INCOMPLETE";
 /// The failure report's truthful availability statement and next actions
 /// (`docs/TUI_DESIGN.md` §5 "Failure and controller error" mockup): the same
 /// availability truth as success, but the primary recovery path is revising
-/// the Controller.
-const NO_FURTHER_OPERATION_FAILURE: &str = "No further operation is available at this facility either way. Revise the controller and try again, or return to Signals.";
+/// the Controller. Unlike success — which always happens after connectivity
+/// is already established, since `AppState::step_operation` sets `connected`
+/// synchronously with the same terminal outcome that lands here — a failure
+/// never grants connectivity, so the front-door destination named here must
+/// track connectivity the same way the header/footer/help do, rather than
+/// assuming `Signals`. Uses prose casing ("Local Log"), not
+/// [`front_door_label`]'s full-caps pane-title form, matching this sentence's
+/// existing "Signals" convention and the doc's own failure mockup ("return
+/// to the Local Log").
+fn no_further_operation_failure_line(connected: bool) -> String {
+    let destination = if connected { "Signals" } else { "Local Log" };
+    format!(
+        "No further operation is available at this facility either way. Revise the controller \
+         and try again, or return to {destination}."
+    )
+}
 
-fn after_action_report_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
+fn after_action_report_lines(op: &OperationView<'_>, connected: bool) -> Vec<Line<'static>> {
     if after_action_succeeded(op) {
         after_action_success_lines(op)
     } else {
-        after_action_failure_lines(op)
+        after_action_failure_lines(op, connected)
     }
 }
 
@@ -833,7 +855,7 @@ fn after_action_success_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
 /// outcome hierarchy order `docs/TUI_DESIGN.md` §5 requires: outcome,
 /// trigger, meaning, completion, evidence, then next actions/availability —
 /// the failure counterpart to [`after_action_success_lines`].
-fn after_action_failure_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
+fn after_action_failure_lines(op: &OperationView<'_>, connected: bool) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(Span::styled(
         after_action_headline(op),
         Style::default().add_modifier(Modifier::BOLD),
@@ -902,7 +924,7 @@ fn after_action_failure_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
         conclusion.run_id
     )));
     lines.push(Line::from(""));
-    lines.push(Line::from(NO_FURTHER_OPERATION_FAILURE));
+    lines.push(Line::from(no_further_operation_failure_line(connected)));
 
     lines
 }
@@ -1648,7 +1670,10 @@ pub(crate) fn after_action_max_scroll(
     let (content_width, content_height) =
         after_action_report_inner_dimensions(frame_width, frame_height);
     let pinned_action_row = u16::from(!after_action_succeeded(&op));
-    let content_rows = wrapped_row_count(&after_action_report_lines(&op), content_width);
+    let content_rows = wrapped_row_count(
+        &after_action_report_lines(&op, state.connected()),
+        content_width,
+    );
     content_rows.saturating_sub(content_height.saturating_sub(pinned_action_row) as usize) as u16
 }
 
@@ -4590,6 +4615,21 @@ end
     }
 
     #[test]
+    fn disconnected_failure_report_points_back_to_local_log_not_signals() {
+        // A budget-exhaustion (or any) failure never grants connectivity
+        // (`docs/TUI_DESIGN.md` §5 "Failure and controller error"), so the
+        // failure report's recovery line must name the same disconnected
+        // front door the header/footer/help already advertise, not the
+        // connected `Signals` name.
+        let state = budget_exhausted_state();
+        assert!(!state.connected());
+        let terminal = render(120, 40, &state);
+
+        assert!(buffer_contains(&terminal, "return to Local Log"));
+        assert!(!buffer_contains(&terminal, "return to Signals"));
+    }
+
+    #[test]
     fn a_budget_exhaustion_failure_defaults_to_the_report_pane_at_the_minimum_geometry() {
         let state = budget_exhausted_state();
         let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
@@ -4622,8 +4662,10 @@ end
         assert!(buffer_contains(&terminal, "deployed rev"));
         // The full closing paragraph, including its last word, must
         // survive — `Paragraph` doesn't scroll, so content taller than the
-        // pane's inner height is silently clipped from the bottom.
-        assert!(buffer_contains(&terminal, "Signals."));
+        // pane's inner height is silently clipped from the bottom. A
+        // disconnected failure names `Local Log`, not `Signals` (see
+        // `disconnected_failure_report_points_back_to_local_log_not_signals`).
+        assert!(buffer_contains(&terminal, "Local Log."));
         assert!(buffer_contains(&terminal, "F4  revise the controller"));
     }
 
@@ -4965,7 +5007,7 @@ end
     fn the_success_report_blank_line_spacing_matches_the_failure_report() {
         let state = succeeded_state();
         let op = state.operation().unwrap();
-        let lines: Vec<String> = after_action_report_lines(&op)
+        let lines: Vec<String> = after_action_report_lines(&op, state.connected())
             .into_iter()
             .map(String::from)
             .collect();
