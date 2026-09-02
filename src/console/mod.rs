@@ -91,18 +91,36 @@ pub fn run() -> io::Result<()> {
 
     // Reported only now, after the terminal has left raw/alternate-screen
     // mode: printed any earlier, this would land mid-frame, get overwritten
-    // by the very next redraw, and never reach the player at all.
+    // by the very next redraw, and never reach the player at all. Each
+    // durable fact's failure is reported on its own line — conflating them
+    // would tell the player the wrong fact failed to persist (e.g. blaming
+    // connectivity for a bootstrap-introduction write failure), leaving
+    // them unwarned that the introduction will replay next launch, or vice
+    // versa.
     match result {
-        Ok(persistence_error) => {
-            if let Some(err) = persistence_error {
+        Ok(persistence_errors) => {
+            if let Some(err) = persistence_errors.connectivity {
                 eprintln!(
                     "human-exception: failed to persist operator-network connectivity: {err}"
+                );
+            }
+            if let Some(err) = persistence_errors.bootstrap_intro_acknowledgement {
+                eprintln!(
+                    "human-exception: failed to persist bootstrap-introduction acknowledgement: {err}"
                 );
             }
             Ok(())
         }
         Err(err) => Err(err),
     }
+}
+
+/// The durable facts [`event_loop`] may fail to persist, kept distinct so
+/// [`run`] never reports the wrong one — see its doc comment.
+#[derive(Default)]
+struct PersistenceErrors {
+    connectivity: Option<io::Error>,
+    bootstrap_intro_acknowledgement: Option<io::Error>,
 }
 
 /// Installs a panic hook that restores the terminal before delegating to
@@ -145,13 +163,13 @@ fn restore_terminal() -> io::Result<()> {
 /// [`ui::draw`] so it can also be driven against `TestBackend` in tests.
 fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-) -> io::Result<Option<io::Error>> {
+) -> io::Result<PersistenceErrors> {
     let profile_path = profile::default_path();
     let intro_path = intro::default_path();
     let mut state = bootstrap_state(profile_path.as_deref(), intro_path.as_deref());
     let mut frame_size = (0u16, 0u16);
     let mut last_transition_press: TransitionKeyDebounce = None;
-    let mut persistence_error: Option<io::Error> = None;
+    let mut persistence_errors = PersistenceErrors::default();
 
     terminal.draw(|frame| {
         let area = frame.area();
@@ -224,22 +242,25 @@ fn event_loop(
             let event = term_event::read()?;
             should_redraw(&mut state, event, frame_size, &mut last_transition_press)
         };
-        // At most one write ever happens across a session: `connected` only
-        // ever flips false -> true, once. Keeping the error here (rather
-        // than printing immediately) is what lets it survive past
-        // `restore_terminal` intact instead of being overwritten by the
-        // next redraw or lost when the alternate screen is left.
+        // At most one write to each fact ever happens across a session:
+        // `connected` and `bootstrap_intro_visible` each flip at most once
+        // (false -> true, true -> false respectively). Keeping the errors
+        // here (rather than printing immediately) is what lets them survive
+        // past `restore_terminal` intact instead of being overwritten by
+        // the next redraw or lost when the alternate screen is left. Kept
+        // in separate fields, not one shared slot, so a failure persisting
+        // one fact can never be misreported as the other by `run`.
         if let Some(err) =
             persist_if_newly_connected(was_connected, &state, profile_path.as_deref())
         {
-            persistence_error = Some(err);
+            persistence_errors.connectivity = Some(err);
         }
         if let Some(err) = persist_if_newly_acknowledged(
             was_bootstrap_intro_visible,
             &state,
             intro_path.as_deref(),
         ) {
-            persistence_error = Some(err);
+            persistence_errors.bootstrap_intro_acknowledgement = Some(err);
         }
 
         if redraw {
@@ -251,7 +272,7 @@ fn event_loop(
         }
     }
 
-    Ok(persistence_error)
+    Ok(persistence_errors)
 }
 
 /// Builds the session's starting [`AppState`], seeded with whatever
