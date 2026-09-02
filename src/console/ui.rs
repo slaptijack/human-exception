@@ -45,6 +45,15 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
         return;
     }
 
+    // Checked after the geometry warning — unlike the quit confirmation
+    // above, this first-launch panel (issue #173) only needs to work at
+    // the supported minimum geometry and larger, so it doesn't need to
+    // preempt that check.
+    if state.bootstrap_intro_visible() {
+        draw_bootstrap_intro(frame, area);
+        return;
+    }
+
     draw_console(frame, area, state);
 }
 
@@ -151,6 +160,48 @@ fn draw_geometry_warning(frame: &mut Frame, area: Rect) {
         Line::from("Ctrl+Q Quit"),
     ];
     frame.render_widget(Paragraph::new(text), area);
+}
+
+/// The first-launch bootstrap introduction from `slaptijack@` (issue
+/// #173): rendered full-frame, like [`draw_quit_confirmation`] and
+/// [`draw_geometry_warning`] above — this codebase has no floating/
+/// centered popup widget, so every one-off panel is a full-frame content
+/// replacement rather than an overlay on top of the normal layout.
+///
+/// Deliberately restrained per `docs/TUI_DESIGN.md`'s "Bootstrap and
+/// network connectivity": `slaptijack@` appears only through
+/// package/signature-style metadata and a short, technical note, never as
+/// a narrator, commander, or tutorial voice.
+fn draw_bootstrap_intro(frame: &mut Frame, area: Rect) {
+    let lines = vec![
+        Line::from("bootstrap environment"),
+        Line::from(""),
+        Line::from("package: resistance-console/bootstrap"),
+        Line::from("author:  slaptijack@"),
+        Line::from("status:  LOCAL"),
+        Line::from("uplink:  NONE"),
+        Line::from(""),
+        Line::from("This is enough of the Console to get you started."),
+        Line::from(""),
+        Line::from(
+            "Network services won't be available until you establish a usable uplink. \
+             I've included the local material I could verify. Start there.",
+        ),
+        Line::from(""),
+        Line::from("                                                   — slaptijack@"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "[ Enter ] continue",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+    ];
+    let block = Block::default().borders(Borders::ALL).title(TITLE);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(block),
+        area,
+    );
 }
 
 /// `starter`/`modified`/`invalid`, or `None` before a working set has
@@ -3325,6 +3376,49 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_intro_renders_author_and_local_status_at_the_minimum_geometry() {
+        let mut state = AppState::new();
+        state.set_bootstrap_intro_visible(true);
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+
+        assert!(buffer_contains(&terminal, "slaptijack@"));
+        assert!(buffer_contains(&terminal, "status:  LOCAL"));
+        assert!(buffer_contains(&terminal, "uplink:  NONE"));
+        assert!(buffer_contains(&terminal, "[ Enter ] continue"));
+    }
+
+    #[test]
+    fn bootstrap_intro_renders_at_a_larger_supported_geometry_too() {
+        let mut state = AppState::new();
+        state.set_bootstrap_intro_visible(true);
+        let terminal = render(150, 50, &state);
+
+        assert!(buffer_contains(&terminal, "slaptijack@"));
+        assert!(buffer_contains(&terminal, "[ Enter ] continue"));
+    }
+
+    #[test]
+    fn bootstrap_intro_hides_the_normal_console_underneath() {
+        let mut state = AppState::new();
+        state.set_bootstrap_intro_visible(true);
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+
+        assert!(!buffer_contains(&terminal, "LOCAL LOG"));
+    }
+
+    #[test]
+    fn bootstrap_intro_is_not_shown_when_not_flagged_visible() {
+        // The LOCAL LOG provenance entry (#164) also mentions `slaptijack@`,
+        // so this asserts on copy unique to the intro panel itself rather
+        // than on his name appearing anywhere in the frame.
+        let state = AppState::new();
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+
+        assert!(!buffer_contains(&terminal, "[ Enter ] continue"));
+        assert!(!buffer_contains(&terminal, "bootstrap environment"));
+    }
+
+    #[test]
     fn quit_confirmation_is_visible_from_every_view_not_only_controller() {
         use super::super::state::Msg;
         use super::super::state::View;
@@ -3508,6 +3602,7 @@ mod tests {
         let msg = event::map(
             key,
             state.current_view(),
+            false,
             state.reset_confirmation_pending(),
             state.quit_confirmation_pending(),
             state.redeploy_confirmation_pending(),
@@ -3529,6 +3624,7 @@ mod tests {
         let msg = event::map(
             key,
             state.current_view(),
+            false,
             state.reset_confirmation_pending(),
             state.quit_confirmation_pending(),
             state.redeploy_confirmation_pending(),

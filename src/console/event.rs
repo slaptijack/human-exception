@@ -13,15 +13,22 @@ use super::state::{Msg, PaneId, View};
 /// Maps a key event to a player intent, given the view currently showing
 /// (several keys are context-sensitive: `F1`/`Esc` need to know whether
 /// Help is open, `Esc`/arrows/`Enter` behave differently in Signals, Target,
-/// and Help), whether any confirmation dialog is currently open, which pane
+/// and Help), whether any confirmation dialog is currently open, whether
+/// the first-launch bootstrap introduction is currently showing, which pane
 /// is currently focused — pane-local input (Signals selection, Controller
 /// editing, After Action scrolling) is only routed to the pane that owns
 /// it, regardless of what layout width currently has it on screen — and
 /// whether the currently rendered surface presents a real multi-pane focus
 /// choice (`AppState::focus_movement_available`), which gates `F8`.
+// One parameter over clippy's default threshold — each is an independent,
+// differently-typed fact `AppState` tracks (not a natural group to bundle
+// into a struct just to satisfy the lint), and this function is still a
+// pure, exhaustively-tested `(inputs) -> Option<Msg>` mapping.
+#[allow(clippy::too_many_arguments)]
 pub fn map(
     key: KeyEvent,
     current_view: View,
+    bootstrap_intro_visible: bool,
     reset_confirmation_pending: bool,
     quit_confirmation_pending: bool,
     redeploy_confirmation_pending: bool,
@@ -34,13 +41,27 @@ pub fn map(
         return Some(Msg::RequestQuit);
     }
 
+    let unmodified = key.modifiers.is_empty();
+
+    // The bootstrap introduction is a must-acknowledge gate shown before
+    // the Player has interacted with the console at all: every key but its
+    // own unmodified `Enter` (and the always-global `Ctrl+Q` above) is
+    // swallowed, the same "block everything but dismissal" rule the
+    // confirmation dialogs below apply once the console is otherwise
+    // usable.
+    if bootstrap_intro_visible {
+        return match key.code {
+            KeyCode::Enter if unmodified => Some(Msg::AcknowledgeBootstrapIntro),
+            _ => None,
+        };
+    }
+
     // A confirmation dialog swallows every key except its own unmodified
     // yes/no so the player can't accidentally act past it (e.g. keep
     // typing Lua while a reset prompt is showing) or trigger it by
     // accident via some other binding's modified form — `Ctrl+Enter`
     // (validate) and `Ctrl+Y` both have unmodified forms that must not
     // silently confirm a destructive action instead.
-    let unmodified = key.modifiers.is_empty();
     if quit_confirmation_pending {
         return match key.code {
             KeyCode::Enter | KeyCode::Char('y') if unmodified => Some(Msg::ConfirmQuit),
@@ -255,6 +276,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             view.default_pane(),
             view != View::Help,
         )
@@ -409,6 +431,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 reference_focused,
                 true
             ),
@@ -421,6 +444,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 reference_focused,
                 true
             ),
@@ -430,6 +454,7 @@ mod tests {
             map(
                 key(KeyCode::Left),
                 View::Controller,
+                false,
                 false,
                 false,
                 false,
@@ -450,6 +475,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 reference_focused,
                 true
             ),
@@ -460,6 +486,7 @@ mod tests {
             map(
                 ctrl_enter,
                 View::Controller,
+                false,
                 false,
                 false,
                 false,
@@ -500,8 +527,9 @@ mod tests {
                 false,
                 false,
                 false,
-                View::Operation.default_pane(),
                 false,
+                View::Operation.default_pane(),
+                false
             ),
             None
         );
@@ -516,8 +544,9 @@ mod tests {
                 false,
                 false,
                 false,
-                View::AfterAction.default_pane(),
                 false,
+                View::AfterAction.default_pane(),
+                false
             ),
             None
         );
@@ -664,6 +693,7 @@ mod tests {
                     false,
                     false,
                     false,
+                    false,
                     reference_focused,
                     true
                 ),
@@ -727,6 +757,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 selected_signal_focused,
                 true
             ),
@@ -739,6 +770,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 selected_signal_focused,
                 true
             ),
@@ -748,6 +780,7 @@ mod tests {
             map(
                 key(KeyCode::Enter),
                 View::Signals,
+                false,
                 false,
                 false,
                 false,
@@ -769,6 +802,7 @@ mod tests {
                     false,
                     false,
                     false,
+                    false,
                     selected_signal_focused,
                     true
                 ),
@@ -787,6 +821,7 @@ mod tests {
             map(
                 key(KeyCode::Enter),
                 View::Target,
+                false,
                 false,
                 false,
                 false,
@@ -820,6 +855,7 @@ mod tests {
                 key(KeyCode::Enter),
                 View::Controller,
                 false,
+                false,
                 true,
                 false,
                 PaneId::ControllerSource,
@@ -832,6 +868,7 @@ mod tests {
                 key(KeyCode::Char('y')),
                 View::Controller,
                 false,
+                false,
                 true,
                 false,
                 PaneId::ControllerSource,
@@ -843,6 +880,7 @@ mod tests {
             map(
                 key(KeyCode::Esc),
                 View::Controller,
+                false,
                 false,
                 true,
                 false,
@@ -856,6 +894,7 @@ mod tests {
                 key(KeyCode::Char('n')),
                 View::Controller,
                 false,
+                false,
                 true,
                 false,
                 PaneId::ControllerSource,
@@ -868,6 +907,7 @@ mod tests {
                 key(KeyCode::Char('x')),
                 View::Controller,
                 false,
+                false,
                 true,
                 false,
                 PaneId::ControllerSource,
@@ -879,11 +919,85 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_intro_visible_only_accepts_unmodified_enter() {
+        assert_eq!(
+            map(
+                key(KeyCode::Enter),
+                View::Signals,
+                true,
+                false,
+                false,
+                false,
+                PaneId::SignalsList,
+                true
+            ),
+            Some(Msg::AcknowledgeBootstrapIntro)
+        );
+        for code in [
+            KeyCode::Char('y'),
+            KeyCode::Char('n'),
+            KeyCode::Esc,
+            KeyCode::Char('q'),
+            KeyCode::F(2),
+        ] {
+            assert_eq!(
+                map(
+                    key(code),
+                    View::Signals,
+                    true,
+                    false,
+                    false,
+                    false,
+                    PaneId::SignalsList,
+                    true
+                ),
+                None,
+                "ordinary keys must not leak through while the bootstrap intro is open"
+            );
+        }
+    }
+
+    #[test]
+    fn ctrl_enter_does_not_acknowledge_the_bootstrap_intro() {
+        assert_eq!(
+            map(
+                key_with_modifiers(KeyCode::Enter, KeyModifiers::CONTROL),
+                View::Signals,
+                true,
+                false,
+                false,
+                false,
+                PaneId::SignalsList,
+                true
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn ctrl_q_still_requests_quit_while_the_bootstrap_intro_is_open() {
+        assert_eq!(
+            map(
+                key_with_modifiers(KeyCode::Char('q'), KeyModifiers::CONTROL),
+                View::Signals,
+                true,
+                false,
+                false,
+                false,
+                PaneId::SignalsList,
+                true
+            ),
+            Some(Msg::RequestQuit)
+        );
+    }
+
+    #[test]
     fn reset_confirmation_pending_only_accepts_confirm_or_cancel() {
         assert_eq!(
             map(
                 key(KeyCode::Enter),
                 View::Controller,
+                false,
                 true,
                 false,
                 false,
@@ -896,6 +1010,7 @@ mod tests {
             map(
                 key(KeyCode::Esc),
                 View::Controller,
+                false,
                 true,
                 false,
                 false,
@@ -908,6 +1023,7 @@ mod tests {
             map(
                 key(KeyCode::Char('x')),
                 View::Controller,
+                false,
                 true,
                 false,
                 false,
@@ -927,6 +1043,7 @@ mod tests {
                 View::Operation,
                 false,
                 false,
+                false,
                 true,
                 PaneId::ControllerSource,
                 true
@@ -937,6 +1054,7 @@ mod tests {
             map(
                 key(KeyCode::Char('y')),
                 View::Operation,
+                false,
                 false,
                 false,
                 true,
@@ -951,6 +1069,7 @@ mod tests {
                 View::Operation,
                 false,
                 false,
+                false,
                 true,
                 PaneId::ControllerSource,
                 true
@@ -963,6 +1082,7 @@ mod tests {
                 View::Operation,
                 false,
                 false,
+                false,
                 true,
                 PaneId::ControllerSource,
                 true
@@ -973,6 +1093,7 @@ mod tests {
             map(
                 key(KeyCode::Char(' ')),
                 View::Operation,
+                false,
                 false,
                 false,
                 true,
@@ -998,6 +1119,7 @@ mod tests {
                 ctrl_enter,
                 View::Controller,
                 false,
+                false,
                 true,
                 false,
                 PaneId::ControllerSource,
@@ -1009,6 +1131,7 @@ mod tests {
             map(
                 ctrl_y,
                 View::Controller,
+                false,
                 false,
                 true,
                 false,
@@ -1022,6 +1145,7 @@ mod tests {
                 ctrl_esc,
                 View::Controller,
                 false,
+                false,
                 true,
                 false,
                 PaneId::ControllerSource,
@@ -1033,6 +1157,7 @@ mod tests {
             map(
                 ctrl_n,
                 View::Controller,
+                false,
                 false,
                 true,
                 false,
@@ -1047,6 +1172,7 @@ mod tests {
             map(
                 ctrl_enter,
                 View::Controller,
+                false,
                 true,
                 false,
                 false,
@@ -1059,6 +1185,7 @@ mod tests {
             map(
                 ctrl_y,
                 View::Controller,
+                false,
                 true,
                 false,
                 false,
@@ -1071,6 +1198,7 @@ mod tests {
             map(
                 ctrl_esc,
                 View::Controller,
+                false,
                 true,
                 false,
                 false,
@@ -1083,6 +1211,7 @@ mod tests {
             map(
                 ctrl_n,
                 View::Controller,
+                false,
                 true,
                 false,
                 false,
@@ -1107,6 +1236,7 @@ mod tests {
                     enter,
                     View::Controller,
                     false,
+                    false,
                     true,
                     false,
                     PaneId::ControllerSource,
@@ -1119,6 +1249,7 @@ mod tests {
                 map(
                     y,
                     View::Controller,
+                    false,
                     true,
                     false,
                     false,
@@ -1137,6 +1268,7 @@ mod tests {
             map(
                 key(KeyCode::Enter),
                 View::Controller,
+                false,
                 true,
                 true,
                 false,
@@ -1154,6 +1286,7 @@ mod tests {
             map(
                 quit,
                 View::Controller,
+                false,
                 true,
                 false,
                 false,
@@ -1171,6 +1304,7 @@ mod tests {
             map(
                 quit,
                 View::Operation,
+                false,
                 false,
                 false,
                 true,
@@ -1264,8 +1398,9 @@ mod tests {
                     false,
                     false,
                     false,
+                    false,
                     PaneId::OperationTelemetry,
-                    true,
+                    true
                 )
                 .is_some(),
                 "{code:?} should map while OperationTelemetry is focused"
@@ -1277,8 +1412,9 @@ mod tests {
                     false,
                     false,
                     false,
+                    false,
                     PaneId::Satellite,
-                    true,
+                    true
                 ),
                 None,
                 "{code:?} must not map while the Satellite pane is focused instead"
@@ -1292,6 +1428,7 @@ mod tests {
             map(
                 key(code),
                 View::Operation,
+                false,
                 false,
                 false,
                 false,
@@ -1357,8 +1494,9 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 PaneId::OperationTelemetry,
-                true,
+                true
             ),
             Some(Msg::ToggleRunInspectorMode)
         );
@@ -1369,8 +1507,9 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 PaneId::Satellite,
-                true,
+                true
             ),
             None,
             "Tab must not map while the Satellite pane is focused instead"
@@ -1389,8 +1528,9 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 PaneId::ControllerSource,
-                true,
+                true
             ),
             Some(Msg::EditController(EditOp::Indent))
         );
@@ -1402,6 +1542,7 @@ mod tests {
             map(
                 key(KeyCode::Up),
                 View::AfterAction,
+                false,
                 false,
                 false,
                 false,
@@ -1417,6 +1558,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 PaneId::Report,
                 true
             ),
@@ -1429,6 +1571,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 PaneId::FinalFrame,
                 true
             ),
@@ -1438,6 +1581,7 @@ mod tests {
             map(
                 key(KeyCode::Down),
                 View::AfterAction,
+                false,
                 false,
                 false,
                 false,
@@ -1500,6 +1644,7 @@ mod tests {
                 map(
                     key(code),
                     View::AfterAction,
+                    false,
                     false,
                     false,
                     false,
