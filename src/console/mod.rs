@@ -87,7 +87,20 @@ pub fn run() -> io::Result<()> {
     restore_panic_hook(previous_hook);
     restore_terminal()?;
 
-    result
+    // Reported only now, after the terminal has left raw/alternate-screen
+    // mode: printed any earlier, this would land mid-frame, get overwritten
+    // by the very next redraw, and never reach the player at all.
+    match result {
+        Ok(persistence_error) => {
+            if let Some(err) = persistence_error {
+                eprintln!(
+                    "human-exception: failed to persist operator-network connectivity: {err}"
+                );
+            }
+            Ok(())
+        }
+        Err(err) => Err(err),
+    }
 }
 
 /// Installs a panic hook that restores the terminal before delegating to
@@ -128,11 +141,14 @@ fn restore_terminal() -> io::Result<()> {
 /// Drives the session against a real terminal, reading real `crossterm`
 /// events. The pure dispatch/redraw logic lives in [`should_redraw`] and
 /// [`ui::draw`] so it can also be driven against `TestBackend` in tests.
-fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
+fn event_loop(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> io::Result<Option<io::Error>> {
     let profile_path = profile::default_path();
     let mut state = bootstrap_state(profile_path.as_deref());
     let mut frame_size = (0u16, 0u16);
     let mut last_transition_press: TransitionKeyDebounce = None;
+    let mut persistence_error: Option<io::Error> = None;
 
     terminal.draw(|frame| {
         let area = frame.area();
@@ -204,7 +220,16 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resu
             let event = term_event::read()?;
             should_redraw(&mut state, event, frame_size, &mut last_transition_press)
         };
-        persist_if_newly_connected(was_connected, &state, profile_path.as_deref());
+        // At most one write ever happens across a session: `connected` only
+        // ever flips false -> true, once. Keeping the error here (rather
+        // than printing immediately) is what lets it survive past
+        // `restore_terminal` intact instead of being overwritten by the
+        // next redraw or lost when the alternate screen is left.
+        if let Some(err) =
+            persist_if_newly_connected(was_connected, &state, profile_path.as_deref())
+        {
+            persistence_error = Some(err);
+        }
 
         if redraw {
             terminal.draw(|frame| {
@@ -215,7 +240,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resu
         }
     }
 
-    Ok(())
+    Ok(persistence_error)
 }
 
 /// Builds the session's starting [`AppState`], seeded with whatever
@@ -235,19 +260,21 @@ fn bootstrap_state(profile_path: Option<&Path>) -> AppState {
 /// Persists connectivity exactly once, on the `false -> true` edge, and is
 /// otherwise a no-op — including when `profile_path` is `None`, so a
 /// session that can't resolve a profile path degrades to "this connection
-/// won't survive a relaunch" instead of crashing gameplay. A write failure
-/// is logged and swallowed for the same reason: the in-memory connectivity
-/// fact this session already observes is unaffected either way.
-fn persist_if_newly_connected(was_connected: bool, state: &AppState, profile_path: Option<&Path>) {
+/// won't survive a relaunch" instead of crashing gameplay. Returns a write
+/// failure to the caller rather than reporting it directly: the in-memory
+/// connectivity fact this session already observes is unaffected either
+/// way, but the terminal is mid-session (raw mode, alternate screen) here,
+/// so the caller reports it only after the session ends and the terminal
+/// is restored — see [`event_loop`]/[`run`].
+fn persist_if_newly_connected(
+    was_connected: bool,
+    state: &AppState,
+    profile_path: Option<&Path>,
+) -> Option<io::Error> {
     if was_connected || !state.connected() {
-        return;
+        return None;
     }
-    let Some(path) = profile_path else {
-        return;
-    };
-    if let Err(err) = profile::mark_connected(path) {
-        eprintln!("human-exception: failed to persist operator-network connectivity: {err}");
-    }
+    profile::mark_connected(profile_path?).err()
 }
 
 /// How often a running, unpaused deployment advances a tick on its own
@@ -632,8 +659,9 @@ mod tests {
         let mut state = AppState::new();
         state.set_connected(true);
 
-        persist_if_newly_connected(true, &state, Some(&path));
+        let result = persist_if_newly_connected(true, &state, Some(&path));
 
+        assert!(result.is_none());
         assert!(
             !path.exists(),
             "already-connected transitions must not write again"
@@ -646,19 +674,37 @@ mod tests {
         let mut state = AppState::new();
         state.set_connected(true);
 
-        persist_if_newly_connected(false, &state, Some(&path));
+        let result = persist_if_newly_connected(false, &state, Some(&path));
 
+        assert!(result.is_none());
         assert!(profile::is_connected(&path));
 
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn persist_if_newly_connected_does_not_panic_without_a_resolvable_path() {
+    fn persist_if_newly_connected_returns_none_rather_than_panicking_without_a_resolvable_path() {
         let mut state = AppState::new();
         state.set_connected(true);
 
-        persist_if_newly_connected(false, &state, None);
+        assert!(persist_if_newly_connected(false, &state, None).is_none());
+    }
+
+    #[test]
+    fn persist_if_newly_connected_returns_the_underlying_error_on_a_write_failure() {
+        // A directory already occupies the target path, so the rename in
+        // `profile::mark_connected` fails.
+        let path = profile_scratch_path("write-failure");
+        std::fs::create_dir_all(&path).expect("scratch directory creation should succeed");
+        let mut state = AppState::new();
+        state.set_connected(true);
+
+        assert!(persist_if_newly_connected(false, &state, Some(&path)).is_some());
+
+        let _ = std::fs::remove_dir_all(&path);
+        let mut tmp_name = path.file_name().unwrap().to_os_string();
+        tmp_name.push(".tmp");
+        let _ = std::fs::remove_file(path.parent().unwrap().join(tmp_name));
     }
 
     #[test]
@@ -666,8 +712,9 @@ mod tests {
         let path = profile_scratch_path("still-disconnected");
         let state = AppState::new();
 
-        persist_if_newly_connected(false, &state, Some(&path));
+        let result = persist_if_newly_connected(false, &state, Some(&path));
 
+        assert!(result.is_none());
         assert!(!path.exists());
     }
 

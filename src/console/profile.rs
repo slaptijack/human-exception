@@ -13,6 +13,7 @@
 //! takes an explicit path so the whole module is testable against temp
 //! files without touching a real per-user directory.
 
+use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -29,10 +30,23 @@ const MARKER: &str = "connected\n";
 ///
 /// Never itself touches disk.
 pub(crate) fn default_path() -> Option<PathBuf> {
-    let data_dir = std::env::var_os("XDG_DATA_HOME")
+    resolve_path(std::env::var_os("XDG_DATA_HOME"), std::env::var_os("HOME"))
+}
+
+/// The pure path-resolution logic behind [`default_path`], separated out
+/// so it's unit-testable without mutating process-global environment
+/// variables (which real tests can't safely do in parallel).
+fn resolve_path(xdg_data_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    let data_dir = xdg_data_home
         .map(PathBuf::from)
+        // An empty or relative value is treated the same as unset: a
+        // relative directory resolves against whatever the current working
+        // directory happens to be at launch, so it wouldn't durably
+        // identify the same file across relaunches from a different
+        // directory.
+        .filter(|dir| !dir.as_os_str().is_empty() && dir.is_absolute())
         .or_else(|| {
-            let home = std::env::var_os("HOME")?;
+            let home = home?;
             if home.is_empty() {
                 return None;
             }
@@ -45,8 +59,18 @@ pub(crate) fn default_path() -> Option<PathBuf> {
 /// Missing, unreadable (e.g. a directory, permissions), or malformed
 /// (partial write, corruption, a stray byte) content all return `false` —
 /// a new/broken profile behaves exactly like a fresh installation.
+///
+/// Reads at most one byte past [`MARKER`]'s length, regardless of the
+/// file's actual size: every length other than an exact match is invalid
+/// by definition, so there's no need to load an arbitrarily large
+/// malformed file into memory just to reject it.
 pub(crate) fn is_connected(path: &Path) -> bool {
-    fs::read_to_string(path).is_ok_and(|content| content == MARKER)
+    let Ok(file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = Vec::with_capacity(MARKER.len() + 1);
+    let mut limited = io::Read::take(file, (MARKER.len() + 1) as u64);
+    io::Read::read_to_end(&mut limited, &mut buf).is_ok_and(|_| buf == MARKER.as_bytes())
 }
 
 /// Durably records connectivity, creating parent directories as needed.
@@ -54,11 +78,33 @@ pub(crate) fn is_connected(path: &Path) -> bool {
 /// that as a legible, non-fatal degradation rather than crash gameplay —
 /// the in-memory fact for the rest of this session is unaffected either
 /// way, see `console::persist_if_newly_connected`.
+///
+/// Writes a same-directory temporary file and renames it into place so a
+/// process or machine that stops mid-write can never leave a truncated,
+/// partially-written marker as the file [`is_connected`] later reads —
+/// only a complete write is ever visible at `path`. This is the one write
+/// this durable fact ever needs (`AppState::step_operation` only calls it
+/// on the disconnected -> connected edge, and never reverts it), so it's
+/// unconditionally safe to overwrite the temp path outright if a previous
+/// attempt left one behind.
 pub(crate) fn mark_connected(path: &Path) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(path, MARKER)
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "profile path has no parent directory",
+        )
+    })?;
+    fs::create_dir_all(parent)?;
+    let mut tmp_name = path
+        .file_name()
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "profile path has no file name")
+        })?
+        .to_os_string();
+    tmp_name.push(".tmp");
+    let tmp_path = parent.join(tmp_name);
+    fs::write(&tmp_path, MARKER)?;
+    fs::rename(&tmp_path, path)
 }
 
 #[cfg(test)]
@@ -146,5 +192,70 @@ mod tests {
         assert!(mark_connected(&path).is_err());
 
         let _ = fs::remove_dir_all(&path);
+        let mut tmp_name = path.file_name().unwrap().to_os_string();
+        tmp_name.push(".tmp");
+        let _ = fs::remove_file(path.parent().unwrap().join(tmp_name));
+    }
+
+    #[test]
+    fn an_oversized_malformed_file_is_not_connected_without_reading_it_all() {
+        let path = scratch_path("oversized");
+        // Large enough that fully loading it would be a real cost, but
+        // `is_connected` must never read past `MARKER.len() + 1` bytes to
+        // reject it.
+        let huge_but_wrong = "x".repeat(8 * 1024 * 1024);
+        fs::write(&path, &huge_but_wrong).expect("scratch write should succeed");
+
+        assert!(!is_connected(&path));
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn resolve_path_with_neither_variable_set_is_none() {
+        assert_eq!(resolve_path(None, None), None);
+    }
+
+    #[test]
+    fn resolve_path_falls_back_to_home_when_xdg_data_home_is_unset() {
+        assert_eq!(
+            resolve_path(None, Some("/home/operator".into())),
+            Some(PathBuf::from(
+                "/home/operator/.local/share/human-exception/operator-network"
+            ))
+        );
+    }
+
+    #[test]
+    fn resolve_path_prefers_xdg_data_home_when_absolute() {
+        assert_eq!(
+            resolve_path(Some("/xdg/data".into()), Some("/home/operator".into())),
+            Some(PathBuf::from("/xdg/data/human-exception/operator-network"))
+        );
+    }
+
+    #[test]
+    fn resolve_path_treats_an_empty_xdg_data_home_as_unset() {
+        assert_eq!(
+            resolve_path(Some("".into()), Some("/home/operator".into())),
+            Some(PathBuf::from(
+                "/home/operator/.local/share/human-exception/operator-network"
+            ))
+        );
+    }
+
+    #[test]
+    fn resolve_path_treats_a_relative_xdg_data_home_as_unset() {
+        assert_eq!(
+            resolve_path(Some("relative/data".into()), Some("/home/operator".into())),
+            Some(PathBuf::from(
+                "/home/operator/.local/share/human-exception/operator-network"
+            ))
+        );
+    }
+
+    #[test]
+    fn resolve_path_with_an_empty_home_and_no_xdg_data_home_is_none() {
+        assert_eq!(resolve_path(None, Some("".into())), None);
     }
 }
