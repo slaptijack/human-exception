@@ -4,7 +4,7 @@
 //! operation so it can be exercised against `ratatui`'s `TestBackend`
 //! without a real terminal.
 
-use super::intel::{Signal, TargetDossier, authored_signals, first_contact_dossier};
+use super::intel::{Signal, TargetDossier, first_contact_dossier, visible_signals};
 use super::state::{
     AppState, ConclusionKind, OperationSnapshot, OperationView, PaneId, ReviewPoint,
     ReviewPointKind, RunInspectorMode, Validation, View, WorkingSet,
@@ -187,12 +187,33 @@ fn controller_status_field(state: &AppState) -> Option<String> {
     Some(format!("CONTROLLER: {status}{}", ready.unwrap_or_default()))
 }
 
+/// The resistance-network link-condition field: a disconnected bootstrap
+/// console has no mesh to read, while a connected one shows its existing
+/// value. `SATLINK` (the player's own captured satellite feed) is
+/// deliberately unaffected — see `docs/TUI_DESIGN.md`, "Header and status
+/// differences".
+fn mesh_field(connected: bool) -> &'static str {
+    if connected {
+        "MESH: DEGRADED"
+    } else {
+        "MESH: NONE"
+    }
+}
+
+/// The front-door pane's name: `LOCAL LOG` before operator-network
+/// connectivity exists, `SIGNALS` afterward (`docs/TUI_DESIGN.md`,
+/// "Bootstrap and network connectivity").
+fn front_door_label(connected: bool) -> &'static str {
+    if connected { "SIGNALS" } else { "LOCAL LOG" }
+}
+
 fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
     let working_set = match state.working_set() {
         Some(WorkingSet::FirstContact) => "FIRST CONTACT",
         None => "none",
     };
     let working = format!("WORKING SET: {working_set}");
+    let mesh = mesh_field(state.connected());
 
     // Candidates in priority order (most detail first): the working set is
     // always the last-dropped field, since it's the one status the header
@@ -202,7 +223,11 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
 
     let candidates: Vec<String> = match state.current_view() {
         View::Signals => {
-            let signals = format!("SIGNALS: {:02}", authored_signals().len());
+            let signals = format!(
+                "{}: {:02}",
+                front_door_label(state.connected()),
+                visible_signals(state.connected()).len()
+            );
             let mut candidates = Vec::new();
             // A controller's status — `starter`/`modified`/`invalid`, plus
             // `STATUS: READY` once validated — is session-only state the
@@ -215,14 +240,12 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
             // signals count, and the signals count before controller
             // status itself, matching every other view's priority order.
             if let Some(controller) = &controller_field {
-                candidates.push(format!(
-                    "MESH: DEGRADED   {signals}   {controller}   {working}"
-                ));
-                candidates.push(format!("MESH: DEGRADED   {controller}   {working}"));
+                candidates.push(format!("{mesh}   {signals}   {controller}   {working}"));
+                candidates.push(format!("{mesh}   {controller}   {working}"));
                 candidates.push(format!("{signals}   {controller}   {working}"));
                 candidates.push(format!("{controller}   {working}"));
             }
-            candidates.push(format!("MESH: DEGRADED   {signals}   {working}"));
+            candidates.push(format!("{mesh}   {signals}   {working}"));
             candidates.push(format!("{signals}   {working}"));
             candidates
         }
@@ -232,24 +255,20 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
             let confidence = format!("CONFIDENCE: {}", dossier.confidence_summary);
             let mut candidates = Vec::new();
             if let Some(controller) = &controller_field {
-                candidates.push(format!(
-                    "MESH: DEGRADED   {target}   {controller}   {working}"
-                ));
+                candidates.push(format!("{mesh}   {target}   {controller}   {working}"));
                 // Drop the Target field itself (its own dossier title)
                 // before dropping controller status — a modified controller
                 // is session-only and can be lost, so it outranks a title
                 // the player can always re-derive by returning to Target
                 // (or that's already echoed by WORKING SET once committed).
-                candidates.push(format!("MESH: DEGRADED   {controller}   {working}"));
+                candidates.push(format!("{mesh}   {controller}   {working}"));
             }
-            candidates.push(format!(
-                "MESH: DEGRADED   {target}   {confidence}   {working}"
-            ));
+            candidates.push(format!("{mesh}   {target}   {confidence}   {working}"));
             // Confidence and controller status are both lower-priority than
             // MESH here — drop them first, not MESH, so Target doesn't lose
             // link condition while every other view keeps it at the same
             // widths.
-            candidates.push(format!("MESH: DEGRADED   {target}   {working}"));
+            candidates.push(format!("{mesh}   {target}   {working}"));
             if let Some(controller) = &controller_field {
                 candidates.push(format!("{target}   {controller}   {working}"));
                 candidates.push(format!("{controller}   {working}"));
@@ -261,13 +280,13 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
         View::Operation | View::AfterAction => operation_status_header_candidates(state, &working),
         _ => match &controller_field {
             Some(controller) => vec![
-                format!("MESH: DEGRADED   SATLINK: COMPROMISED   {controller}   {working}"),
+                format!("{mesh}   SATLINK: COMPROMISED   {controller}   {working}"),
                 format!("SATLINK: COMPROMISED   {controller}   {working}"),
                 format!("{controller}   {working}"),
                 working.clone(),
             ],
             None => vec![
-                format!("MESH: DEGRADED   SATLINK: COMPROMISED   {working}"),
+                format!("{mesh}   SATLINK: COMPROMISED   {working}"),
                 format!("SATLINK: COMPROMISED   {working}"),
                 working.clone(),
             ],
@@ -293,6 +312,7 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
 /// operation's own status field (`docs/TUI_DESIGN.md`'s "Persistent
 /// header" shows exactly one STATUS field per view).
 fn operation_status_header_candidates(state: &AppState, working: &str) -> Vec<String> {
+    let mesh = mesh_field(state.connected());
     let controller = controller_status_only(state).map(|status| format!("CONTROLLER: {status}"));
     let op_status = state
         .operation()
@@ -300,7 +320,7 @@ fn operation_status_header_candidates(state: &AppState, working: &str) -> Vec<St
     let mut candidates = Vec::new();
     if let (Some(controller), Some(op_status)) = (&controller, &op_status) {
         candidates.push(format!(
-            "MESH: DEGRADED   SATLINK: COMPROMISED   {controller}   {op_status}   {working}"
+            "{mesh}   SATLINK: COMPROMISED   {controller}   {op_status}   {working}"
         ));
         candidates.push(format!(
             "SATLINK: COMPROMISED   {controller}   {op_status}   {working}"
@@ -1316,7 +1336,7 @@ fn draw_pane_with_pinned_action(
 }
 
 fn draw_signals(frame: &mut Frame, area: Rect, state: &AppState) {
-    let signal = &authored_signals()[state.selected_signal()];
+    let signal = visible_signals(state.connected())[state.selected_signal()];
     let focused = state.focused_pane(View::Signals);
 
     let [left, right] =
@@ -1326,14 +1346,37 @@ fn draw_signals(frame: &mut Frame, area: Rect, state: &AppState) {
     draw_pane(
         frame,
         left,
-        pane_title("SIGNALS", focused == PaneId::SignalsList),
+        pane_title(
+            front_door_label(state.connected()),
+            focused == PaneId::SignalsList,
+        ),
         signal_list_lines(state, visible_items),
     );
-    draw_signal_detail_pane(frame, right, signal, focused == PaneId::SelectedSignal);
+    draw_signal_detail_pane(
+        frame,
+        right,
+        signal,
+        focused == PaneId::SelectedSignal,
+        state.connected(),
+    );
 }
 
-fn draw_signal_detail_pane(frame: &mut Frame, area: Rect, signal: &Signal, focused: bool) {
-    let title = pane_title("SELECTED SIGNAL", focused);
+/// The detail pane's title follows the front door's own naming split
+/// (`docs/TUI_DESIGN.md`, "1. Signals"): `SELECTED ENTRY` for the bootstrap
+/// `LOCAL LOG`, `SELECTED SIGNAL` once connected to `SIGNALS`.
+fn draw_signal_detail_pane(
+    frame: &mut Frame,
+    area: Rect,
+    signal: &Signal,
+    focused: bool,
+    connected: bool,
+) {
+    let base_title = if connected {
+        "SELECTED SIGNAL"
+    } else {
+        "SELECTED ENTRY"
+    };
+    let title = pane_title(base_title, focused);
     if signal.is_actionable() {
         draw_pane_with_pinned_action(
             frame,
@@ -1364,7 +1407,7 @@ const SIGNAL_ROWS_PER_ITEM: usize = 3;
 /// every signal unwindowed rather than nothing, since Signals has no
 /// separate fallback content the way Review Run does.
 fn signal_list_lines(state: &AppState, visible_items: usize) -> Vec<Line<'static>> {
-    let signals = authored_signals();
+    let signals = visible_signals(state.connected());
     let (start, end) = if visible_items == 0 {
         (0, signals.len())
     } else {
@@ -1437,7 +1480,11 @@ fn draw_target(frame: &mut Frame, area: Rect, state: &AppState) {
         right,
         pane_title("PROVENANCE / ACCESS", focused == PaneId::Provenance),
         target_provenance_lines(&dossier),
-        "Esc  back to signals",
+        if state.connected() {
+            "Esc  back to signals"
+        } else {
+            "Esc  back to local log"
+        },
     );
 }
 
@@ -2052,7 +2099,11 @@ fn help_lines(state: &AppState) -> Vec<Line<'static>> {
         Style::default().add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from("F1 Help          toggle this overlay"));
-    lines.push(Line::from("F2 Signals       the intelligence stream"));
+    lines.push(Line::from(if state.connected() {
+        "F2 Signals       the intelligence stream"
+    } else {
+        "F2 Local Log     locally available intelligence"
+    }));
     lines.push(Line::from(if state.view_available(View::Target) {
         "F3 Target        dossier for the current opportunity"
     } else {
@@ -2245,7 +2296,11 @@ fn view_specific_help(state: &AppState, view: View) -> Vec<Line<'static>> {
         ],
         View::Target => vec![
             Line::from("Enter  work this opportunity"),
-            Line::from("Esc    back to Signals"),
+            Line::from(if state.connected() {
+                "Esc    back to Signals"
+            } else {
+                "Esc    back to Local Log"
+            }),
             Line::from("F8     move focus between intel and provenance"),
         ],
         View::Controller => vec![
@@ -2310,7 +2365,11 @@ fn view_specific_help(state: &AppState, view: View) -> Vec<Line<'static>> {
             Line::from(
                 "Up/Down/PageUp/PageDown/Home/End  scroll the report if it doesn't fully fit",
             ),
-            Line::from("F2       back to Signals"),
+            Line::from(if state.connected() {
+                "F2       back to Signals"
+            } else {
+                "F2       back to Local Log"
+            }),
             Line::from("F4       edit the controller (your edits are preserved)"),
             Line::from("F5       review this run's frozen source and telemetry (Review Run)"),
             Line::from("F6       redeploy from a clean scenario state"),
@@ -2340,9 +2399,18 @@ fn footer_hint_items(state: &AppState, show_f8: bool) -> Vec<(&'static str, &'st
             state.view_available(View::Operation),
         )
     };
+    // The front-door footer label follows the same LOCAL LOG/SIGNALS split
+    // as the header and pane title, so it never advertises network
+    // functionality that isn't actually available yet (`docs/TUI_DESIGN.md`,
+    // "Bootstrap and network connectivity").
+    let f2_item = if state.connected() {
+        ("F2 Signals", "F2 Sig", true)
+    } else {
+        ("F2 Local Log", "F2 Log", true)
+    };
     let mut items = vec![
         ("F1 Help", "F1 Help", true),
-        ("F2 Signals", "F2 Sig", true),
+        f2_item,
         ("F3 Target", "F3 Tgt", state.view_available(View::Target)),
         (
             "F4 Controller",
@@ -2459,6 +2527,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &AppState) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::intel::authored_signals;
     use super::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -2514,24 +2583,24 @@ mod tests {
     fn signal_list_lines_windows_around_the_selection_and_keeps_it_visible() {
         let mut state = AppState::new();
         state.apply(super::super::state::Msg::SelectLastSignal);
-        let last = authored_signals().len() - 1;
+        let last = visible_signals(false).len() - 1;
         assert_eq!(state.selected_signal(), last);
 
         // Only 2 signals fit on screen; the window must still contain the
         // selected (last) signal rather than always starting at the top.
         let lines = signal_list_lines(&state, 2);
-        let visible_signals = authored_signals().len().min(2);
-        assert_eq!(lines.len(), visible_signals * SIGNAL_ROWS_PER_ITEM);
+        let visible_items = visible_signals(false).len().min(2);
+        assert_eq!(lines.len(), visible_items * SIGNAL_ROWS_PER_ITEM);
         assert!(
-            lines
-                .iter()
-                .any(|line| line.to_string().contains(authored_signals()[last].source)),
+            lines.iter().any(|line| line
+                .to_string()
+                .contains(visible_signals(false)[last].source)),
             "the selected signal must be part of the rendered window"
         );
         assert!(
             !lines
                 .iter()
-                .any(|line| line.to_string().contains(authored_signals()[0].source)),
+                .any(|line| line.to_string().contains(visible_signals(false)[0].source)),
             "an out-of-window signal must not render"
         );
     }
@@ -2540,15 +2609,18 @@ mod tests {
     fn signal_list_lines_renders_every_signal_when_geometry_is_unknown() {
         let state = AppState::new();
         let lines = signal_list_lines(&state, 0);
-        assert_eq!(lines.len(), authored_signals().len() * SIGNAL_ROWS_PER_ITEM);
+        assert_eq!(
+            lines.len(),
+            visible_signals(false).len() * SIGNAL_ROWS_PER_ITEM
+        );
     }
 
     #[test]
-    fn wide_signals_view_shows_all_authored_signals_and_one_open_marker() {
+    fn disconnected_signals_view_shows_only_local_signals_and_one_open_marker() {
         let state = AppState::new();
         let terminal = render(120, 40, &state);
 
-        for signal in authored_signals() {
+        for signal in visible_signals(false) {
             assert!(buffer_contains(&terminal, signal.source));
         }
         let content = terminal
@@ -2559,6 +2631,90 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert_eq!(content.matches("[OPEN]").count(), 1);
+    }
+
+    #[test]
+    fn connected_signals_view_shows_every_authored_signal() {
+        let mut state = AppState::new();
+        state.set_connected(true);
+        let terminal = render(120, 40, &state);
+
+        for signal in authored_signals() {
+            assert!(buffer_contains(&terminal, signal.source));
+        }
+    }
+
+    #[test]
+    fn disconnected_header_shows_mesh_none_and_local_log() {
+        for (width, height) in [(120, 40), (150, 50)] {
+            let state = AppState::new();
+            let terminal = render(width, height, &state);
+
+            assert!(buffer_contains(&terminal, "MESH: NONE"));
+            assert!(buffer_contains(&terminal, "LOCAL LOG:"));
+            assert!(!buffer_contains(&terminal, "MESH: DEGRADED"));
+        }
+    }
+
+    #[test]
+    fn connected_header_shows_mesh_degraded_and_signals() {
+        for (width, height) in [(120, 40), (150, 50)] {
+            let mut state = AppState::new();
+            state.set_connected(true);
+            let terminal = render(width, height, &state);
+
+            assert!(buffer_contains(&terminal, "MESH: DEGRADED"));
+            assert!(buffer_contains(&terminal, "SIGNALS:"));
+            assert!(!buffer_contains(&terminal, "MESH: NONE"));
+        }
+    }
+
+    #[test]
+    fn disconnected_footer_advertises_local_log_not_signals() {
+        for (width, height) in [(120, 40), (150, 50)] {
+            let state = AppState::new();
+            let terminal = render(width, height, &state);
+
+            assert!(buffer_contains(&terminal, "F2 Local Log"));
+            assert!(!buffer_contains(&terminal, "F2 Signals"));
+        }
+    }
+
+    #[test]
+    fn connected_footer_advertises_signals() {
+        for (width, height) in [(120, 40), (150, 50)] {
+            let mut state = AppState::new();
+            state.set_connected(true);
+            let terminal = render(width, height, &state);
+
+            assert!(buffer_contains(&terminal, "F2 Signals"));
+            assert!(!buffer_contains(&terminal, "F2 Local Log"));
+        }
+    }
+
+    #[test]
+    fn disconnected_help_describes_local_log() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::OpenHelp);
+        let terminal = render(120, 40, &state);
+
+        assert!(buffer_contains(&terminal, "F2 Local Log"));
+        assert!(!buffer_contains(&terminal, "F2 Signals"));
+    }
+
+    #[test]
+    fn connected_help_describes_signals() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.set_connected(true);
+        state.apply(Msg::OpenHelp);
+        let terminal = render(120, 40, &state);
+
+        assert!(buffer_contains(&terminal, "F2 Signals"));
+        assert!(!buffer_contains(&terminal, "F2 Local Log"));
     }
 
     #[test]
@@ -2647,6 +2803,18 @@ mod tests {
         let state = AppState::new();
         let terminal = render(120, 40, &state);
 
+        assert!(buffer_contains(&terminal, "LOCAL LOG"));
+        assert!(buffer_contains(&terminal, "SELECTED ENTRY"));
+        assert!(buffer_contains(&terminal, "> LOCAL LOG"));
+        assert!(!buffer_contains(&terminal, "> SELECTED ENTRY"));
+    }
+
+    #[test]
+    fn connected_signals_view_shows_both_panes_and_moves_the_focus_marker_with_f8() {
+        let mut state = AppState::new();
+        state.set_connected(true);
+        let terminal = render(120, 40, &state);
+
         assert!(buffer_contains(&terminal, "SIGNALS"));
         assert!(buffer_contains(&terminal, "SELECTED SIGNAL"));
         assert!(buffer_contains(&terminal, "> SIGNALS"));
@@ -2667,18 +2835,18 @@ mod tests {
         assert_eq!(state.focused_pane(View::Signals), PaneId::SelectedSignal);
 
         let small = render(120, 40, &state);
-        assert!(buffer_contains(&small, "SIGNALS"));
-        assert!(buffer_contains(&small, "SELECTED SIGNAL"));
-        assert!(buffer_contains(&small, "> SELECTED SIGNAL"));
-        assert!(!buffer_contains(&small, "> SIGNALS"));
+        assert!(buffer_contains(&small, "LOCAL LOG"));
+        assert!(buffer_contains(&small, "SELECTED ENTRY"));
+        assert!(buffer_contains(&small, "> SELECTED ENTRY"));
+        assert!(!buffer_contains(&small, "> LOCAL LOG"));
 
         let large = render(150, 50, &state);
-        assert!(buffer_contains(&large, "SELECTED SIGNAL"));
-        assert!(buffer_contains(&large, "> SELECTED SIGNAL"));
+        assert!(buffer_contains(&large, "SELECTED ENTRY"));
+        assert!(buffer_contains(&large, "> SELECTED ENTRY"));
 
         let small_again = render(120, 40, &state);
-        assert!(buffer_contains(&small_again, "SIGNALS"));
-        assert!(buffer_contains(&small_again, "SELECTED SIGNAL"));
+        assert!(buffer_contains(&small_again, "LOCAL LOG"));
+        assert!(buffer_contains(&small_again, "SELECTED ENTRY"));
         assert_eq!(state.focused_pane(View::Signals), PaneId::SelectedSignal);
     }
 
@@ -2706,7 +2874,7 @@ mod tests {
         let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
 
         assert!(buffer_contains(&terminal, "work this opportunity"));
-        assert!(buffer_contains(&terminal, "back to signals"));
+        assert!(buffer_contains(&terminal, "back to local log"));
     }
 
     #[test]
@@ -2808,7 +2976,7 @@ mod tests {
         state.apply(Msg::Activate);
         let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
         assert!(
-            buffer_contains(&terminal, "MESH: DEGRADED"),
+            buffer_contains(&terminal, "MESH: NONE"),
             "Target should keep link condition before committing, like every other view"
         );
 
@@ -2816,7 +2984,7 @@ mod tests {
         state.apply(Msg::Navigate(View::Target));
         let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
         assert!(
-            buffer_contains(&terminal, "MESH: DEGRADED"),
+            buffer_contains(&terminal, "MESH: NONE"),
             "Target should keep link condition after committing too"
         );
     }

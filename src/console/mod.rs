@@ -780,7 +780,7 @@ mod tests {
     #[test]
     fn signals_is_the_default_view() {
         let (_, terminal) = render(120, 40, &[]);
-        assert!(buffer_contains(&terminal, "SIGNALS"));
+        assert!(buffer_contains(&terminal, "LOCAL LOG"));
     }
 
     #[test]
@@ -884,7 +884,7 @@ mod tests {
     fn startup_at_exactly_the_minimum_geometry_enters_the_console() {
         let (_, terminal) = render(120, 40, &[]);
         assert!(!buffer_contains(&terminal, "Terminal link degraded."));
-        assert!(buffer_contains(&terminal, "SIGNALS"));
+        assert!(buffer_contains(&terminal, "LOCAL LOG"));
     }
 
     #[test]
@@ -910,7 +910,7 @@ mod tests {
         }
 
         assert!(!buffer_contains(&terminal, "Terminal link degraded."));
-        assert!(buffer_contains(&terminal, "SIGNALS"));
+        assert!(buffer_contains(&terminal, "LOCAL LOG"));
         assert_eq!(state.current_view(), View::Signals);
     }
 
@@ -943,7 +943,7 @@ mod tests {
         let (state, terminal) = render(120, 40, &[press(KeyCode::F(3))]);
 
         assert_eq!(state.current_view(), View::Signals);
-        assert!(buffer_contains(&terminal, "SIGNALS"));
+        assert!(buffer_contains(&terminal, "LOCAL LOG"));
     }
 
     #[test]
@@ -995,7 +995,7 @@ mod tests {
                 .expect("redraw should succeed");
         }
 
-        assert!(buffer_contains(&terminal, "SIGNALS"));
+        assert!(buffer_contains(&terminal, "LOCAL LOG"));
     }
 
     #[test]
@@ -1822,7 +1822,7 @@ mod tests {
             state.focused_pane(state.current_view()),
             PaneId::SignalsList
         );
-        let last = intel::authored_signals().len() - 1;
+        let last = intel::visible_signals(false).len() - 1;
         let page = ui::signals_list_visible_items(120, 40);
         assert!(page > 0);
 
