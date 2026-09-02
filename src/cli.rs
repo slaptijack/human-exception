@@ -168,23 +168,24 @@ fn run_operation(script: &Path) -> i32 {
 
     // Wording mirrors the interactive console's After Action outcome
     // hierarchy (`docs/TUI_DESIGN.md` §5, `src/console/ui.rs`
-    // FOOTHOLD_ESTABLISHED_*/FIRST_CONTACT_*/NO_FURTHER_OPERATION*
+    // UPLINK_REACHED_*/FIRST_CONTACT_*/NO_FURTHER_OPERATION*
     // constants) in order — outcome, meaning, completion, then next
-    // actions/availability: reaching the uplink establishes a resistance
-    // foothold in the facility network, not capture/ownership/control, and
-    // no follow-on operation exists at this facility either way.
+    // actions/availability: reaching the uplink opens the console's first
+    // connection into the operator network, not capture/ownership/control
+    // of the facility, and no follow-on operation exists at this facility
+    // either way.
     match result {
         Ok(TickOutcome::Succeeded) => {
             println!();
             println!(
-                "FOOTHOLD ESTABLISHED after {tick_count} tick(s). Resistance access to the facility network was established. FIRST CONTACT COMPLETE. No further operation is available at this facility."
+                "UPLINK REACHED after {tick_count} tick(s). The drone reached the facility uplink, opening the console's first connection into the operator network. FIRST CONTACT COMPLETE. No further operation is available at this facility."
             );
             0
         }
         Ok(TickOutcome::Failed(reason)) => {
             println!();
             println!(
-                "OPERATION FAILED: {}. No facility foothold was established. FIRST CONTACT INCOMPLETE.",
+                "OPERATION FAILED: {}. No connection into the operator network was established. FIRST CONTACT INCOMPLETE.",
                 format_failure(reason)
             );
             1
