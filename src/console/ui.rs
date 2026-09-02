@@ -782,17 +782,19 @@ fn after_action_succeeded(op: &OperationView<'_>) -> bool {
     )
 }
 
-/// The success report's headline, per `docs/TUI_DESIGN.md` §5: a resistance
-/// network foothold, not generic victory language. Shared with Review Run's
-/// `telemetry_lines` via [`outcome_headline`] so the two views describe the
-/// same recorded run consistently.
-const FOOTHOLD_ESTABLISHED_HEADLINE: &str = "FOOTHOLD ESTABLISHED";
+/// The success report's headline, per `docs/TUI_DESIGN.md` §5: the
+/// mechanical fact that the drone reached the uplink, not generic victory
+/// language. Shared with Review Run's `telemetry_lines` via
+/// [`outcome_headline`] so the two views describe the same recorded run
+/// consistently.
+const UPLINK_REACHED_HEADLINE: &str = "UPLINK REACHED";
 
 /// The success report's trigger + fictional meaning, echoing Target's
 /// original framing (`docs/TUI_DESIGN.md` §5 "Success"). Deliberately does
 /// not claim the facility was captured, owned, or made persistently
-/// operable — only that a foothold/access point was established.
-const FOOTHOLD_ESTABLISHED_MEANING: &str = "The drone reached the facility uplink. Resistance access to the facility network was established before the access window closed.";
+/// operable — only that the console gained a connection into the operator
+/// network.
+const UPLINK_REACHED_MEANING: &str = "The drone reached the facility uplink, opening the console's first connection into the operator network before the access window closed.";
 
 const FIRST_CONTACT_COMPLETE: &str = "FIRST CONTACT COMPLETE";
 
@@ -805,17 +807,17 @@ const NO_FURTHER_OPERATION: &str = "No further operation is available at this fa
 /// The failure report's combined trigger + meaning line for budget
 /// exhaustion (`docs/TUI_DESIGN.md` §5 "Failure and controller error"):
 /// names the mechanical reason without prescribing the fix, then states the
-/// consequence — the failure counterpart to [`FOOTHOLD_ESTABLISHED_MEANING`],
+/// consequence — the failure counterpart to [`UPLINK_REACHED_MEANING`],
 /// pushed the same way (directly, not through `bounded_detail_lines`, since
 /// it's trusted fixed copy meant to reflow via `Wrap`).
-const BUDGET_EXHAUSTED_MEANING: &str = "The operational budget was exhausted before the drone reached the uplink. No facility foothold was established.";
+const BUDGET_EXHAUSTED_MEANING: &str = "The operational budget was exhausted before the drone reached the uplink. No connection into the operator network was established.";
 
 /// The failure report's combined trigger + meaning line for a controller
 /// error, stated before the preserved diagnostic detail
 /// (`bounded_detail_lines(&controller_error_detail(..))`) so the mechanical
 /// "execution stopped" fact and its consequence read before the specific
 /// error text.
-const CONTROLLER_EXECUTION_STOPPED: &str = "Controller execution stopped before reaching the uplink. No facility foothold was established.";
+const CONTROLLER_EXECUTION_STOPPED: &str = "Controller execution stopped before reaching the uplink. No connection into the operator network was established.";
 
 /// The failure report's completion line — the direct counterpart to
 /// [`FIRST_CONTACT_COMPLETE`], "no less clear" per `docs/TUI_DESIGN.md` §5.
@@ -858,7 +860,7 @@ fn after_action_success_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
         .expect("after_action_succeeded confirmed a Success conclusion");
 
     let mut lines = vec![Line::from(Span::styled(
-        FOOTHOLD_ESTABLISHED_HEADLINE,
+        UPLINK_REACHED_HEADLINE,
         Style::default().add_modifier(Modifier::BOLD),
     ))];
     // Fixed, trusted copy — pushed directly rather than through
@@ -866,7 +868,7 @@ fn after_action_success_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
     // controlled text like Lua error messages) so the pane's `Wrap` widget
     // reflows the full approved sentence at the pane's actual width instead
     // of hard-truncating it at `MAX_DETAIL_LINE_CHARS`.
-    lines.push(Line::from(FOOTHOLD_ESTABLISHED_MEANING));
+    lines.push(Line::from(UPLINK_REACHED_MEANING));
     // A blank line separates outcome/trigger/meaning from completion, and
     // another separates evidence from availability, matching
     // `after_action_failure_lines`'s spacing and `docs/TUI_DESIGN.md` §5's
@@ -1325,7 +1327,7 @@ fn operation_status_label(op: &OperationView<'_>) -> &'static str {
 
 fn outcome_headline(outcome: TickOutcome) -> &'static str {
     match outcome {
-        TickOutcome::Succeeded => FOOTHOLD_ESTABLISHED_HEADLINE,
+        TickOutcome::Succeeded => UPLINK_REACHED_HEADLINE,
         TickOutcome::Failed(FailureReason::BudgetExhausted) => "OPERATION FAILED: budget exhausted",
         TickOutcome::Running => "",
     }
@@ -4359,7 +4361,7 @@ end
         // the success test above — assert on short substrings known to
         // land intact on a single row.
         assert!(buffer_contains(&terminal, "reached the uplink"));
-        assert!(buffer_contains(&terminal, "foothold"));
+        assert!(buffer_contains(&terminal, "operator network"));
         assert!(buffer_contains(&terminal, "FIRST CONTACT INCOMPLETE"));
         assert!(buffer_contains(&terminal, "ticks executed"));
         assert!(buffer_contains(&terminal, "tiles discovered"));
@@ -5073,12 +5075,12 @@ end
     }
 
     #[test]
-    fn a_successful_operation_shows_the_foothold_report() {
+    fn a_successful_operation_shows_the_uplink_reached_report() {
         let state = succeeded_state();
         assert_eq!(state.current_view(), View::AfterAction);
         let terminal = render(120, 40, &state);
 
-        assert!(buffer_contains(&terminal, "FOOTHOLD ESTABLISHED"));
+        assert!(buffer_contains(&terminal, "UPLINK REACHED"));
         assert!(buffer_contains(&terminal, "reached the facility uplink"));
         // The meaning sentence must reach its actual end ("closed.") rather
         // than being hard-truncated with an ellipsis by
@@ -5144,7 +5146,7 @@ end
         // visible without pressing `F8` to swap panes (`docs/TUI_DESIGN.md`
         // §5, "Responsive behavior").
         assert!(buffer_contains(&terminal, "AFTER-ACTION REPORT"));
-        assert!(buffer_contains(&terminal, "FOOTHOLD ESTABLISHED"));
+        assert!(buffer_contains(&terminal, "UPLINK REACHED"));
         assert!(buffer_contains(&terminal, "FIRST CONTACT COMPLETE"));
     }
 
@@ -5161,7 +5163,7 @@ end
         for width in [MIN_COLUMNS, 150] {
             let terminal = render(width, MIN_ROWS, &state);
             assert!(
-                buffer_contains(&terminal, "FOOTHOLD ESTABLISHED"),
+                buffer_contains(&terminal, "UPLINK REACHED"),
                 "headline clipped at {width}x{MIN_ROWS}"
             );
             assert!(
@@ -5193,7 +5195,7 @@ end
     }
 
     #[test]
-    fn reviewing_a_successful_run_shows_the_same_foothold_headline() {
+    fn reviewing_a_successful_run_shows_the_same_uplink_reached_headline() {
         let mut state = succeeded_state();
         state.apply(super::super::state::Msg::Navigate(View::Operation));
         let terminal = render(120, 40, &state);
@@ -5201,7 +5203,7 @@ end
         // Review Run must describe the same recorded run consistently with
         // After Action, while still carrying its own frozen provenance
         // (`docs/TUI_DESIGN.md` §5, "Review Run").
-        assert!(buffer_contains(&terminal, "FOOTHOLD ESTABLISHED"));
+        assert!(buffer_contains(&terminal, "UPLINK REACHED"));
         assert!(buffer_contains(&terminal, "DEPLOYED SOURCE"));
         assert!(buffer_contains(&terminal, "deployed rev  run-01"));
     }
@@ -5489,7 +5491,7 @@ end
         assert!(text.contains("budget        15 / 15"));
         assert!(text.contains("discovered    0 new tile(s)"));
         // No terminal outcome/failure evidence belongs on a pre-tick point.
-        assert!(!text.contains("FOOTHOLD ESTABLISHED"));
+        assert!(!text.contains("UPLINK REACHED"));
         assert!(!text.contains("OPERATION FAILED"));
     }
 
@@ -5523,7 +5525,7 @@ end
         assert!(text.contains("scanned — cost 1"));
         // A tick still in progress is not the run's terminal boundary, so
         // no outcome headline belongs here.
-        assert!(!text.contains("FOOTHOLD ESTABLISHED"));
+        assert!(!text.contains("UPLINK REACHED"));
         assert!(!text.contains("OPERATION FAILED"));
     }
 
@@ -5550,7 +5552,7 @@ end
 
         assert!(text.contains("TICK 03"));
         assert!(text.contains("action        moved north"));
-        assert!(text.contains("FOOTHOLD ESTABLISHED"));
+        assert!(text.contains("UPLINK REACHED"));
         // `OperationSucceeded` is represented by the headline, not
         // duplicated as its own structured event line.
         assert!(!text.contains("EVENTS"));

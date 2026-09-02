@@ -1978,7 +1978,7 @@ mod tests {
         assert_eq!(state.current_view(), View::AfterAction);
         assert!(state.operation().unwrap().finished);
         assert!(buffer_contains(&terminal, "AFTER-ACTION REPORT"));
-        assert!(buffer_contains(&terminal, "FOOTHOLD ESTABLISHED"));
+        assert!(buffer_contains(&terminal, "UPLINK REACHED"));
     }
 
     #[test]
@@ -2694,7 +2694,7 @@ mod tests {
                 }
             }
             assert!(buffer_contains(&terminal, "> TICK 08 [SUCCESS]"));
-            assert!(buffer_contains(&terminal, "FOOTHOLD ESTABLISHED"));
+            assert!(buffer_contains(&terminal, "UPLINK REACHED"));
         }
     }
 

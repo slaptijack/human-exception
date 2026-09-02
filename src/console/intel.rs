@@ -161,8 +161,8 @@ pub fn first_contact_dossier() -> TargetDossier {
             "drone endurance is limited",
         ],
         unknown: &["uplink location", "complete floor plan", "hazard locations"],
-        opportunity: "If the drone reaches the uplink, we may obtain a foothold in the \
-                      facility network before the access window closes.",
+        opportunity: "If the drone reaches the uplink, it opens a connection into the \
+                      operator network before the access window closes.",
         source: &["machine intercept + shared fragment"],
         access: &[
             "captured maintenance controller",

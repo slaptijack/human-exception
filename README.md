@@ -40,7 +40,7 @@ For contributor and test use, `--developer-mode <script>` runs a Lua script dire
 cargo run -- --developer-mode examples/first_contact.lua
 ```
 
-This loads the checked-in example script and runs "First Contact," the resistance's fixed reconnaissance operation: a captured drone must explore an unfamiliar facility, avoid its hazard, and reach a network uplink before its operational budget runs out. It prints a satellite view and tick-by-tick telemetry for every tick, followed by a final success or failure report. Reaching the uplink establishes a resistance foothold in the facility's network — it does not capture, own, or bring the facility under lasting resistance control, and no follow-on operation at this facility is implemented yet. Unlike the console's in-editor validation, this path is unbounded, so a top-level infinite loop in a script run this way will hang it.
+This loads the checked-in example script and runs "First Contact," the resistance's fixed reconnaissance operation: a captured drone must explore an unfamiliar facility, avoid its hazard, and reach a network uplink before its operational budget runs out. It prints a satellite view and tick-by-tick telemetry for every tick, followed by a final success or failure report. Reaching the uplink opens the console's first connection into the operator network — it does not capture, own, or bring the facility under lasting resistance control, and no follow-on operation at this facility is implemented yet. Unlike the console's in-editor validation, this path is unbounded, so a top-level infinite loop in a script run this way will hang it.
 
 Run `human-exception --help` for usage, or `human-exception --version` for the build's firmware version.
 
@@ -127,7 +127,7 @@ S = drone start   U = uplink objective
 
 | Code | Meaning |
 | --- | --- |
-| `0` | the operation succeeded — a resistance foothold in the facility network was established (uplink reached) |
+| `0` | the operation succeeded — the drone reached the uplink, opening a connection into the operator network |
 | `1` | the operation ran to completion and failed (e.g. ran out of budget) |
 | `2` | the command itself was used incorrectly (bad flag/argument) |
 | `3` | the script could not be loaded or executed (missing file, syntax error, missing `on_tick`, a runtime error, or an invalid action) |

@@ -515,8 +515,8 @@ Representative layout:
 │ • complete floor plan                                         │ hazards                 UNKNOWN            │
 │ • hazard locations                                            │                                            │
 │                                                               │ OPPORTUNITY                                │
-│ If the drone reaches the uplink, we may obtain a foothold     │ No one is waiting for us to do this.       │
-│ in the facility network before the access window closes.      │ The window may not last.                   │
+│ If the drone reaches the uplink, it opens a connection into   │ No one is waiting for us to do this.       │
+│ the operator network before the access window closes.         │ The window may not last.                   │
 │                                                               │                                            │
 │ Enter  work this opportunity                                  │ Esc  back to local log                     │
 ├────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
@@ -965,7 +965,7 @@ The final discovered satellite frame remains visible so the player can connect t
 
 Every terminal state — success, budget exhaustion, or controller error — presents these concepts in this order. Higher items must never be sacrificed for lower ones when space is constrained (see [Responsive behavior](#responsive-behavior)):
 
-1. **Outcome** — the headline result (`FOOTHOLD ESTABLISHED`, `OPERATION FAILED`, etc.).
+1. **Outcome** — the headline result (`UPLINK REACHED`, `OPERATION FAILED`, etc.).
 2. **Trigger** — the concrete mechanical event that produced it (the drone reached the uplink; the budget ran out; the controller failed to behave as programmed).
 3. **Meaning** — what the trigger means in the resistance's fiction, stated without overclaiming.
 4. **Completion** — whether First Contact is complete or incomplete, stated explicitly.
@@ -979,7 +979,7 @@ This hierarchy is a presentation contract, not a new state machine: it governs w
 
 **Routing exception:** the first time First Contact succeeds, Operation does not automatically land here. It enters the one-time [Network Bootstrap](#network-bootstrap) transition instead, landing on connected `SIGNALS` once that completes. This screen's content is unchanged by that exception — it still exists, and stays reachable afterward: `F4` reopens Controller against the same working set, and `F5` reopens this exact report (§ [Review Run](#review-run) explains how `F5` is overloaded between the report and its deeper Review Run once a deployment has concluded). Re-reaching this screen for an already-recorded success shows the same content below and grants nothing further; success cannot be recorded a second time. Every other terminal outcome — including a *second* First Contact success after connectivity already exists, which cannot occur because the opportunity is withdrawn once complete (§1) — auto-lands here exactly as documented.
 
-A successful run leads with `FOOTHOLD ESTABLISHED` and states `FIRST CONTACT COMPLETE` as the explicit completion line. The meaning line echoes the language already used when the opportunity was first offered in Target (§2): reaching the uplink means resistance access to the facility network was established before the operational window closed. It does **not** mean the facility was captured, owned, brought under resistance control, or made persistently operable — the report must not claim or imply any of those.
+A successful run leads with `UPLINK REACHED` and states `FIRST CONTACT COMPLETE` as the explicit completion line. The meaning line echoes the language already used when the opportunity was first offered in Target (§2): reaching the uplink opened the console's first connection into the operator network before the operational window closed. It does **not** mean the facility was captured, owned, brought under resistance control, or made persistently operable — the report must not claim or imply any of those.
 
 The availability line is stated plainly and in-fiction, not as an apologetic developer note: no further operation at this facility is currently available. Returning to Signals is worthwhile because Signals is the wider intelligence network, not because another operation at this target is waiting.
 
@@ -989,11 +989,11 @@ The availability line is stated plainly and in-fiction, not as an apologetic dev
 ├──────────────────────────────────────────────────────────────────────┬────────────────────────────────────────┤
 │ FINAL SATELLITE FRAME                                                │ AFTER-ACTION REPORT                    │
 │                                                                      │                                        │
-│              .   .   ?   ?   ?                                       │ FOOTHOLD ESTABLISHED                   │
-│              .   #   ?   ?   ?                                       │ The drone reached the facility uplink. │
-│              .   #   #   ?   ?                                       │ Resistance access to the facility      │
-│              .   .   .   #   ▲                                       │ network was established before the    │
-│              ·   #   ?   ?   ?                                       │ access window closed.                 │
+│              .   .   ?   ?   ?                                       │ UPLINK REACHED                         │
+│              .   #   ?   ?   ?                                       │ The drone reached the facility uplink, │
+│              .   #   #   ?   ?                                       │ opening the console's first connection │
+│              .   .   .   #   ▲                                       │ into the operator network before the   │
+│              ·   #   ?   ?   ?                                       │ access window closed.                  │
 │                                                                      │                                        │
 │                        ▲ DRONE (AT UPLINK)                            │ FIRST CONTACT COMPLETE                 │
 │                                                                      │                                        │
@@ -1017,7 +1017,7 @@ Budget exhaustion and controller errors (an execution-limit breach, an invalid a
 
 - **Outcome:** `OPERATION FAILED`.
 - **Trigger:** a concise, mechanical explanation of what actually happened — budget exhaustion, or the controller failing to behave as programmed — stated without prescribing the exact fix. The explanation names the mechanical reason (e.g. "the controller exceeded its execution allowance") without walking through internal implementation detail.
-- **Meaning:** the operational window closed without the drone reaching the uplink, so no facility foothold was established on this attempt. This is the failure counterpart to the success meaning line, not a new mechanic — it states a consequence that already follows from the trigger.
+- **Meaning:** the operational window closed without the drone reaching the uplink, so no connection into the operator network was established on this attempt. This is the failure counterpart to the success meaning line, not a new mechanic — it states a consequence that already follows from the trigger.
 - **Completion:** First Contact is explicitly **incomplete**. This is the direct counterpart to `FIRST CONTACT COMPLETE` and must be no less clear.
 - **Evidence/next actions:** identical evidence set and next-action set as success (below), except the primary recovery path is revising the Controller rather than reviewing a clean success.
 - **Availability:** the same truthful statement as success — no additional playable operation is currently implemented at this facility, regardless of outcome.
