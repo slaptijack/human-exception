@@ -16,6 +16,7 @@ pub enum SignalCategory {
     SharedIntel,
     Request,
     Anomaly,
+    BootstrapLog,
 }
 
 impl SignalCategory {
@@ -25,6 +26,7 @@ impl SignalCategory {
             SignalCategory::SharedIntel => "SHARED INTEL",
             SignalCategory::Request => "REQUEST",
             SignalCategory::Anomaly => "ANOMALY",
+            SignalCategory::BootstrapLog => "PACKAGE VERIFY",
         }
     }
 }
@@ -41,6 +43,14 @@ pub struct Signal {
     /// the first playable slice carries an opportunity; the rest establish
     /// the wider world without offering fake choices.
     pub opportunity: Option<WorkingSet>,
+    /// Whether a disconnected bootstrap console could plausibly have this
+    /// entry without resistance-network access: the player's own local
+    /// sensors/intercepts, bootstrap-software provenance, or the First
+    /// Contact opportunity itself. `false` marks content framed as live
+    /// traffic from a named remote operator or cell, which only becomes
+    /// legitimate once connected (`docs/TUI_DESIGN.md`, "Bootstrap and
+    /// network connectivity"). See [`visible_signals`].
+    pub local_available: bool,
 }
 
 impl Signal {
@@ -62,6 +72,7 @@ pub fn authored_signals() -> &'static [Signal] {
                    inconsistent. Correlated fragments suggest a temporary access window \
                    through a captured maintenance drone.",
             opportunity: Some(WorkingSet::FirstContact),
+            local_available: true,
         },
         Signal {
             time: "11:35",
@@ -71,6 +82,7 @@ pub fn authored_signals() -> &'static [Signal] {
             body: "\"Lost my relay before I could trace the uplink. Dumping what I saw in \
                    case somebody is closer.\"",
             opportunity: None,
+            local_available: false,
         },
         Signal {
             time: "11:18",
@@ -80,6 +92,17 @@ pub fn authored_signals() -> &'static [Signal] {
             body: "Looking for anyone who can identify convoy routing changes near old I-5. \
                    No clean telemetry yet.",
             opportunity: None,
+            local_available: false,
+        },
+        Signal {
+            time: "11:05",
+            source: "BOOTSTRAP LOG",
+            category: SignalCategory::BootstrapLog,
+            headline: "console-core 0.3.1 signed by slaptijack@, install verified.",
+            body: "console-core 0.3.1 signed by slaptijack@, install verified. Bootstrap \
+                   software provenance only \u{2014} no resistance-network traffic.",
+            opportunity: None,
+            local_available: true,
         },
         Signal {
             time: "10:57",
@@ -89,8 +112,23 @@ pub fn authored_signals() -> &'static [Signal] {
             body: "Burst traffic from an offline municipal control cluster. Source and intent \
                    unconfirmed.",
             opportunity: None,
+            local_available: true,
         },
     ]
+}
+
+/// The signals a console may legitimately show, gated by resistance-network
+/// connectivity (`docs/TUI_DESIGN.md`, "Bootstrap and network connectivity").
+/// Disconnected, only [`Signal::local_available`] entries are legitimate,
+/// since nothing framed as live operator/cell traffic can exist without a
+/// network connection. Connected, the full authored stream is shown; this
+/// issue (#164) does not change the connected feed's content beyond what it
+/// shows today (see #168 for withdrawing completed opportunities from it).
+pub fn visible_signals(connected: bool) -> Vec<&'static Signal> {
+    authored_signals()
+        .iter()
+        .filter(|signal| connected || signal.local_available)
+        .collect()
 }
 
 /// A dossier of what is currently known about an opportunity, and how
@@ -189,6 +227,28 @@ mod tests {
                 .any(|signal| signal.category == SignalCategory::MachineIntercept
                     || signal.category == SignalCategory::Anomaly)
         );
+    }
+
+    #[test]
+    fn disconnected_signals_exclude_shared_intel_and_requests() {
+        let disconnected = visible_signals(false);
+        assert!(
+            disconnected
+                .iter()
+                .all(|signal| signal.category != SignalCategory::SharedIntel
+                    && signal.category != SignalCategory::Request)
+        );
+    }
+
+    #[test]
+    fn disconnected_signals_still_include_the_first_contact_opportunity() {
+        let disconnected = visible_signals(false);
+        assert!(disconnected.iter().any(|signal| signal.is_actionable()));
+    }
+
+    #[test]
+    fn connected_signals_include_every_authored_entry() {
+        assert_eq!(visible_signals(true).len(), authored_signals().len());
     }
 
     #[test]

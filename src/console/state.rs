@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use super::document::ControllerDocument;
 use super::editor::EditOp;
-use super::intel::authored_signals;
+use super::intel::visible_signals;
 use crate::lua_controller::{self, ControllerError, LiveOperation, TickRecord};
 
 /// An upper bound on how far any scrollable pane can scroll. This exists
@@ -512,7 +512,7 @@ pub struct AppState {
     current_view: View,
     help_return_view: Option<View>,
     working_set: Option<WorkingSet>,
-    /// Index into [`authored_signals`], moved by `SelectPreviousSignal` /
+    /// Index into [`visible_signals`], moved by `SelectPreviousSignal` /
     /// `SelectNextSignal`.
     selected_signal: usize,
     /// True once the player has inspected the actionable signal, making
@@ -1014,20 +1014,20 @@ impl AppState {
                 self.selected_signal = self.selected_signal.saturating_sub(1);
             }
             Msg::SelectNextSignal => {
-                let last = authored_signals().len().saturating_sub(1);
+                let last = visible_signals(self.connected).len().saturating_sub(1);
                 self.selected_signal = (self.selected_signal + 1).min(last);
             }
             Msg::SelectFirstSignal => {
                 self.selected_signal = 0;
             }
             Msg::SelectLastSignal => {
-                self.selected_signal = authored_signals().len().saturating_sub(1);
+                self.selected_signal = visible_signals(self.connected).len().saturating_sub(1);
             }
             Msg::SelectSignalPageBackward(page) => {
                 self.selected_signal = self.selected_signal.saturating_sub(page.max(1));
             }
             Msg::SelectSignalPageForward(page) => {
-                let last = authored_signals().len().saturating_sub(1);
+                let last = visible_signals(self.connected).len().saturating_sub(1);
                 self.selected_signal = (self.selected_signal + page.max(1)).min(last);
             }
             Msg::Activate => self.activate(),
@@ -1415,7 +1415,9 @@ impl AppState {
     fn activate(&mut self) {
         match self.current_view {
             View::Signals => {
-                let selected = authored_signals().get(self.selected_signal);
+                let selected = visible_signals(self.connected)
+                    .get(self.selected_signal)
+                    .copied();
                 if selected.is_some_and(|signal| signal.is_actionable()) {
                     self.target_known = true;
                     self.current_view = View::Target;
@@ -1614,16 +1616,16 @@ mod tests {
         state.apply(Msg::SelectPreviousSignal);
         assert_eq!(state.selected_signal(), 0);
 
-        for _ in 0..authored_signals().len() + 2 {
+        for _ in 0..visible_signals(false).len() + 2 {
             state.apply(Msg::SelectNextSignal);
         }
-        assert_eq!(state.selected_signal(), authored_signals().len() - 1);
+        assert_eq!(state.selected_signal(), visible_signals(false).len() - 1);
     }
 
     #[test]
     fn home_and_end_jump_signal_selection_to_the_first_and_last_signal() {
         let mut state = AppState::new();
-        let last = authored_signals().len() - 1;
+        let last = visible_signals(false).len() - 1;
 
         state.apply(Msg::SelectLastSignal);
         assert_eq!(state.selected_signal(), last);
@@ -1639,7 +1641,7 @@ mod tests {
     #[test]
     fn signal_page_movement_clamps_at_the_ends_without_wrapping() {
         let mut state = AppState::new();
-        let last = authored_signals().len() - 1;
+        let last = visible_signals(false).len() - 1;
 
         state.apply(Msg::SelectSignalPageForward(2));
         assert_eq!(state.selected_signal(), 2.min(last));
@@ -1659,16 +1661,38 @@ mod tests {
         let mut state = AppState::new();
 
         state.apply(Msg::SelectSignalPageForward(0));
-        assert_eq!(state.selected_signal(), 1.min(authored_signals().len() - 1));
+        assert_eq!(
+            state.selected_signal(),
+            1.min(visible_signals(false).len() - 1)
+        );
 
         state.apply(Msg::SelectSignalPageBackward(0));
         assert_eq!(state.selected_signal(), 0);
     }
 
     #[test]
+    fn connected_signal_selection_clamps_against_the_full_authored_list() {
+        use super::super::intel::authored_signals;
+
+        let mut state = AppState::new();
+        state.set_connected(true);
+        let last = authored_signals().len() - 1;
+        assert!(
+            last > visible_signals(false).len() - 1,
+            "the connected list must be a strict superset of the disconnected one"
+        );
+
+        state.apply(Msg::SelectLastSignal);
+        assert_eq!(state.selected_signal(), last);
+
+        state.apply(Msg::SelectFirstSignal);
+        assert_eq!(state.selected_signal(), 0);
+    }
+
+    #[test]
     fn activating_the_actionable_signal_marks_target_known_and_opens_it() {
         let mut state = AppState::new();
-        let actionable = authored_signals()
+        let actionable = visible_signals(false)
             .iter()
             .position(|signal| signal.is_actionable())
             .expect("exactly one signal is actionable");
@@ -1685,7 +1709,7 @@ mod tests {
     #[test]
     fn activating_a_non_actionable_signal_is_a_no_op() {
         let mut state = AppState::new();
-        let non_actionable = authored_signals()
+        let non_actionable = visible_signals(false)
             .iter()
             .position(|signal| !signal.is_actionable())
             .expect("at least one signal is non-actionable");
