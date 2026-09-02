@@ -378,6 +378,10 @@ pub enum Msg {
     Navigate(View),
     OpenHelp,
     DismissHelp,
+    /// `Enter` while the first-launch bootstrap introduction (issue #173)
+    /// is showing: dismisses it for the rest of this session and durably,
+    /// so it never shows again.
+    AcknowledgeBootstrapIntro,
     SelectPreviousSignal,
     SelectNextSignal,
     SelectFirstSignal,
@@ -590,6 +594,14 @@ pub struct AppState {
     /// in [`AppState::step_operation`]'s terminal branch, and never
     /// reverted.
     connected: bool,
+    /// Whether the first-launch bootstrap introduction from `slaptijack@`
+    /// (issue #173) is currently showing over the rest of the console.
+    /// Seeded once before the session's first draw from durably persisted
+    /// acknowledgement (see [`console::intro`](super::intro)) and from
+    /// `connected` — an already-connected Player never sees it — then
+    /// cleared exactly once, by [`Msg::AcknowledgeBootstrapIntro`], and
+    /// never set again for the rest of the session.
+    bootstrap_intro_visible: bool,
 }
 
 impl Default for AppState {
@@ -614,6 +626,7 @@ impl Default for AppState {
             source_scroll: 0,
             should_quit: false,
             connected: false,
+            bootstrap_intro_visible: false,
         }
     }
 }
@@ -636,6 +649,19 @@ impl AppState {
     /// `console::bootstrap_state`. Never used to un-set connectivity.
     pub(crate) fn set_connected(&mut self, connected: bool) {
         self.connected = connected;
+    }
+
+    /// Whether the first-launch bootstrap introduction is currently
+    /// showing. See the field doc comment for the full contract.
+    pub fn bootstrap_intro_visible(&self) -> bool {
+        self.bootstrap_intro_visible
+    }
+
+    /// Seeds whether the bootstrap introduction should show this session.
+    /// Only meant to be called once, before the session's first draw — see
+    /// `console::bootstrap_state`.
+    pub(crate) fn set_bootstrap_intro_visible(&mut self, visible: bool) {
+        self.bootstrap_intro_visible = visible;
     }
 
     pub fn current_view(&self) -> View {
@@ -1009,6 +1035,9 @@ impl AppState {
                 if let Some(view) = self.help_return_view.take() {
                     self.current_view = view;
                 }
+            }
+            Msg::AcknowledgeBootstrapIntro => {
+                self.bootstrap_intro_visible = false;
             }
             Msg::SelectPreviousSignal => {
                 self.selected_signal = self.selected_signal.saturating_sub(1);

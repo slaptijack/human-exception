@@ -70,6 +70,12 @@ The major-state name used elsewhere in this document ("Signals") refers to this 
 
 `LOCAL LOG` must **not** contain anything framed as live traffic from a named remote operator or cell, a request awaiting the player's response, or any other content implying two-way network communication — that is reserved for connected `SIGNALS` (§ [1. Signals](#1-signals)).
 
+### First-launch bootstrap introduction
+
+Before a fresh, disconnected player's first interaction with `LOCAL LOG`, the console shows a one-time, full-frame, must-acknowledge panel: the bootstrap build's package/author/status/uplink metadata plus a short, restrained note, signed `— slaptijack@`, dismissed with `Enter`. It exists to make explicit, through the software itself, that this bootstrap copy of the console was deliberately provided — not to narrate, command, or explain the wider Resistance. The same restraint as the `LOCAL LOG` provenance entry above applies: package/signature-style metadata and a technical note only, never a first-person narrator or mission-giver voice.
+
+It is a first-launch experience, not part of `LOCAL LOG` itself: shown once per installation (durably, independent of the connectivity marker), never replayed on returning to `LOCAL LOG`, and never shown at all to an already-connected player. It complements, and does not replace, the `LOCAL LOG` provenance entry above — the panel establishes *someone deliberately gave me this console*; the log entry establishes *this software has an identifiable author*.
+
 ### Header and status differences
 
 Persistent-frame fields (§ [Persistent frame](#persistent-frame)) that describe resistance-network condition change with connectivity; fields describing the player's own captured satellite feed (`SATLINK`, and per-operation `LINK` in Target/Controller/Operation/After Action headers) do not, because that feed is the player's own captured asset and does not depend on resistance-network access. Concretely: `MESH` reads a disconnected value (e.g. `NONE`) in bootstrap and its existing connected value afterward; the front-door item count is labeled `LOCAL LOG` in bootstrap and `SIGNALS` when connected. See § [Persistent frame](#persistent-frame) for the full mockups.
