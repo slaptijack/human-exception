@@ -47,6 +47,47 @@ Avoid language such as **mission assigned**, **orders**, **commander**, **quest*
 
 A target can still have an objective once the player chooses to act. The distinction is that the player voluntarily adopts that objective because the opportunity interests them.
 
+## Bootstrap and network connectivity
+
+The console exists in exactly one of two connectivity states for the lifetime documented here: **bootstrap** (no established resistance-network connectivity) and **connected** (operator-network connectivity established). This section is the contract other sections build on; it does not itself change the Signals → Target → Controller → Operation → After Action flow (§ [Overall navigation](#overall-navigation)) — it defines what differs across that flow depending on connectivity.
+
+A fresh installation starts in bootstrap. A player becomes connected exactly once, by succeeding at First Contact (§4, § [Network Bootstrap](#network-bootstrap)). Once connected, a player never returns to bootstrap.
+
+### The front door: `LOCAL LOG` before, `SIGNALS` after
+
+The console's front-door pane — the `F2` major state, always the default screen after startup — occupies the same architectural position and keybinding in both connectivity states, but is not the same thing before and after First Contact:
+
+- **Bootstrap:** the pane is titled **`LOCAL LOG`**. It presents only material the player's own bootstrap console could plausibly have without any resistance-network access.
+- **Connected:** the same pane becomes **`SIGNALS`** — the operator-network intelligence stream described in § [1. Signals](#1-signals) — for the first time. This is a deliberate naming change, not a relabeling of identical content: before connectivity, calling the pane "Signals" would falsely imply the player already has access to a shared network feed they have not yet earned.
+
+The major-state name used elsewhere in this document ("Signals") refers to this front-door position generically; §1 describes both of its concrete presentations.
+
+`LOCAL LOG` may contain:
+
+- entries from the player's own local sensors or passive intercepts — nothing requiring an outbound connection to receive;
+- bootstrap-software and provenance entries (install/package log lines, signed metadata) through which `slaptijack@` may be visible as the software's author, never as a commander or narrator;
+- the First Contact opportunity itself, sourced as a local/passive discovery.
+
+`LOCAL LOG` must **not** contain anything framed as live traffic from a named remote operator or cell, a request awaiting the player's response, or any other content implying two-way network communication — that is reserved for connected `SIGNALS` (§ [1. Signals](#1-signals)).
+
+### Header and status differences
+
+Persistent-frame fields (§ [Persistent frame](#persistent-frame)) that describe resistance-network condition change with connectivity; fields describing the player's own captured satellite feed (`SATLINK`, and per-operation `LINK` in Target/Controller/Operation/After Action headers) do not, because that feed is the player's own captured asset and does not depend on resistance-network access. Concretely: `MESH` reads a disconnected value (e.g. `NONE`) in bootstrap and its existing connected value afterward; the front-door item count is labeled `LOCAL LOG` in bootstrap and `SIGNALS` when connected. See § [Persistent frame](#persistent-frame) for the full mockups.
+
+F-key footer labels follow the same rule already established for unavailable actions (§ [Overall navigation](#overall-navigation)): `F2` is always available and always opens the front door, under whichever title currently applies.
+
+### Success, failure, and the entry point
+
+The full bootstrap-to-connected lifecycle is:
+
+**bootstrap `LOCAL LOG` → Target → Controller → Operation → success: [Network Bootstrap](#network-bootstrap) → connected `SIGNALS`**, or **failure: back to bootstrap `LOCAL LOG`/After Action, retry**.
+
+Target → Controller → Operation behave identically regardless of connectivity (§§2–4 note this explicitly); only Operation's terminal-success routing differs, per § [Network Bootstrap](#network-bootstrap). A failed, budget-exhausted, or controller-error run never grants connectivity: the player lands on After Action exactly as documented in §5 and remains in bootstrap, free to revise the Controller and retry.
+
+Operator-network connectivity, once established, is durable: it persists across process launches, and a connected player is never shown the bootstrap presentation again (§ [State and information rules](#state-and-information-rules)). The Network Bootstrap transition itself is not durable in that sense — see § [Network Bootstrap](#network-bootstrap).
+
+The Resistance Console is the canonical player entry point to Human Exception; a fresh launch always starts here, in bootstrap if connectivity has not yet been established. Any direct, non-Console script/scenario execution retained for contributors or tests is explicit developer tooling, not a normal way to play, and must not read or mutate the durable connectivity fact this section defines. The specific CLI surface for that developer tooling is a separate implementation decision, not made by this document.
+
 ## Target terminal
 
 Supported minimum and primary design target: **120×40**. The console does not attempt partial gameplay below this geometry.
@@ -80,6 +121,8 @@ Global navigation:
 Function keys are intentional because they remain available while editing Lua and do not steal ordinary source-text keystrokes.
 
 `F3`, `F4`, `F5`, and `F6` may be unavailable until their prerequisite state exists. Unavailable actions should be visibly disabled rather than silently ignored.
+
+This major-state flow is identical whether the console is in bootstrap or connected (§ [Bootstrap and network connectivity](#bootstrap-and-network-connectivity)) except for one routing exception on First Contact's first success, defined in § [Network Bootstrap](#network-bootstrap). Network Bootstrap itself is not a major state reachable by any `F`-key: it occurs automatically, exactly once, immediately after that success, and blocks input other than the quit-safety behavior below until it completes.
 
 Some views bind additional local keys beyond this global set. `F7` resets the controller in Controller. `F8` moves focus to the next pane in the current view — see [Pane focus](#pane-focus). These are documented with the views they apply to.
 
@@ -293,9 +336,23 @@ Review Run's `TIMELINE` chronology.
 
 ## Persistent frame
 
-Every major view uses the same outer frame, but the header reflects whether the player has merely observed an opportunity or has chosen to work it.
+Every major view uses the same outer frame, but the header reflects whether the player has merely observed an opportunity or has chosen to work it, and — independently — whether the console is in bootstrap or connected (§ [Bootstrap and network connectivity](#bootstrap-and-network-connectivity)).
 
-Before selecting a target:
+Bootstrap, before selecting a target:
+
+```text
+┌ HUMAN EXCEPTION // RESISTANCE CONSOLE ───────────────────────────────────────────────────────────────────────────┐
+│ MESH: NONE             SATLINK: COMPROMISED        LOCAL LOG: 03         WORKING SET: none                       │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                                                  │
+│                                            ACTIVE WORKSPACE                                                      │
+│                                                                                                                  │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ F1 Help   F2 Local Log   F3 Target   F4 Controller   F5 Operation   F6 Deploy                          Ctrl+Q Quit│
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+Connected, before selecting a target:
 
 ```text
 ┌ HUMAN EXCEPTION // RESISTANCE CONSOLE ───────────────────────────────────────────────────────────────────────────┐
@@ -309,25 +366,27 @@ Before selecting a target:
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-After the player chooses an opportunity:
+After the player chooses an opportunity (First Contact is worked in bootstrap, so `MESH: NONE` and `F2 Local Log` apply here; only `WORKING SET`, `LINK`, `CONTROLLER`, and `STATUS` are specific to the working set itself):
 
 ```text
 ┌ HUMAN EXCEPTION // RESISTANCE CONSOLE ───────────────────────────────────────────────────────────────────────────┐
-│ MESH: DEGRADED   WORKING SET: FIRST CONTACT   LINK: COMPROMISED   CONTROLLER: modified   STATUS: READY           │
+│ MESH: NONE   WORKING SET: FIRST CONTACT   LINK: COMPROMISED   CONTROLLER: modified   STATUS: READY               │
 ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │                                                                                                                  │
 │                                            ACTIVE WORKSPACE                                                      │
 │                                                                                                                  │
 ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│ F1 Help   F2 Signals   F3 Target   F4 Controller   F5 Operation   F6 Deploy                           Ctrl+Q Quit│
+│ F1 Help   F2 Local Log   F3 Target   F4 Controller   F5 Operation   F6 Deploy                          Ctrl+Q Quit│
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
+
+`LINK` here describes the player's own captured satellite feed for the current target facility (`COMPROMISED`, `LIVE`, or `RECORDED`, per §§2–5) and does not change with resistance-network connectivity — only `MESH` and the front-door label do (§ [Bootstrap and network connectivity](#bootstrap-and-network-connectivity)).
 
 The header should communicate state, not decorate it.
 
 Persistent header priorities:
 
-1. resistance-network / link condition;
+1. resistance-network / link condition — `MESH` reads a disconnected value (e.g. `NONE`) in bootstrap, its existing connected value afterward;
 2. current working set, if any;
 3. controller state (`starter`, `modified`, `invalid`), when relevant;
 4. operation state (`READY`, `RUNNING`, `PAUSED`, `SUCCESS`, `FAILED`), when relevant.
@@ -336,11 +395,41 @@ The phrase **working set** is intentional: choosing an opportunity means “this
 
 ## 1. Signals
 
-Signals is the default screen after startup.
+This front-door pane is the default screen after startup, in either connectivity state (§ [Bootstrap and network connectivity](#bootstrap-and-network-connectivity)). It should feel like a living intelligence stream assembled from unreliable, decentralized sources, never a clean list of quests — that principle applies to both of its presentations below.
 
-It should feel like a living intelligence stream assembled from unreliable, decentralized sources. It is not a clean list of quests.
+### `LOCAL LOG` (bootstrap)
 
-Representative 120×40 layout:
+Representative 120×40 layout before connectivity:
+
+```text
+┌ HUMAN EXCEPTION // RESISTANCE CONSOLE ─────────────────────────────────────────────────────────────────────────┐
+│ MESH: NONE             SATLINK: COMPROMISED        LOCAL LOG: 03        WORKING SET: none                      │
+├───────────────────────────────────────────────────────────────┬────────────────────────────────────────────────┤
+│ LOCAL LOG                                                     │ SELECTED ENTRY                                 │
+│                                                               │                                                │
+│ > 11:42  MACHINE INTERCEPT                                    │ MACHINE INTERCEPT // sector 7                  │
+│   Fabricator node 31B resumed local control after mesh loss.  │ confidence: HIGH                               │
+│   auth state inconsistent.                              [OPEN]│                                                │
+│                                                               │ A maintenance unit inside an automated facility│
+│   11:18  BOOTSTRAP LOG // package verify                      │ appears to have fallen back to local control.  │
+│   console-core 0.3.1 signed by slaptijack@, install verified. │ Authentication traffic is incomplete.          │
+│                                                               │                                                │
+│   10:57  PASSIVE SENSOR // ANOMALY                            │ Correlated fragments suggest a temporary access│
+│   Burst traffic from an offline municipal control cluster.    │ window through the captured maintenance drone. │
+│                                                               │                                                │
+│                                                               │ ACTIONABLE: FIRST CONTACT                      │
+│                                                               │ Enter  inspect opportunity                     │
+│                                                               │                                                │
+├────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ ↑↓ Select   Enter Inspect   F1 Help   F2 Local Log                                           Ctrl+Q Quit       │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+`LOCAL LOG` entries come only from the player's own local sensors/intercepts, the bootstrap software's own provenance, and the First Contact opportunity itself (§ [Bootstrap and network connectivity](#bootstrap-and-network-connectivity)). No entry may be framed as live traffic from a named remote operator or cell, or as a request awaiting the player's reply — that content only exists once connected, below. `slaptijack@` may appear only through software provenance (as in the `BOOTSTRAP LOG` entry above), never as a narrator addressing the player.
+
+### `SIGNALS` (connected)
+
+Representative 120×40 layout after First Contact succeeds:
 
 ```text
 ┌ HUMAN EXCEPTION // RESISTANCE CONSOLE ─────────────────────────────────────────────────────────────────────────┐
@@ -348,50 +437,49 @@ Representative 120×40 layout:
 ├───────────────────────────────────────────────────────────────┬────────────────────────────────────────────────┤
 │ SIGNALS                                                       │ SELECTED SIGNAL                                │
 │                                                               │                                                │
-│ > 11:42  MACHINE INTERCEPT                                    │ MACHINE INTERCEPT // sector 7                  │
-│   Fabricator node 31B resumed local control after mesh loss.  │ confidence: HIGH                               │
-│   auth state inconsistent.                              [OPEN]│                                                │
-│                                                               │ A maintenance unit inside an automated facility│
-│   11:35  rook@pacific // SHARED INTEL                         │ appears to have fallen back to local control.  │
-│   “Lost my relay before I could trace the uplink.             │ Authentication traffic is incomplete.          │
-│    Dumping what I saw in case somebody is closer.”            │                                                │
-│                                                               │ Correlated fragments suggest a temporary access│
-│   11:18  CELL/MARE-4 // REQUEST                               │ window through the captured maintenance drone. │
-│   Looking for anyone who can identify convoy routing          │                                                │
-│   changes near old I-5. No clean telemetry yet.               │ ACTIONABLE: FIRST CONTACT                      │
-│                                                               │ Enter  inspect opportunity                     │
+│ > 12:03  rook@pacific // SHARED INTEL                         │ SHARED INTEL // rook@pacific                   │
+│   Lost my relay before I could trace the uplink. Dumping      │ confidence: MED                                │
+│   what I saw in case somebody closer wants to follow up.      │                                                │
+│                                                               │ An independent operator's fragment, now visible│
+│   11:47  CELL/MARE-4 // REQUEST                               │ because the console can finally receive shared │
+│   Looking for anyone who can identify convoy routing          │ operator traffic instead of only local sensors.│
+│   changes near old I-5. No clean telemetry yet.               │                                                │
+│                                                               │ No deployable opportunity is attached to this  │
+│   11:18  BOOTSTRAP LOG // package verify                      │ signal in the current playable slice.          │
+│   console-core 0.3.1 signed by slaptijack@, install verified. │                                                │
+│                                                               │                                                │
 │   10:57  PASSIVE SENSOR // ANOMALY                            │                                                │
 │   Burst traffic from an offline municipal control cluster.    │                                                │
-│                                                               │                                                │
 ├────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │ ↑↓ Select   Enter Inspect   F1 Help   F2 Signals                                             Ctrl+Q Quit       │
 └────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Signals behavior
+Once connected, the front door genuinely carries operator-network traffic — shared intel and cell requests from other independent hackers are now legitimate, because the resistance mesh is actually reachable. First Contact does not reappear here as an actionable item: it is already complete, and re-offering it as an undiscovered opportunity would be dishonest (§5, § [Network Bootstrap](#network-bootstrap)). For the first playable slice, no signal in the connected feed is actionable; they exist to make the wider network feel real, per § [Opportunity design principles beyond First Contact](#opportunity-design-principles-beyond-first-contact).
+
+### Signals behavior (both presentations)
 
 The left pane is chronological intelligence, not a task list. Items may be actionable, informational, unresolved, or merely atmospheric.
 
-The right pane shows the currently selected signal in more detail and may correlate related fragments.
+The right pane shows the currently selected entry in more detail and may correlate related fragments.
 
 For the first playable slice:
 
-- show several authored signals from different sources;
-- only First Contact is actionable;
-- do not make non-actionable signals selectable as fake missions;
+- show several authored entries from different sources appropriate to the current connectivity state;
+- in `LOCAL LOG`, only First Contact is actionable; in connected `SIGNALS`, nothing is currently actionable;
+- do not make non-actionable entries selectable as fake missions;
 - it is acceptable for them to be inspectable as information, but they must clearly lack a deployable opportunity;
-- at least one signal should come from another independent hacker or cell;
-- at least one signal should be machine-generated or passively intercepted.
+- `LOCAL LOG` includes at least one machine-generated or passively intercepted entry; connected `SIGNALS` includes at least one entry from another independent hacker or cell.
 
 The actionable marker should be restrained. `[OPEN]` or an equivalent status is preferable to a bright “NEW QUEST” affordance.
 
-Selecting an actionable signal and pressing `Enter` opens **Target**. It does not automatically commit the player to acting.
+Selecting an actionable entry and pressing `Enter` opens **Target**. It does not automatically commit the player to acting.
 
 If the player already has First Contact as the current working set, selecting it again must preserve the current controller source. Re-entering Target never reloads or replaces source by itself.
 
 ## 2. Target
 
-Target is the dossier for an opportunity the player is considering or has chosen to work.
+Target is the dossier for an opportunity the player is considering or has chosen to work. Its behavior does not depend on connectivity (§ [Bootstrap and network connectivity](#bootstrap-and-network-connectivity)); First Contact is presented from bootstrap `LOCAL LOG` in the current playable slice, but nothing here is conditioned on that.
 
 It should answer: what is known, how do we know it, what is uncertain, what access is available, and what could be gained by acting?
 
@@ -454,7 +542,7 @@ The player may always return to Signals later. Choosing an opportunity is not ac
 
 ## 3. Controller
 
-The Controller view is available after the player chooses to work an opportunity.
+The Controller view is available after the player chooses to work an opportunity. Like Target, it behaves identically regardless of connectivity (§ [Bootstrap and network connectivity](#bootstrap-and-network-connectivity)).
 
 The editor owns most of the screen. API help is secondary.
 
@@ -760,7 +848,7 @@ It should not be the checked-in reference controller that automatically solves F
 
 ## 4. Operation
 
-Operation is the live view of the currently deployed controller.
+Operation is the live view of the currently deployed controller. Like Target and Controller, it runs identically regardless of connectivity; only what happens after a *successful* First Contact run differs, per § [Network Bootstrap](#network-bootstrap) below.
 
 The compromised satellite feed is visually dominant. Telemetry exists to explain why the player's program behaved as it did.
 
@@ -879,6 +967,8 @@ This hierarchy is a presentation contract, not a new state machine: it governs w
 
 ### Success
 
+**Routing exception:** the first time First Contact succeeds, Operation does not automatically land here. It enters the one-time [Network Bootstrap](#network-bootstrap) transition instead, landing on connected `SIGNALS` once that completes. This screen's content is unchanged by that exception — it still exists, and is reached afterward via the normal `F4`/`F5` bindings against the same (now-connected) working set, exactly as any other After Action screen would be. A player who somehow re-reaches this screen for an already-recorded success (e.g. via Review Run) sees the same content below and gains nothing further from it; success cannot be granted a second time. Every other terminal outcome — including a *second* First Contact success after connectivity already exists, which cannot occur because the opportunity is withdrawn once complete (§1) — auto-lands here exactly as documented.
+
 A successful run leads with `FOOTHOLD ESTABLISHED` and states `FIRST CONTACT COMPLETE` as the explicit completion line. The meaning line echoes the language already used when the opportunity was first offered in Target (§2): reaching the uplink means resistance access to the facility network was established before the operational window closed. It does **not** mean the facility was captured, owned, brought under resistance control, or made persistently operable — the report must not claim or imply any of those.
 
 The availability line is stated plainly and in-fiction, not as an apologetic developer note: no further operation at this facility is currently available. Returning to Signals is worthwhile because Signals is the wider intelligence network, not because another operation at this target is waiting.
@@ -921,6 +1011,8 @@ Budget exhaustion and controller errors (an execution-limit breach, an invalid a
 - **Completion:** First Contact is explicitly **incomplete**. This is the direct counterpart to `FIRST CONTACT COMPLETE` and must be no less clear.
 - **Evidence/next actions:** identical evidence set and next-action set as success (below), except the primary recovery path is revising the Controller rather than reviewing a clean success.
 - **Availability:** the same truthful statement as success — no additional playable operation is currently implemented at this facility, regardless of outcome.
+
+Unlike success, failure has no routing exception: it always auto-lands here immediately, exactly as documented today. It never establishes operator-network connectivity, so the player remains in bootstrap `LOCAL LOG` and may revise the Controller and retry as many times as they like (§ [Bootstrap and network connectivity](#bootstrap-and-network-connectivity)).
 
 ```text
 ┌ HUMAN EXCEPTION // RESISTANCE CONSOLE ────────────────────────────────────────────────────────────────────────┐
@@ -1004,6 +1096,22 @@ From After Action, four next actions are available, using bindings already defin
 
 **Review Run** displays the immutable source revision and telemetry associated with that recorded run, not whatever source currently happens to be in the editor.
 
+## Network Bootstrap
+
+Network Bootstrap is the one-time, blocking transition that plays immediately after First Contact's first success (§5, § [Bootstrap and network connectivity](#bootstrap-and-network-connectivity)), in place of the automatic landing on After Action. It is not a major state reachable by any `F`-key and is not addressable navigation — it happens exactly once, automatically, as the direct consequence of that one success.
+
+Product requirements:
+
+- it is presented as a blocking, diegetic sequence over the console — the console itself visibly coming online over a newly acquired uplink, not a conventional "feature unlocked" or reward screen;
+- it shows an ordered sequence of plausible synchronization/update steps and a visible, advancing progress indicator; representative steps include uplink established, peer network reachable, console package/index synchronization, module or package verification, operator-key synchronization, shared index/feed synchronization, and network services becoming available — exact wording, step count, and styling are implementation details left to a later issue;
+- `slaptijack@` may appear through restrained package/signature metadata during the sequence, consistent with § [Bootstrap and network connectivity](#bootstrap-and-network-connectivity); he is never a narrator or commander here either;
+- ordinary gameplay/navigation/editing input is suppressed while it owns the interface; the only input honored is the existing quit-safety behavior (§ [Quit safety](#quit-safety)) — quitting mid-sequence does not lose the connectivity already recorded (see below);
+- presentation timing must be deterministic and testable, consistent with the "Engineering principles" in AGENTS.md — it must not depend on wall-clock time or real network activity;
+- it never replays: once operator-network connectivity is durable (§ [State and information rules](#state-and-information-rules)), no subsequent launch or navigation shows this sequence again;
+- on completion, the console lands on connected `SIGNALS` (§1) — not After Action. After Action and Review Run for the completed First Contact run remain reachable afterward exactly as documented in §5.
+
+The durable fact this sequence dramatizes — operator-network connectivity — is recorded at the moment First Contact's success is authoritatively determined, not at the moment this presentation finishes. If the process exits mid-sequence, connectivity is not lost; relaunching lands directly on connected `SIGNALS` without replaying the sequence, per § [State and information rules](#state-and-information-rules).
+
 ## 6. Help
 
 `F1` opens contextual help as an overlay or dedicated view. It preserves the underlying state and returns to that state when dismissed.
@@ -1049,7 +1157,11 @@ Quitting remains available, subject to the same modified-source confirmation rul
 
 ## State and information rules
 
-Persistent across the application session:
+Durable across application launches (§ [Bootstrap and network connectivity](#bootstrap-and-network-connectivity)):
+
+- operator-network connectivity, once First Contact has succeeded. This is the one fact that survives a relaunch; everything below remains session-only.
+
+Persistent across the application session, but **not** across a relaunch:
 
 - authored/current Signals state;
 - selected signal;
@@ -1059,7 +1171,8 @@ Persistent across the application session:
 - most recent deployment result;
 - current run paused/running state;
 - navigation target;
-- help dismissal return target.
+- help dismissal return target;
+- Network Bootstrap transition/progress presentation — if interrupted mid-sequence, it is not resumed on relaunch, and it is never replayed once connectivity is durable (§ [Network Bootstrap](#network-bootstrap)).
 
 Reset for every deployment:
 
@@ -1071,7 +1184,7 @@ Reset for every deployment:
 
 Leaving a working set for Signals does not erase the controller during this epic. If the player returns to First Contact in the same application session, their edits are preserved. Re-selecting or re-opening the same opportunity must reuse the current source rather than silently loading the starter again.
 
-Persistence across application launches remains out of scope, which is why quit confirmation is required for modified source.
+Beyond operator-network connectivity, persistence across application launches remains out of scope, which is why quit confirmation is required for modified source.
 
 ## Visual hierarchy
 
@@ -1143,4 +1256,4 @@ It does not dictate:
 
 #42 and later issues may make those implementation choices as long as the observable experience remains consistent with this document.
 
-Material deviations from the Signals → Target → Controller → Operation → After Action flow, autonomy model, navigation semantics, safety/recovery behavior, layout hierarchy, or first-play experience are product-design changes and should not be introduced opportunistically during implementation.
+Material deviations from the Signals → Target → Controller → Operation → After Action flow, autonomy model, navigation semantics, safety/recovery behavior, layout hierarchy, or first-play experience are product-design changes and should not be introduced opportunistically during implementation. This includes the bootstrap/connected distinction and the `Operation success → Network Bootstrap → connected Signals` sequencing defined in § [Bootstrap and network connectivity](#bootstrap-and-network-connectivity) and § [Network Bootstrap](#network-bootstrap): later issues (#162–#169) implement this contract but do not reorder or reinterpret it without a recorded product decision.
