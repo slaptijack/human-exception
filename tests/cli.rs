@@ -37,6 +37,12 @@ fn long_help_flag_prints_in_character_usage() {
     assert!(stdout.contains("HUMAN EXCEPTION // resistance console"));
     assert!(stdout.contains("Usage:"));
     assert!(stdout.contains("--version"));
+    assert!(stdout.contains("--developer-mode"));
+    assert!(
+        stdout.contains("contributor/test tooling")
+            || stdout.contains("not the normal way to play"),
+        "expected help to distinguish developer tooling from normal gameplay, got: {stdout}"
+    );
 }
 
 #[test]
@@ -83,8 +89,41 @@ fn unknown_argument_is_rejected_in_character() {
 }
 
 #[test]
+fn a_script_path_without_developer_mode_is_rejected_and_not_run() {
+    let output = bin()
+        .arg(example_path("first_contact.lua"))
+        .output()
+        .expect("binary should run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr.contains("HUMAN EXCEPTION // resistance console"));
+    assert!(stderr.contains("--developer-mode"));
+    assert!(!stdout.contains("System bootstrap complete"));
+    assert!(!stdout.contains("FOOTHOLD ESTABLISHED"));
+    assert!(!stdout.contains("Uplink script"));
+}
+
+#[test]
+fn developer_mode_without_a_script_path_is_rejected() {
+    let output = bin()
+        .arg("--developer-mode")
+        .output()
+        .expect("binary should run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr.contains("HUMAN EXCEPTION // resistance console"));
+    assert!(stderr.contains("--developer-mode"));
+}
+
+#[test]
 fn running_the_example_script_succeeds() {
     let output = bin()
+        .arg("--developer-mode")
         .arg(example_path("first_contact.lua"))
         .output()
         .expect("binary should run");
@@ -100,10 +139,12 @@ fn running_the_example_script_succeeds() {
 #[test]
 fn running_the_example_script_is_deterministic() {
     let first = bin()
+        .arg("--developer-mode")
         .arg(example_path("first_contact.lua"))
         .output()
         .expect("binary should run");
     let second = bin()
+        .arg("--developer-mode")
         .arg(example_path("first_contact.lua"))
         .output()
         .expect("binary should run");
@@ -115,6 +156,7 @@ fn running_the_example_script_is_deterministic() {
 #[test]
 fn each_tick_reports_position_action_and_remaining_time() {
     let output = bin()
+        .arg("--developer-mode")
         .arg(example_path("first_contact.lua"))
         .output()
         .expect("binary should run");
@@ -127,6 +169,7 @@ fn each_tick_reports_position_action_and_remaining_time() {
 #[test]
 fn the_example_script_scans_before_navigating() {
     let output = bin()
+        .arg("--developer-mode")
         .arg(example_path("first_contact.lua"))
         .output()
         .expect("binary should run");
@@ -141,6 +184,7 @@ fn the_example_script_scans_before_navigating() {
 #[test]
 fn each_tick_is_preceded_by_a_satellite_view_of_discovered_terrain() {
     let output = bin()
+        .arg("--developer-mode")
         .arg(example_path("first_contact.lua"))
         .output()
         .expect("binary should run");
@@ -182,6 +226,7 @@ fn each_tick_is_preceded_by_a_satellite_view_of_discovered_terrain() {
 #[test]
 fn a_hazard_route_script_reports_the_hazard_telemetry_line_and_lower_final_budget() {
     let output = bin()
+        .arg("--developer-mode")
         .arg(fixture_path("hazard_route.lua"))
         .output()
         .expect("binary should run");
@@ -196,6 +241,7 @@ fn a_hazard_route_script_reports_the_hazard_telemetry_line_and_lower_final_budge
 #[test]
 fn a_wait_only_script_reports_mission_failure() {
     let output = bin()
+        .arg("--developer-mode")
         .arg(fixture_path("always_wait.lua"))
         .output()
         .expect("binary should run");
@@ -212,6 +258,7 @@ fn a_wait_only_script_reports_mission_failure() {
 #[test]
 fn a_nonexistent_script_prints_a_readable_error_and_exits_nonzero() {
     let output = bin()
+        .arg("--developer-mode")
         .arg(fixture_path("does_not_exist.lua"))
         .output()
         .expect("binary should run");
@@ -225,6 +272,7 @@ fn a_nonexistent_script_prints_a_readable_error_and_exits_nonzero() {
 #[test]
 fn a_malformed_script_prints_a_readable_error_and_exits_nonzero() {
     let output = bin()
+        .arg("--developer-mode")
         .arg(fixture_path("syntax_error.lua"))
         .output()
         .expect("binary should run");
@@ -238,6 +286,7 @@ fn a_malformed_script_prints_a_readable_error_and_exits_nonzero() {
 #[test]
 fn a_script_missing_the_callback_prints_a_readable_error() {
     let output = bin()
+        .arg("--developer-mode")
         .arg(fixture_path("missing_callback.lua"))
         .output()
         .expect("binary should run");

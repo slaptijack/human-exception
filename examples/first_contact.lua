@@ -1,7 +1,7 @@
 -- A reference reconnaissance controller for the fixed "First Contact"
 -- operation. Run it with:
 --
---   cargo run -- examples/first_contact.lua
+--   cargo run -- --developer-mode examples/first_contact.lua
 --
 -- Each tick, on_tick(observation) receives a read-only snapshot of the
 -- drone's own position, the current tick, the operational budget

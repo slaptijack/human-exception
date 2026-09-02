@@ -11,7 +11,9 @@ const BANNER: &str = "HUMAN EXCEPTION // resistance console";
 #[derive(Parser, Debug)]
 #[command(
     name = "human-exception",
-    about = "Boot the console and begin an operation.",
+    about = "Boot the resistance console and begin an operation. Direct script \
+             execution (--developer-mode) is contributor/test tooling, not the \
+             normal way to play.",
     disable_version_flag = true,
     help_template = "\
 HUMAN EXCEPTION // resistance console
@@ -27,7 +29,15 @@ struct Cli {
     #[arg(short = 'V', long)]
     version: bool,
 
-    /// Path to the Lua script that will control the operation
+    /// Run a Lua script directly against the fixed scenario, bypassing the
+    /// resistance console. Contributor/test tooling only: not a normal way
+    /// to play, and it does not read or affect normal Player progression.
+    /// Requires a script path.
+    #[arg(long)]
+    developer_mode: bool,
+
+    /// Path to the Lua script that will control the operation. Only used
+    /// with --developer-mode.
     script: Option<PathBuf>,
 }
 
@@ -51,12 +61,21 @@ pub fn run() {
                 return;
             }
 
-            match cli.script {
-                None => std::process::exit(enter_console()),
-                Some(script) => {
+            match (cli.developer_mode, cli.script) {
+                (true, Some(script)) => {
                     println!("{BANNER}");
                     std::process::exit(run_operation(&script));
                 }
+                (true, None) => reject_usage(
+                    &mut command,
+                    "--developer-mode requires a script path to run",
+                ),
+                (false, Some(_)) => reject_usage(
+                    &mut command,
+                    "direct script execution requires --developer-mode; it is \
+                     contributor/test tooling, not a normal way to play",
+                ),
+                (false, None) => std::process::exit(enter_console()),
             }
         }
         Err(e) if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) => {
@@ -72,6 +91,20 @@ pub fn run() {
             std::process::exit(2);
         }
     }
+}
+
+/// Prints an in-character usage-error report for a semantically invalid
+/// combination of otherwise-well-formed arguments (e.g. a script path
+/// without `--developer-mode`), matching the format clap's own parse
+/// errors are rendered in above, and exits with status 2.
+fn reject_usage(command: &mut clap::Command, detail: &str) -> ! {
+    eprintln!("{BANNER}");
+    eprintln!("Uplink rejected: {detail}");
+    eprintln!();
+    eprint!("{}", command.render_usage());
+    eprintln!();
+    eprintln!("Try 'human-exception --help' for the field manual.");
+    std::process::exit(2);
 }
 
 fn bad_argument_detail(error: &clap::Error) -> String {
