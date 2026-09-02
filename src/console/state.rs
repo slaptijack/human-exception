@@ -580,6 +580,16 @@ pub struct AppState {
     /// `scroll_offsets`/`clamp_scroll`.
     source_scroll: u16,
     should_quit: bool,
+    /// Whether this Player has established operator-network connectivity by
+    /// succeeding at First Contact — the one fact
+    /// [`console::profile`](super::profile) durably persists across
+    /// relaunches (`docs/TUI_DESIGN.md`, "Bootstrap and network
+    /// connectivity"). Lives independently of `current_view`/`operation` so
+    /// it can be seeded from disk before the session's first draw and
+    /// queried without inferring it from transient state. Set exactly once,
+    /// in [`AppState::step_operation`]'s terminal branch, and never
+    /// reverted.
+    connected: bool,
 }
 
 impl Default for AppState {
@@ -603,6 +613,7 @@ impl Default for AppState {
             run_inspector_mode: RunInspectorMode::Timeline,
             source_scroll: 0,
             should_quit: false,
+            connected: false,
         }
     }
 }
@@ -610,6 +621,21 @@ impl Default for AppState {
 impl AppState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Whether this Player has established operator-network connectivity.
+    /// `false` for a fresh/no-state installation; becomes `true` and stays
+    /// `true` once First Contact has succeeded, independently of the
+    /// current view or operation.
+    pub fn connected(&self) -> bool {
+        self.connected
+    }
+
+    /// Seeds the connectivity fact from durably persisted state. Only
+    /// meant to be called once, before the session's first draw — see
+    /// `console::bootstrap_state`. Never used to un-set connectivity.
+    pub(crate) fn set_connected(&mut self, connected: bool) {
+        self.connected = connected;
     }
 
     pub fn current_view(&self) -> View {
@@ -1345,6 +1371,21 @@ impl AppState {
         // happen from anywhere else). Hand off to After Action so the
         // player moves from "watching it run" to "learning what happened."
         if op.is_finished() {
+            // First Contact's success is the one durable progression fact
+            // this console remembers across relaunches (`docs/TUI_DESIGN.md`,
+            // "State and information rules") — recorded here, the moment
+            // the outcome is authoritatively determined, not when any later
+            // transition presentation finishes. Once set it never reverts:
+            // a later failed run mustn't undo an already-established
+            // connection.
+            if !self.connected
+                && matches!(
+                    op.records.last().map(|record| record.outcome),
+                    Some(crate::simulation::TickOutcome::Succeeded)
+                )
+            {
+                self.connected = true;
+            }
             // The run's chronology is now frozen, so its terminal review
             // point is already known — select it now, before the player
             // has even navigated to Review Run, the same way the report
@@ -3438,6 +3479,71 @@ mod tests {
         let conclusion = op.conclusion.expect("a finished run has a conclusion");
         assert!(matches!(conclusion.kind, ConclusionKind::BudgetExhausted));
         assert_eq!(conclusion.final_budget, 0);
+    }
+
+    #[test]
+    fn a_fresh_app_state_starts_disconnected() {
+        assert!(!AppState::new().connected());
+    }
+
+    #[test]
+    fn a_successful_first_contact_run_establishes_connectivity() {
+        let mut state = working_state();
+        state.controller = Some(ControllerDocument::new(ROUTE_TO_UPLINK));
+        state.apply(Msg::RequestDeploy);
+
+        assert!(
+            !state.connected(),
+            "connectivity must not be recorded before the run actually succeeds"
+        );
+
+        for _ in 0..8 {
+            state.advance_running_operation();
+        }
+
+        let op = state.operation().unwrap();
+        assert!(op.finished);
+        assert!(matches!(
+            op.conclusion.as_ref().map(|c| &c.kind),
+            Some(ConclusionKind::Success)
+        ));
+        assert!(state.connected());
+    }
+
+    #[test]
+    fn a_budget_exhausted_run_does_not_establish_connectivity() {
+        let mut state = working_state();
+        state.controller = Some(ControllerDocument::new(ALWAYS_WAITS));
+        state.apply(Msg::RequestDeploy);
+
+        for _ in 0..15 {
+            state.advance_running_operation();
+        }
+
+        assert!(state.operation().unwrap().finished);
+        assert!(!state.connected());
+    }
+
+    #[test]
+    fn connectivity_once_established_survives_a_later_failed_run() {
+        let mut state = working_state();
+        state.controller = Some(ControllerDocument::new(ROUTE_TO_UPLINK));
+        state.apply(Msg::RequestDeploy);
+        for _ in 0..8 {
+            state.advance_running_operation();
+        }
+        assert!(state.connected());
+
+        state.controller = Some(ControllerDocument::new(ALWAYS_WAITS));
+        state.apply(Msg::RequestDeploy);
+        for _ in 0..15 {
+            state.advance_running_operation();
+        }
+
+        assert!(
+            state.connected(),
+            "an already-established connection must not be undone by a later failed run"
+        );
     }
 
     #[test]
