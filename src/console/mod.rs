@@ -2762,7 +2762,7 @@ mod tests {
 
             // 3. A new Player can independently reach and choose First
             // Contact.
-            let mut events = vec![
+            let events = vec![
                 press(KeyCode::Enter), // dismiss the bootstrap intro
                 press(KeyCode::Enter), // LOCAL LOG -> Target
                 press(KeyCode::Enter), // Target -> Controller, commits to First Contact
@@ -2777,44 +2777,46 @@ mod tests {
 
             // 4. Failure grants no connectivity and supports another
             // attempt from the same bootstrap session.
-            let mut failing_events = events.clone();
-            failing_events.extend(clear_and_type(ALWAYS_WAITS));
-            failing_events.push(press(KeyCode::F(6)));
-            failing_events.push(press(KeyCode::Char(' '))); // pause
-            failing_events.extend(std::iter::repeat_n(press(KeyCode::Enter), 15)); // exhaust the budget
+            let mut retry_events = events.clone();
+            retry_events.extend(clear_and_type(ALWAYS_WAITS));
+            retry_events.push(press(KeyCode::F(6)));
+            retry_events.push(press(KeyCode::Char(' '))); // pause
+            retry_events.extend(std::iter::repeat_n(press(KeyCode::Enter), 15)); // exhaust the budget
             let (state, _) = render_from(
                 bootstrap_state(Some(&profile_path), Some(&intro_path)),
                 width,
                 height,
-                &failing_events,
+                &retry_events,
             );
             assert!(!state.connected());
             assert!(!state.network_bootstrap_pending());
             assert_eq!(state.current_view(), View::AfterAction);
 
-            failing_events.push(press(KeyCode::F(4))); // back to Controller for another attempt
+            retry_events.push(press(KeyCode::F(4))); // back to Controller for another attempt
             let (state, _) = render_from(
                 bootstrap_state(Some(&profile_path), Some(&intro_path)),
                 width,
                 height,
-                &failing_events,
+                &retry_events,
             );
             assert_eq!(state.current_view(), View::Controller);
             assert!(!state.connected());
 
-            // 5. Success connects and routes into Network Bootstrap rather
-            // than After Action, with the Console still rendering
-            // disconnected underneath the still-pending modal.
-            events.extend(clear_and_type(ROUTE_TO_UPLINK));
-            events.push(press_ctrl(KeyCode::Char('v')));
-            events.push(press(KeyCode::F(6)));
-            events.push(press(KeyCode::Char(' '))); // pause
-            events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step to success
+            // 5. Success — continuing from the same failed-then-retried
+            // session (`retry_events`), not a fresh first attempt — connects
+            // and routes into Network Bootstrap rather than After Action,
+            // with the Console still rendering disconnected underneath the
+            // still-pending modal.
+            retry_events.extend(clear_and_type(ROUTE_TO_UPLINK));
+            retry_events.push(press_ctrl(KeyCode::Char('v')));
+            retry_events.push(press(KeyCode::F(6)));
+            retry_events.push(press(KeyCode::Char(' '))); // pause
+            retry_events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step to success
             let (mut state, terminal) = render_from(
                 bootstrap_state(Some(&profile_path), Some(&intro_path)),
                 width,
                 height,
-                &events,
+                &retry_events,
             );
             assert!(
                 state.connected(),
@@ -2858,15 +2860,15 @@ mod tests {
             );
 
             // 8. After Action / Review Run can still inspect the completed
-            // run afterward.
+            // run afterward — actually navigate there via `F5` and render
+            // it, rather than only inspecting `operation()`'s retained data.
             assert!(state.operation().unwrap().finished);
+            let (state, terminal) = render_from(state, width, height, &[press(KeyCode::F(5))]);
+            assert_eq!(state.current_view(), View::Operation);
+            assert!(buffer_contains(&terminal, "DEPLOYED SOURCE"));
             assert!(
-                state
-                    .operation()
-                    .unwrap()
-                    .deployed_source
-                    .contains("local route"),
-                "the successful run's real deployed source must still be reachable"
+                buffer_contains(&terminal, "local route"),
+                "Review Run must render the successful run's real deployed source"
             );
 
             // 9. Persist exactly as the real event loop would on each edge
