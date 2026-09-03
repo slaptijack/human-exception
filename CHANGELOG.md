@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.3](https://github.com/slaptijack/human-exception/compare/v0.4.2...v0.4.3) - 2026-09-03
+
+### Added
+
+- *(console)* withdraw the resolved First Contact signal from connected SIGNALS ([#181](https://github.com/slaptijack/human-exception/pull/181))
+- *(console)* render Network Bootstrap as an in-place Console transition ([#180](https://github.com/slaptijack/human-exception/pull/180))
+- *(console)* render the diegetic Network Bootstrap sequence ([#178](https://github.com/slaptijack/human-exception/pull/178))
+- *(console)* route First Contact's connecting success into Network Bootstrap ([#177](https://github.com/slaptijack/human-exception/pull/177))
+- *(console)* add the first-launch bootstrap introduction from slaptijack@ ([#175](https://github.com/slaptijack/human-exception/pull/175))
+- *(console)* make the pre-First-Contact Console genuinely local ([#174](https://github.com/slaptijack/human-exception/pull/174))
+- *(console)* persist operator-network connectivity ([#172](https://github.com/slaptijack/human-exception/pull/172))
+- *(cli)* gate direct script execution behind --developer-mode ([#171](https://github.com/slaptijack/human-exception/pull/171))
+- *(console)* complete conventional navigation for read-only scroll panes ([#158](https://github.com/slaptijack/human-exception/pull/158))
+- *(console)* complete conventional navigation for Signals ([#157](https://github.com/slaptijack/human-exception/pull/157))
+
+### Other
+
+- *(console)* prove the isolated-to-operator lifecycle end to end ([#182](https://github.com/slaptijack/human-exception/pull/182))
+- *(console)* reframe First Contact success as an operator-network connection ([#176](https://github.com/slaptijack/human-exception/pull/176))
+- *(console)* define the bootstrap-to-network Console contract ([#170](https://github.com/slaptijack/human-exception/pull/170))
+- *(console)* close cross-console navigation audit gaps for #151 ([#159](https://github.com/slaptijack/human-exception/pull/159))
+- *(console)* introduce shared focus-aware navigation intents ([#156](https://github.com/slaptijack/human-exception/pull/156))
+- *(console)* define the console-wide navigation contract ([#154](https://github.com/slaptijack/human-exception/pull/154))
+
 ## [0.4.2](https://github.com/slaptijack/human-exception/compare/v0.4.1...v0.4.2) - 2026-08-31
 
 ### Added
