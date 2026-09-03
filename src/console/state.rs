@@ -726,8 +726,18 @@ impl AppState {
     /// has been revealed — see [`AppState::advance_network_bootstrap`] — so
     /// that final, fully-progressed state is actually shown for more than a
     /// single cadence before the transition completes.
+    ///
+    /// `false` while [`quit_confirmation_pending`] holds, even if bootstrap
+    /// is otherwise pending: the confirmation is the one thing allowed to
+    /// cover the Network Bootstrap modal (`docs/TUI_DESIGN.md`, "Quit
+    /// safety"), and it renders full-frame, so nothing about the
+    /// transition's own progress — including its completion — should
+    /// advance somewhere the Player can't see it. Cancelling the
+    /// confirmation resumes bootstrap exactly where it left off.
+    ///
+    /// [`quit_confirmation_pending`]: AppState::quit_confirmation_pending
     pub fn network_bootstrap_auto_advancing(&self) -> bool {
-        self.network_bootstrap_pending
+        self.network_bootstrap_pending && !self.quit_confirmation_pending
     }
 
     /// Advances Network Bootstrap by exactly one tick if
@@ -3899,6 +3909,43 @@ mod tests {
             state.presentation_connected(),
             "presentation catches up to durable connectivity only once the \
              transition completes"
+        );
+    }
+
+    #[test]
+    fn network_bootstrap_pauses_while_quit_confirmation_covers_it() {
+        // Quit confirmation renders full-frame over the Network Bootstrap
+        // modal, so nothing about the transition — including reaching its
+        // completed, lingering state — should advance somewhere the Player
+        // can't see it (Codex review on #180).
+        let mut state = connected_and_pending_network_bootstrap();
+        assert!(state.network_bootstrap_auto_advancing());
+
+        state.quit_confirmation_pending = true;
+        assert!(
+            !state.network_bootstrap_auto_advancing(),
+            "paused while the confirmation covers the modal"
+        );
+        assert!(
+            !state.advance_network_bootstrap(),
+            "advancing is a no-op while paused"
+        );
+        assert_eq!(
+            state.network_bootstrap_progress(),
+            (0, NETWORK_BOOTSTRAP_STEPS.len()),
+            "no progress was made while paused"
+        );
+
+        state.quit_confirmation_pending = false;
+        assert!(
+            state.network_bootstrap_auto_advancing(),
+            "resumes exactly where it left off once the confirmation is \
+             answered"
+        );
+        assert!(state.advance_network_bootstrap());
+        assert_eq!(
+            state.network_bootstrap_progress(),
+            (1, NETWORK_BOOTSTRAP_STEPS.len())
         );
     }
 
