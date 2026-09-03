@@ -923,16 +923,28 @@ mod tests {
         Event::Paste(text.to_string())
     }
 
-    /// A fresh `AppState` with operator-network connectivity pre-established,
-    /// so a scripted deployment's success is an ordinary, already-connected
-    /// run — landing on After Action as usual — rather than First Contact's
-    /// one-time connecting run, which plays Network Bootstrap instead
-    /// (`console::state`'s `network_bootstrap_pending` tests, and
-    /// `should_redraw`'s own gating via `event::map`, cover that case).
-    /// Tests below that are about Review Run/Controller/navigation behavior
-    /// unrelated to the transition itself use this to skip past it.
+    /// An `AppState` with operator-network connectivity pre-established and
+    /// First Contact already the working set, sitting on `View::Controller`
+    /// with the starter source loaded — so a scripted deployment's success
+    /// is an ordinary, already-connected run — landing on After Action as
+    /// usual — rather than First Contact's one-time connecting run, which
+    /// plays Network Bootstrap instead (`console::state`'s
+    /// `network_bootstrap_pending` tests, and `should_redraw`'s own gating
+    /// via `event::map`, cover that case). Tests below that are about Review
+    /// Run/Controller/navigation behavior unrelated to the transition itself
+    /// use this to skip past it.
+    ///
+    /// The working set is seeded via `Msg::Activate` *before* connecting,
+    /// not after: once connected, `intel::visible_signals` withdraws the
+    /// resolved First Contact entry from Signals (`docs/TUI_DESIGN.md`,
+    /// "SIGNALS (connected)"), so a connected-from-scratch state has no
+    /// route back into Controller — the same dead end a real relaunched
+    /// player would hit. Callers only append events starting from
+    /// Controller (no more leading `Enter, Enter` to reach it via Signals).
     fn connected_state() -> AppState {
         let mut state = AppState::new();
+        state.apply(Msg::Activate); // Signals -> Target, still disconnected
+        state.apply(Msg::Activate); // Target -> Controller, seeds the working set
         state.set_connected(true);
         state
     }
@@ -1038,6 +1050,11 @@ mod tests {
 
         assert!(!state.bootstrap_intro_visible());
         assert!(buffer_contains(&terminal, "SIGNALS"));
+        assert!(
+            !buffer_contains(&terminal, "Fabricator node 31B"),
+            "a persisted-connected relaunch must not re-offer the resolved First Contact \
+             opportunity in the connected SIGNALS feed"
+        );
 
         let _ = std::fs::remove_file(&path);
     }
@@ -2025,19 +2042,17 @@ mod tests {
         // controls") — pause immediately after deploying, then step
         // through every remaining tick explicitly to reach completion
         // deterministically.
-        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
-        events.extend(clear_and_type(ROUTE_TO_UPLINK));
+        let mut events = clear_and_type(ROUTE_TO_UPLINK);
         events.push(press(KeyCode::F(6)));
         events.push(press(KeyCode::Char(' '))); // pause
         events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
 
-        // Already connected, so this success is a non-connecting run and
+        // Already connected (with First Contact already the working set,
+        // `connected_state`), so this success is a non-connecting run and
         // lands on After Action as usual, rather than playing Network
         // Bootstrap (`console::state`'s `network_bootstrap_pending` tests
         // cover the connecting case).
-        let mut state = AppState::new();
-        state.set_connected(true);
-        let (state, terminal) = render_from(state, 120, 40, &events);
+        let (state, terminal) = render_from(connected_state(), 120, 40, &events);
 
         assert_eq!(state.current_view(), View::AfterAction);
         assert!(state.operation().unwrap().finished);
@@ -2052,8 +2067,7 @@ mod tests {
         // exercises the full pipeline through `should_redraw`, confirming
         // it's rewritten with the real `ui::review_chronology_visible_rows`
         // count for this frame size before `apply` runs, not left at `0`.
-        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
-        events.extend(clear_and_type(ROUTE_TO_UPLINK));
+        let mut events = clear_and_type(ROUTE_TO_UPLINK);
         events.push(press(KeyCode::F(6)));
         events.push(press(KeyCode::Char(' '))); // pause
         events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
@@ -2195,8 +2209,7 @@ mod tests {
     fn tab_toggles_the_run_inspector_mode_via_the_full_pipeline() {
         use state::RunInspectorMode;
 
-        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
-        events.extend(clear_and_type(ROUTE_TO_UPLINK));
+        let mut events = clear_and_type(ROUTE_TO_UPLINK);
         events.push(press(KeyCode::F(6)));
         events.push(press(KeyCode::Char(' '))); // pause
         events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
@@ -2227,8 +2240,7 @@ mod tests {
     fn a_held_tab_reported_as_repeat_does_not_oscillate_the_run_inspector_mode() {
         use state::RunInspectorMode;
 
-        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
-        events.extend(clear_and_type(ROUTE_TO_UPLINK));
+        let mut events = clear_and_type(ROUTE_TO_UPLINK);
         events.push(press(KeyCode::F(6)));
         events.push(press(KeyCode::Char(' '))); // pause
         events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
@@ -2262,8 +2274,7 @@ mod tests {
 
     #[test]
     fn up_down_scroll_source_instead_of_chronology_once_source_mode_is_active() {
-        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
-        events.extend(clear_and_paste(&long_route_to_uplink()));
+        let mut events = clear_and_paste(&long_route_to_uplink());
         events.push(press(KeyCode::F(6)));
         events.push(press(KeyCode::Char(' '))); // pause
         events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
@@ -2307,8 +2318,7 @@ mod tests {
 
     #[test]
     fn page_down_in_source_mode_moves_by_the_real_visible_source_page_size() {
-        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
-        events.extend(clear_and_paste(&long_route_to_uplink()));
+        let mut events = clear_and_paste(&long_route_to_uplink());
         events.push(press(KeyCode::F(6)));
         events.push(press(KeyCode::Char(' '))); // pause
         events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
@@ -2341,8 +2351,7 @@ mod tests {
 
     #[test]
     fn end_in_source_mode_clamps_to_the_real_max_scroll() {
-        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
-        events.extend(clear_and_paste(&long_route_to_uplink()));
+        let mut events = clear_and_paste(&long_route_to_uplink());
         events.push(press(KeyCode::F(6)));
         events.push(press(KeyCode::Char(' '))); // pause
         events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
@@ -2610,21 +2619,16 @@ mod tests {
 
     #[test]
     fn validating_deploying_editing_reviewing_and_retrying_preserves_provenance_end_to_end() {
-        // Reach the Controller with a scripted route in place of the
-        // starter, and confirm it validates.
-        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
-        events.extend(clear_and_type(ROUTE_TO_UPLINK));
+        // Already on the Controller with First Contact as the working set
+        // (`connected_state`), and already connected throughout, so this
+        // run is a non-connecting success and lands on After Action as
+        // usual, rather than playing Network Bootstrap
+        // (`console::state`'s `network_bootstrap_pending` tests cover the
+        // connecting case) — this test is about provenance, not
+        // connectivity routing. Replace the starter with a scripted route
+        // and confirm it validates.
+        let mut events = clear_and_type(ROUTE_TO_UPLINK);
         events.push(press_ctrl(KeyCode::Char('v')));
-        // Already connected throughout, so this run is a non-connecting
-        // success and lands on After Action as usual, rather than playing
-        // Network Bootstrap (`console::state`'s `network_bootstrap_pending`
-        // tests cover the connecting case) — this test is about provenance,
-        // not connectivity routing.
-        let connected_state = || {
-            let mut state = AppState::new();
-            state.set_connected(true);
-            state
-        };
         let (state, _) = render_from(connected_state(), 120, 40, &events);
         assert_eq!(state.validation(), &state::Validation::Valid);
 
@@ -2738,8 +2742,7 @@ mod tests {
 
     #[test]
     fn review_run_first_contact_success_is_navigable_from_initial_to_terminal_tick() {
-        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
-        events.extend(clear_and_type(ROUTE_TO_UPLINK));
+        let mut events = clear_and_type(ROUTE_TO_UPLINK);
         events.push(press(KeyCode::F(6)));
         events.push(press(KeyCode::Char(' '))); // pause
         events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
@@ -2813,8 +2816,7 @@ mod tests {
 
     #[test]
     fn review_run_hazard_entry_shows_action_and_hazard_cost_evidence() {
-        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
-        events.extend(clear_and_type(ROUTE_TO_UPLINK));
+        let mut events = clear_and_type(ROUTE_TO_UPLINK);
         events.push(press(KeyCode::F(6)));
         events.push(press(KeyCode::Char(' '))); // pause
         events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
@@ -3019,8 +3021,7 @@ mod tests {
 
     #[test]
     fn review_run_timeline_navigation_reaches_every_boundary_via_every_key() {
-        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
-        events.extend(clear_and_type(ROUTE_TO_UPLINK));
+        let mut events = clear_and_type(ROUTE_TO_UPLINK);
         events.push(press(KeyCode::F(6)));
         events.push(press(KeyCode::Char(' '))); // pause
         events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
@@ -3142,8 +3143,7 @@ mod tests {
 
     #[test]
     fn review_run_source_mode_pages_and_jumps_through_the_full_deployed_source() {
-        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
-        events.extend(clear_and_paste(&long_route_to_uplink()));
+        let mut events = clear_and_paste(&long_route_to_uplink());
         events.push(press(KeyCode::F(6)));
         events.push(press(KeyCode::Char(' '))); // pause
         events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
@@ -3294,8 +3294,7 @@ mod tests {
         // Review Run TIMELINE and SOURCE: build one deployed run long/long-
         // running enough to page meaningfully at both geometries, then
         // compare each surface's page-key landing spot at each geometry.
-        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
-        events.extend(clear_and_paste(&long_route_to_uplink()));
+        let mut events = clear_and_paste(&long_route_to_uplink());
         events.push(press(KeyCode::F(6)));
         events.push(press(KeyCode::Char(' '))); // pause
         events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
@@ -3367,8 +3366,7 @@ mod tests {
     /// scoped to the focused Run Inspector — must be inert.
     #[test]
     fn review_run_f8_to_satellite_makes_navigation_and_tab_inert() {
-        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
-        events.extend(clear_and_type(ROUTE_TO_UPLINK));
+        let mut events = clear_and_type(ROUTE_TO_UPLINK);
         events.push(press(KeyCode::F(6)));
         events.push(press(KeyCode::Char(' '))); // pause
         events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
@@ -3494,8 +3492,7 @@ mod tests {
 
     #[test]
     fn review_run_source_mode_is_unaffected_by_a_later_working_controller_edit() {
-        let mut deploy_events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
-        deploy_events.extend(clear_and_type(ROUTE_TO_UPLINK));
+        let mut deploy_events = clear_and_type(ROUTE_TO_UPLINK);
         deploy_events.push(press(KeyCode::F(6)));
         deploy_events.push(press(KeyCode::Char(' '))); // pause
         deploy_events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
@@ -3522,8 +3519,7 @@ mod tests {
 
     #[test]
     fn review_run_returning_to_controller_preserves_the_working_source_and_cursor() {
-        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
-        events.extend(clear_and_type(ROUTE_TO_UPLINK));
+        let mut events = clear_and_type(ROUTE_TO_UPLINK);
         events.push(press(KeyCode::F(6)));
         events.push(press(KeyCode::Char(' '))); // pause
         events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
@@ -3554,8 +3550,7 @@ mod tests {
 
     #[test]
     fn review_run_redeploying_resets_the_run_inspector_to_timeline_via_the_full_pipeline() {
-        let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
-        events.extend(clear_and_paste(&long_route_to_uplink()));
+        let mut events = clear_and_paste(&long_route_to_uplink());
         events.push(press(KeyCode::F(6)));
         events.push(press(KeyCode::Char(' '))); // pause
         events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks

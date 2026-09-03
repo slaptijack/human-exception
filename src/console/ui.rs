@@ -2804,12 +2804,18 @@ mod tests {
     }
 
     #[test]
-    fn connected_signals_view_shows_every_authored_signal() {
+    fn connected_signals_view_shows_every_non_withdrawn_authored_signal() {
         let mut state = AppState::new();
         state.set_connected(true);
         let terminal = render(120, 40, &state);
 
         for signal in authored_signals() {
+            if signal.is_actionable() {
+                // The resolved First Contact opportunity is withdrawn once
+                // connected, not shown as a still-actionable entry (see
+                // `connected_signals_withdraw_the_resolved_first_contact_entry`).
+                continue;
+            }
             assert!(buffer_contains(&terminal, signal.source));
         }
     }
@@ -3672,6 +3678,24 @@ mod tests {
             "once complete, the console returns to connected SIGNALS instead"
         );
         assert!(buffer_contains(&terminal, "SIGNALS"));
+    }
+
+    #[test]
+    fn connected_signals_withdraw_the_resolved_first_contact_entry() {
+        let mut state = connecting_state();
+        while state.advance_network_bootstrap() {}
+        assert!(!state.network_bootstrap_pending());
+
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+
+        assert!(
+            !buffer_contains(&terminal, "Fabricator node 31B"),
+            "First Contact must not reappear in connected SIGNALS as though undiscovered"
+        );
+        assert!(
+            buffer_contains(&terminal, "rook@pacific"),
+            "connected SIGNALS should carry genuine operator-network traffic"
+        );
     }
 
     #[test]

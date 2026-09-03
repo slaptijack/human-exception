@@ -121,13 +121,27 @@ pub fn authored_signals() -> &'static [Signal] {
 /// connectivity (`docs/TUI_DESIGN.md`, "Bootstrap and network connectivity").
 /// Disconnected, only [`Signal::local_available`] entries are legitimate,
 /// since nothing framed as live operator/cell traffic can exist without a
-/// network connection. Connected, the full authored stream is shown; this
-/// issue (#164) does not change the connected feed's content beyond what it
-/// shows today (see #168 for withdrawing completed opportunities from it).
+/// network connection. Connected, the full authored stream is shown *except*
+/// any signal that already offered an opportunity ([`Signal::is_actionable`]):
+/// re-offering a resolved opportunity as though it were still undiscovered
+/// would be dishonest (`docs/TUI_DESIGN.md`, "1. Signals", "SIGNALS
+/// (connected)"). In this playable slice there is exactly one opportunity,
+/// First Contact, and connectivity is established exactly once, by
+/// completing it — so `connected == true` already implies that signal is
+/// resolved. This is a deliberate simplification tied to there being only
+/// one opportunity, not a general completed-opportunities tracker; a future
+/// second opportunity will need this filter to distinguish resolved from
+/// still-open opportunities instead of keying off `connected` alone.
 pub fn visible_signals(connected: bool) -> Vec<&'static Signal> {
     authored_signals()
         .iter()
-        .filter(|signal| connected || signal.local_available)
+        .filter(|signal| {
+            if connected {
+                !signal.is_actionable()
+            } else {
+                signal.local_available
+            }
+        })
         .collect()
 }
 
@@ -247,8 +261,13 @@ mod tests {
     }
 
     #[test]
-    fn connected_signals_include_every_authored_entry() {
-        assert_eq!(visible_signals(true).len(), authored_signals().len());
+    fn connected_signals_exclude_the_resolved_first_contact_opportunity() {
+        let connected = visible_signals(true);
+        assert_eq!(connected.len(), authored_signals().len() - 1);
+        assert!(
+            connected.iter().all(|signal| !signal.is_actionable()),
+            "First Contact must not be offered again as an undiscovered opportunity"
+        );
     }
 
     #[test]
