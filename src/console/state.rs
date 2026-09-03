@@ -1597,7 +1597,7 @@ impl AppState {
     fn activate(&mut self) {
         match self.current_view {
             View::Signals => {
-                let selected = visible_signals(self.connected)
+                let selected = visible_signals(self.presentation_connected())
                     .get(self.selected_signal)
                     .copied();
                 if selected.is_some_and(|signal| signal.is_actionable()) {
@@ -1854,14 +1854,14 @@ mod tests {
 
     #[test]
     fn connected_signal_selection_clamps_against_the_full_authored_list() {
-        use super::super::intel::authored_signals;
-
         let mut state = AppState::new();
         state.set_connected(true);
-        let last = authored_signals().len() - 1;
+        let last = visible_signals(true).len() - 1;
         assert!(
             last > visible_signals(false).len() - 1,
-            "the connected list must be a strict superset of the disconnected one"
+            "the connected list must show more entries than the disconnected one, even \
+             though it swaps out the withdrawn First Contact entry rather than strictly \
+             extending it"
         );
 
         state.apply(Msg::SelectLastSignal);
