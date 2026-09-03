@@ -13,8 +13,9 @@ use super::state::{Msg, PaneId, View};
 /// Maps a key event to a player intent, given the view currently showing
 /// (several keys are context-sensitive: `F1`/`Esc` need to know whether
 /// Help is open, `Esc`/arrows/`Enter` behave differently in Signals, Target,
-/// and Help), whether any confirmation dialog is currently open, whether
-/// the first-launch bootstrap introduction is currently showing, which pane
+/// and Help), whether Network Bootstrap is currently owning the interface,
+/// whether any confirmation dialog is currently open, whether the
+/// first-launch bootstrap introduction is currently showing, which pane
 /// is currently focused — pane-local input (Signals selection, Controller
 /// editing, After Action scrolling) is only routed to the pane that owns
 /// it, regardless of what layout width currently has it on screen — and
@@ -28,6 +29,7 @@ use super::state::{Msg, PaneId, View};
 pub fn map(
     key: KeyEvent,
     current_view: View,
+    network_bootstrap_pending: bool,
     bootstrap_intro_visible: bool,
     reset_confirmation_pending: bool,
     quit_confirmation_pending: bool,
@@ -42,6 +44,18 @@ pub fn map(
     }
 
     let unmodified = key.modifiers.is_empty();
+
+    // Network Bootstrap advances entirely on its own timer
+    // (`AppState::advance_network_bootstrap`, driven by `event_loop`) and
+    // has no player-facing dismissal at all — `docs/TUI_DESIGN.md`'s
+    // "Network Bootstrap" requires that "ordinary gameplay/navigation/
+    // editing input is suppressed while it owns the interface; the only
+    // input honored is the existing quit-safety behavior," already handled
+    // by the always-global `Ctrl+Q` check above. So every other key is
+    // simply swallowed, with no dismissal arm at all.
+    if network_bootstrap_pending {
+        return None;
+    }
 
     // The bootstrap introduction is a must-acknowledge gate shown before
     // the Player has interacted with the console at all: every key but its
@@ -277,6 +291,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             view.default_pane(),
             view != View::Help,
         )
@@ -432,6 +447,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 reference_focused,
                 true
             ),
@@ -445,6 +461,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 reference_focused,
                 true
             ),
@@ -454,6 +471,7 @@ mod tests {
             map(
                 key(KeyCode::Left),
                 View::Controller,
+                false,
                 false,
                 false,
                 false,
@@ -476,6 +494,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 reference_focused,
                 true
             ),
@@ -486,6 +505,7 @@ mod tests {
             map(
                 ctrl_enter,
                 View::Controller,
+                false,
                 false,
                 false,
                 false,
@@ -528,6 +548,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 View::Operation.default_pane(),
                 false
             ),
@@ -541,6 +562,7 @@ mod tests {
             map(
                 key(KeyCode::F(8)),
                 View::AfterAction,
+                false,
                 false,
                 false,
                 false,
@@ -694,6 +716,7 @@ mod tests {
                     false,
                     false,
                     false,
+                    false,
                     reference_focused,
                     true
                 ),
@@ -758,6 +781,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 selected_signal_focused,
                 true
             ),
@@ -771,6 +795,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 selected_signal_focused,
                 true
             ),
@@ -780,6 +805,7 @@ mod tests {
             map(
                 key(KeyCode::Enter),
                 View::Signals,
+                false,
                 false,
                 false,
                 false,
@@ -803,6 +829,7 @@ mod tests {
                     false,
                     false,
                     false,
+                    false,
                     selected_signal_focused,
                     true
                 ),
@@ -821,6 +848,7 @@ mod tests {
             map(
                 key(KeyCode::Enter),
                 View::Target,
+                false,
                 false,
                 false,
                 false,
@@ -856,6 +884,7 @@ mod tests {
                 View::Controller,
                 false,
                 false,
+                false,
                 true,
                 false,
                 PaneId::ControllerSource,
@@ -867,6 +896,7 @@ mod tests {
             map(
                 key(KeyCode::Char('y')),
                 View::Controller,
+                false,
                 false,
                 false,
                 true,
@@ -882,6 +912,7 @@ mod tests {
                 View::Controller,
                 false,
                 false,
+                false,
                 true,
                 false,
                 PaneId::ControllerSource,
@@ -893,6 +924,7 @@ mod tests {
             map(
                 key(KeyCode::Char('n')),
                 View::Controller,
+                false,
                 false,
                 false,
                 true,
@@ -908,6 +940,7 @@ mod tests {
                 View::Controller,
                 false,
                 false,
+                false,
                 true,
                 false,
                 PaneId::ControllerSource,
@@ -919,11 +952,59 @@ mod tests {
     }
 
     #[test]
+    fn network_bootstrap_pending_swallows_every_key_including_enter() {
+        for code in [
+            KeyCode::Enter,
+            KeyCode::Char('y'),
+            KeyCode::Char('n'),
+            KeyCode::Esc,
+            KeyCode::F(2),
+            KeyCode::Char('x'),
+        ] {
+            assert_eq!(
+                map(
+                    key(code),
+                    View::Signals,
+                    true,
+                    false,
+                    false,
+                    false,
+                    false,
+                    PaneId::SignalsList,
+                    true
+                ),
+                None,
+                "Network Bootstrap has no player-facing dismissal — every \
+                 key but the always-global Ctrl+Q above must be swallowed"
+            );
+        }
+    }
+
+    #[test]
+    fn ctrl_q_still_requests_quit_while_network_bootstrap_is_pending() {
+        assert_eq!(
+            map(
+                key_with_modifiers(KeyCode::Char('q'), KeyModifiers::CONTROL),
+                View::Signals,
+                true,
+                false,
+                false,
+                false,
+                false,
+                PaneId::SignalsList,
+                true
+            ),
+            Some(Msg::RequestQuit)
+        );
+    }
+
+    #[test]
     fn bootstrap_intro_visible_only_accepts_unmodified_enter() {
         assert_eq!(
             map(
                 key(KeyCode::Enter),
                 View::Signals,
+                false,
                 true,
                 false,
                 false,
@@ -944,6 +1025,7 @@ mod tests {
                 map(
                     key(code),
                     View::Signals,
+                    false,
                     true,
                     false,
                     false,
@@ -963,6 +1045,7 @@ mod tests {
             map(
                 key_with_modifiers(KeyCode::Enter, KeyModifiers::CONTROL),
                 View::Signals,
+                false,
                 true,
                 false,
                 false,
@@ -980,6 +1063,7 @@ mod tests {
             map(
                 key_with_modifiers(KeyCode::Char('q'), KeyModifiers::CONTROL),
                 View::Signals,
+                false,
                 true,
                 false,
                 false,
@@ -998,6 +1082,7 @@ mod tests {
                 key(KeyCode::Enter),
                 View::Controller,
                 false,
+                false,
                 true,
                 false,
                 false,
@@ -1011,6 +1096,7 @@ mod tests {
                 key(KeyCode::Esc),
                 View::Controller,
                 false,
+                false,
                 true,
                 false,
                 false,
@@ -1023,6 +1109,7 @@ mod tests {
             map(
                 key(KeyCode::Char('x')),
                 View::Controller,
+                false,
                 false,
                 true,
                 false,
@@ -1044,6 +1131,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 true,
                 PaneId::ControllerSource,
                 true
@@ -1054,6 +1142,7 @@ mod tests {
             map(
                 key(KeyCode::Char('y')),
                 View::Operation,
+                false,
                 false,
                 false,
                 false,
@@ -1070,6 +1159,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 true,
                 PaneId::ControllerSource,
                 true
@@ -1083,6 +1173,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 true,
                 PaneId::ControllerSource,
                 true
@@ -1093,6 +1184,7 @@ mod tests {
             map(
                 key(KeyCode::Char(' ')),
                 View::Operation,
+                false,
                 false,
                 false,
                 false,
@@ -1120,6 +1212,7 @@ mod tests {
                 View::Controller,
                 false,
                 false,
+                false,
                 true,
                 false,
                 PaneId::ControllerSource,
@@ -1131,6 +1224,7 @@ mod tests {
             map(
                 ctrl_y,
                 View::Controller,
+                false,
                 false,
                 false,
                 true,
@@ -1146,6 +1240,7 @@ mod tests {
                 View::Controller,
                 false,
                 false,
+                false,
                 true,
                 false,
                 PaneId::ControllerSource,
@@ -1157,6 +1252,7 @@ mod tests {
             map(
                 ctrl_n,
                 View::Controller,
+                false,
                 false,
                 false,
                 true,
@@ -1173,6 +1269,7 @@ mod tests {
                 ctrl_enter,
                 View::Controller,
                 false,
+                false,
                 true,
                 false,
                 false,
@@ -1185,6 +1282,7 @@ mod tests {
             map(
                 ctrl_y,
                 View::Controller,
+                false,
                 false,
                 true,
                 false,
@@ -1199,6 +1297,7 @@ mod tests {
                 ctrl_esc,
                 View::Controller,
                 false,
+                false,
                 true,
                 false,
                 false,
@@ -1211,6 +1310,7 @@ mod tests {
             map(
                 ctrl_n,
                 View::Controller,
+                false,
                 false,
                 true,
                 false,
@@ -1237,6 +1337,7 @@ mod tests {
                     View::Controller,
                     false,
                     false,
+                    false,
                     true,
                     false,
                     PaneId::ControllerSource,
@@ -1249,6 +1350,7 @@ mod tests {
                 map(
                     y,
                     View::Controller,
+                    false,
                     false,
                     true,
                     false,
@@ -1269,6 +1371,7 @@ mod tests {
                 key(KeyCode::Enter),
                 View::Controller,
                 false,
+                false,
                 true,
                 true,
                 false,
@@ -1287,6 +1390,7 @@ mod tests {
                 quit,
                 View::Controller,
                 false,
+                false,
                 true,
                 false,
                 false,
@@ -1304,6 +1408,7 @@ mod tests {
             map(
                 quit,
                 View::Operation,
+                false,
                 false,
                 false,
                 false,
@@ -1399,6 +1504,7 @@ mod tests {
                     false,
                     false,
                     false,
+                    false,
                     PaneId::OperationTelemetry,
                     true
                 )
@@ -1409,6 +1515,7 @@ mod tests {
                 map(
                     key(code),
                     View::Operation,
+                    false,
                     false,
                     false,
                     false,
@@ -1428,6 +1535,7 @@ mod tests {
             map(
                 key(code),
                 View::Operation,
+                false,
                 false,
                 false,
                 false,
@@ -1495,6 +1603,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 PaneId::OperationTelemetry,
                 true
             ),
@@ -1504,6 +1613,7 @@ mod tests {
             map(
                 key(KeyCode::Tab),
                 View::Operation,
+                false,
                 false,
                 false,
                 false,
@@ -1529,6 +1639,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 PaneId::ControllerSource,
                 true
             ),
@@ -1546,6 +1657,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 PaneId::Report,
                 true
             ),
@@ -1555,6 +1667,7 @@ mod tests {
             map(
                 key(KeyCode::Down),
                 View::AfterAction,
+                false,
                 false,
                 false,
                 false,
@@ -1572,6 +1685,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 PaneId::FinalFrame,
                 true
             ),
@@ -1581,6 +1695,7 @@ mod tests {
             map(
                 key(KeyCode::Down),
                 View::AfterAction,
+                false,
                 false,
                 false,
                 false,
@@ -1644,6 +1759,7 @@ mod tests {
                 map(
                     key(code),
                     View::AfterAction,
+                    false,
                     false,
                     false,
                     false,

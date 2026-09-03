@@ -45,6 +45,20 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
         return;
     }
 
+    // Checked after the geometry warning, and before the bootstrap intro —
+    // like that panel (issue #173), Network Bootstrap (issue #167) only
+    // needs to work at the supported minimum geometry and larger, so it
+    // doesn't need to preempt the geometry check the way quit-safety must.
+    // The two can never actually be showing at once (the intro only shows
+    // to a disconnected Player, and this flag only exists on a Player who
+    // just connected), but this is still checked first since Network
+    // Bootstrap is mid-transition, blocking presentation, not a gate the
+    // Player consciously acknowledges.
+    if state.network_bootstrap_pending() {
+        draw_network_bootstrap(frame, area, state);
+        return;
+    }
+
     // Checked after the geometry warning — unlike the quit confirmation
     // above, this first-launch panel (issue #173) only needs to work at
     // the supported minimum geometry and larger, so it doesn't need to
@@ -195,6 +209,48 @@ fn draw_bootstrap_intro(frame: &mut Frame, area: Rect) {
             Style::default().add_modifier(Modifier::BOLD),
         )),
     ];
+    let block = Block::default().borders(Borders::ALL).title(TITLE);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(block),
+        area,
+    );
+}
+
+/// The one-time Network Bootstrap transition (issue #167) that plays
+/// immediately after First Contact's connecting success, in place of the
+/// automatic landing on After Action (`docs/TUI_DESIGN.md`, "Network
+/// Bootstrap"). Full-frame, like [`draw_bootstrap_intro`] above: the
+/// console itself visibly coming online over the newly acquired uplink,
+/// not a conventional "feature unlocked" screen. Advances entirely on its
+/// own timer (`AppState::advance_network_bootstrap`) — there is no key the
+/// Player presses to move it along, so unlike the other full-frame panels
+/// here it shows no input hint.
+fn draw_network_bootstrap(frame: &mut Frame, area: Rect, state: &AppState) {
+    let shown = state.network_bootstrap_steps_shown();
+    let (revealed, total) = state.network_bootstrap_progress();
+
+    let mut lines = vec![
+        Line::from("network bootstrap"),
+        Line::from(""),
+        Line::from("package: resistance-console/uplink (signed: slaptijack@)"),
+        Line::from(""),
+    ];
+    for step in shown {
+        lines.push(Line::from(format!("[ OK ] {step}")));
+    }
+    lines.push(Line::from(""));
+
+    // A non-color-dependent bar (`docs/TUI_DESIGN.md`, "Target terminal":
+    // "no information may depend on color alone") alongside the numeric
+    // fraction, so the transition's progress reads even on a monochrome
+    // terminal. `total` is [`NETWORK_BOOTSTRAP_STEPS`]'s fixed, nonzero
+    // length, never 0.
+    let filled = revealed * 20 / total;
+    let bar: String = "#".repeat(filled) + &"-".repeat(20 - filled);
+    lines.push(Line::from(format!("[{bar}] {revealed}/{total}")));
+
     let block = Block::default().borders(Borders::ALL).title(TITLE);
     frame.render_widget(
         Paragraph::new(lines)
@@ -3421,6 +3477,62 @@ mod tests {
     }
 
     #[test]
+    fn network_bootstrap_renders_steps_and_progress_at_the_minimum_geometry() {
+        let mut state = connecting_state();
+        assert!(state.network_bootstrap_pending());
+        state.advance_network_bootstrap();
+        state.advance_network_bootstrap();
+        let (revealed, total) = state.network_bootstrap_progress();
+
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+
+        assert!(buffer_contains(&terminal, "network bootstrap"));
+        assert!(buffer_contains(&terminal, "[ OK ] uplink established"));
+        assert!(buffer_contains(&terminal, "[ OK ] peer network reachable"));
+        assert!(buffer_contains(&terminal, &format!("{revealed}/{total}")));
+    }
+
+    #[test]
+    fn network_bootstrap_renders_at_a_larger_supported_geometry_too() {
+        let mut state = connecting_state();
+        state.advance_network_bootstrap();
+
+        let terminal = render(150, 50, &state);
+
+        assert!(buffer_contains(&terminal, "network bootstrap"));
+        assert!(buffer_contains(&terminal, "[ OK ] uplink established"));
+    }
+
+    #[test]
+    fn network_bootstrap_hides_the_normal_console_underneath() {
+        let mut state = connecting_state();
+        state.advance_network_bootstrap();
+
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+
+        assert!(!buffer_contains(&terminal, "SIGNALS"));
+    }
+
+    #[test]
+    fn network_bootstrap_is_not_shown_once_the_transition_completes() {
+        use super::super::state::NETWORK_BOOTSTRAP_STEPS;
+
+        let mut state = connecting_state();
+        for _ in 0..NETWORK_BOOTSTRAP_STEPS.len() {
+            state.advance_network_bootstrap();
+        }
+        assert!(!state.network_bootstrap_pending());
+
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+
+        assert!(
+            !buffer_contains(&terminal, "network bootstrap"),
+            "once complete, the console returns to connected SIGNALS instead"
+        );
+        assert!(buffer_contains(&terminal, "SIGNALS"));
+    }
+
+    #[test]
     fn quit_confirmation_is_visible_from_every_view_not_only_controller() {
         use super::super::state::Msg;
         use super::super::state::View;
@@ -3605,6 +3717,7 @@ mod tests {
             key,
             state.current_view(),
             false,
+            false,
             state.reset_confirmation_pending(),
             state.quit_confirmation_pending(),
             state.redeploy_confirmation_pending(),
@@ -3626,6 +3739,7 @@ mod tests {
         let msg = event::map(
             key,
             state.current_view(),
+            false,
             false,
             state.reset_confirmation_pending(),
             state.quit_confirmation_pending(),
@@ -4776,20 +4890,19 @@ end
         end
     "#;
 
-    /// Types [`ROUTE_TO_UPLINK`] into a working, undeployed state, deploys
-    /// it, and steps every tick to a deterministic successful conclusion —
-    /// the UI-level analog of `console::state`'s own success fixture, built
+    /// Types `source` into a working, undeployed state, deploys it, and
+    /// steps every tick to a deterministic successful conclusion — the
+    /// UI-level analog of `console::state`'s own success fixture, built
     /// through the same `EditController`/`RequestDeploy` events the other
     /// `ui.rs` tests already use rather than reaching into private fields.
-    fn succeeded_state() -> AppState {
+    fn deploy_and_finish(mut state: AppState, source: &str) -> AppState {
         use super::super::editor::EditOp;
         use super::super::state::Msg;
 
-        let mut state = working_state();
         for _ in 0..500 {
             state.apply(Msg::EditController(EditOp::Backspace));
         }
-        state.apply(Msg::PasteController(ROUTE_TO_UPLINK.to_string()));
+        state.apply(Msg::PasteController(source.to_string()));
         state.apply(Msg::RequestDeploy);
 
         for _ in 0..20 {
@@ -4802,6 +4915,29 @@ end
             state.operation().unwrap().finished,
             "should have reached the uplink well within 20 ticks"
         );
+        state
+    }
+
+    /// First Contact's connecting run: a fresh, disconnected [`working_state`]
+    /// deploys [`ROUTE_TO_UPLINK`] and succeeds for the first time, so it
+    /// lands on Signals with Network Bootstrap pending rather than After
+    /// Action (`docs/TUI_DESIGN.md`, "Network Bootstrap"). Issue #167's own
+    /// tests use this directly to exercise the transition; every other
+    /// fixture below is [`succeeded_state`] or [`long_source_succeeded_state`],
+    /// which drain it first.
+    fn connecting_state() -> AppState {
+        let state = deploy_and_finish(working_state(), ROUTE_TO_UPLINK);
+        assert!(state.network_bootstrap_pending());
+        state
+    }
+
+    /// [`connecting_state`], with Network Bootstrap driven to completion —
+    /// the fixture nearly every non-Network-Bootstrap test below wants:
+    /// connectivity established, transition consumed, landed back on
+    /// connected Signals, exactly as if the Player had waited it out.
+    fn succeeded_state() -> AppState {
+        let mut state = connecting_state();
+        while state.advance_network_bootstrap() {}
         state
     }
 
@@ -4820,32 +4956,14 @@ end
     /// deployed source long enough to exercise SOURCE mode's paging and
     /// end-of-source navigation.
     fn long_source_succeeded_state() -> AppState {
-        use super::super::editor::EditOp;
-        use super::super::state::Msg;
-
         let mut padded_source = String::new();
         for line in 0..LONG_SOURCE_PADDING_LINES {
             padded_source.push_str(&format!("-- padding line {line:03}\n"));
         }
         padded_source.push_str(ROUTE_TO_UPLINK);
 
-        let mut state = working_state();
-        for _ in 0..500 {
-            state.apply(Msg::EditController(EditOp::Backspace));
-        }
-        state.apply(Msg::PasteController(padded_source));
-        state.apply(Msg::RequestDeploy);
-
-        for _ in 0..20 {
-            if state.operation().is_some_and(|op| op.finished) {
-                break;
-            }
-            state.advance_running_operation();
-        }
-        assert!(
-            state.operation().unwrap().finished,
-            "should have reached the uplink well within 20 ticks"
-        );
+        let mut state = deploy_and_finish(working_state(), &padded_source);
+        while state.advance_network_bootstrap() {}
         state
     }
 

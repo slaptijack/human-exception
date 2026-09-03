@@ -228,7 +228,11 @@ fn event_loop(
         // with a short timeout instead of blocking on `read` forever, so a
         // tick can advance on its own between key presses. Otherwise this
         // is the exact same blocking wait as before — an idle session never
-        // wakes up on a timer it doesn't need.
+        // wakes up on a timer it doesn't need. Network Bootstrap gets the
+        // same treatment on its own interval: the two flags are mutually
+        // exclusive in practice (Network Bootstrap only starts once
+        // Operation has already reached a terminal outcome), but this is
+        // written as an explicit `else if`, not relied upon implicitly.
         let was_connected = state.connected();
         let was_bootstrap_intro_visible = state.bootstrap_intro_visible();
         let redraw = if state.operation_auto_advancing() {
@@ -237,6 +241,13 @@ fn event_loop(
                 should_redraw(&mut state, event, frame_size, &mut last_transition_press)
             } else {
                 state.advance_running_operation()
+            }
+        } else if state.network_bootstrap_auto_advancing() {
+            if term_event::poll(NETWORK_BOOTSTRAP_TICK_INTERVAL)? {
+                let event = term_event::read()?;
+                should_redraw(&mut state, event, frame_size, &mut last_transition_press)
+            } else {
+                state.advance_network_bootstrap()
             }
         } else {
             let event = term_event::read()?;
@@ -341,6 +352,14 @@ fn persist_if_newly_acknowledged(
 /// result never depends on when it's called, so this has no effect on
 /// simulation outcomes, only on how quickly the player watches them unfold.
 const OPERATION_TICK_INTERVAL: Duration = Duration::from_millis(350);
+
+/// How often Network Bootstrap reveals its next step on its own
+/// (`docs/TUI_DESIGN.md`'s "Network Bootstrap": presentation "advances on
+/// an injectable tick/cadence, mirroring Operation's own boundary").
+/// Wall-clock only paces *when* the redraw happens; which step is showing
+/// is driven purely by [`AppState::advance_network_bootstrap`], so tests can
+/// drive the same cadence directly without waiting on real time.
+const NETWORK_BOOTSTRAP_TICK_INTERVAL: Duration = Duration::from_millis(450);
 
 /// The last (code, modifiers, timestamp) of an accepted-or-debounced press
 /// of one of [`is_repeat_untrustworthy`]'s keys — see
@@ -540,6 +559,7 @@ fn should_redraw(
     match event::map(
         key,
         state.current_view(),
+        state.network_bootstrap_pending(),
         state.bootstrap_intro_visible(),
         state.reset_confirmation_pending(),
         state.quit_confirmation_pending(),
@@ -877,6 +897,20 @@ mod tests {
 
     fn paste(text: &str) -> Event {
         Event::Paste(text.to_string())
+    }
+
+    /// A fresh `AppState` with operator-network connectivity pre-established,
+    /// so a scripted deployment's success is an ordinary, already-connected
+    /// run — landing on After Action as usual — rather than First Contact's
+    /// one-time connecting run, which plays Network Bootstrap instead
+    /// (`console::state`'s `network_bootstrap_pending` tests, and
+    /// `should_redraw`'s own gating via `event::map`, cover that case).
+    /// Tests below that are about Review Run/Controller/navigation behavior
+    /// unrelated to the transition itself use this to skip past it.
+    fn connected_state() -> AppState {
+        let mut state = AppState::new();
+        state.set_connected(true);
+        state
     }
 
     fn render(width: u16, height: u16, events: &[Event]) -> (AppState, Terminal<TestBackend>) {
@@ -2003,7 +2037,7 @@ mod tests {
         // the run inspector pane, since finishing the run focuses it
         events.push(press(KeyCode::Home)); // jump to the first review point
 
-        let mut state = AppState::new();
+        let mut state = connected_state();
         let mut last_transition_press: TransitionKeyDebounce = None;
         for event in &events {
             should_redraw(
@@ -2144,7 +2178,7 @@ mod tests {
         events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
         events.push(press(KeyCode::F(5))); // Review Run
 
-        let (mut state, _) = render(120, 40, &events);
+        let (mut state, _) = render_from(connected_state(), 120, 40, &events);
         assert_eq!(state.run_inspector_mode(), RunInspectorMode::Timeline);
         let mut last_transition_press: TransitionKeyDebounce = None;
 
@@ -2176,7 +2210,7 @@ mod tests {
         events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
         events.push(press(KeyCode::F(5))); // Review Run
 
-        let (mut state, _) = render(120, 40, &events);
+        let (mut state, _) = render_from(connected_state(), 120, 40, &events);
         assert_eq!(state.run_inspector_mode(), RunInspectorMode::Timeline);
         let mut last_transition_press: TransitionKeyDebounce = None;
 
@@ -2212,7 +2246,7 @@ mod tests {
         events.push(press(KeyCode::F(5))); // Review Run
         events.push(press(KeyCode::Tab)); // TIMELINE -> SOURCE
 
-        let (mut state, _) = render(120, 40, &events);
+        let (mut state, _) = render_from(connected_state(), 120, 40, &events);
         assert_eq!(state.run_inspector_mode(), state::RunInspectorMode::Source);
         let selected_before = state.review_selected();
         let mut last_transition_press: TransitionKeyDebounce = None;
@@ -2257,7 +2291,7 @@ mod tests {
         events.push(press(KeyCode::F(5))); // Review Run
         events.push(press(KeyCode::Tab)); // TIMELINE -> SOURCE
 
-        let (mut state, _) = render(120, 40, &events);
+        let (mut state, _) = render_from(connected_state(), 120, 40, &events);
         assert_eq!(state.source_scroll(), 0);
         let page = ui::review_source_visible_rows(&state, 120, 40);
         assert!(
@@ -2291,7 +2325,7 @@ mod tests {
         events.push(press(KeyCode::F(5))); // Review Run
         events.push(press(KeyCode::Tab)); // TIMELINE -> SOURCE
 
-        let (mut state, _) = render(120, 40, &events);
+        let (mut state, _) = render_from(connected_state(), 120, 40, &events);
         let mut last_transition_press: TransitionKeyDebounce = None;
 
         should_redraw(
@@ -2693,11 +2727,11 @@ mod tests {
         at_terminal.push(press(KeyCode::End));
 
         for (width, height) in [(120, 40), (150, 50)] {
-            let (state, terminal) = render(width, height, &at_initial);
+            let (state, terminal) = render_from(connected_state(), width, height, &at_initial);
             assert_eq!(state.review_selected(), Some(0));
             assert!(buffer_contains(&terminal, "INITIAL"));
 
-            let (state, terminal) = render(width, height, &at_terminal);
+            let (state, terminal) = render_from(connected_state(), width, height, &at_terminal);
             let op = state.operation().unwrap();
             let last = op.review_points.len() - 1;
             assert_eq!(state.review_selected(), Some(last));
@@ -2762,7 +2796,7 @@ mod tests {
         events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
         events.push(press(KeyCode::F(5))); // Review Run
 
-        let (state, _) = render(120, 40, &events);
+        let (state, _) = render_from(connected_state(), 120, 40, &events);
         let op = state.operation().unwrap();
         let hazard_index = op
             .review_points
@@ -2785,7 +2819,7 @@ mod tests {
         navigate.push(press(KeyCode::Home));
         navigate.extend(std::iter::repeat_n(press(KeyCode::Down), hazard_index));
 
-        let (state, terminal) = render(120, 40, &navigate);
+        let (state, terminal) = render_from(connected_state(), 120, 40, &navigate);
         assert_eq!(state.review_selected(), Some(hazard_index));
         assert!(buffer_contains(&terminal, "[HAZARD]"));
         assert!(buffer_contains(&terminal, "hazard entered — cost 5"));
@@ -2968,7 +3002,7 @@ mod tests {
         events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
         events.push(press(KeyCode::F(5))); // Review Run
 
-        let (mut state, _) = render(120, 40, &events);
+        let (mut state, _) = render_from(connected_state(), 120, 40, &events);
         let last = state.operation().unwrap().review_points.len() - 1;
         let mut last_transition_press: TransitionKeyDebounce = None;
 
@@ -3092,7 +3126,7 @@ mod tests {
         events.push(press(KeyCode::F(5))); // Review Run
         events.push(press(KeyCode::Tab)); // TIMELINE -> SOURCE
 
-        let (mut state, _) = render(120, 40, &events);
+        let (mut state, _) = render_from(connected_state(), 120, 40, &events);
         let mut last_transition_press: TransitionKeyDebounce = None;
 
         should_redraw(
@@ -3246,7 +3280,7 @@ mod tests {
         let mut timeline_landings = Vec::new();
         let mut source_landings = Vec::new();
         for (width, height) in [(120, 40), LARGER] {
-            let (mut state, _) = render(width, height, &events);
+            let (mut state, _) = render_from(connected_state(), width, height, &events);
             let last = state.operation().unwrap().review_points.len() - 1;
             let mut last_transition_press: TransitionKeyDebounce = None;
 
@@ -3316,7 +3350,7 @@ mod tests {
         events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
         events.push(press(KeyCode::F(5))); // Review Run
 
-        let (mut state, _) = render(120, 40, &events);
+        let (mut state, _) = render_from(connected_state(), 120, 40, &events);
         assert_eq!(
             state.focused_pane(View::Operation),
             PaneId::OperationTelemetry
@@ -3441,7 +3475,7 @@ mod tests {
         deploy_events.push(press(KeyCode::F(6)));
         deploy_events.push(press(KeyCode::Char(' '))); // pause
         deploy_events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
-        let (state, _) = render(120, 40, &deploy_events);
+        let (state, _) = render_from(connected_state(), 120, 40, &deploy_events);
         let deployed_before = state.operation().unwrap().deployed_source.to_string();
 
         let mut events = deploy_events.clone();
@@ -3452,7 +3486,7 @@ mod tests {
         events.push(press(KeyCode::F(5))); // Review Run
         events.push(press(KeyCode::Tab)); // TIMELINE -> SOURCE
 
-        let (state, terminal) = render(120, 40, &events);
+        let (state, terminal) = render_from(connected_state(), 120, 40, &events);
         assert!(buffer_contains(&terminal, "local route"));
         assert!(
             !buffer_contains(&terminal, "return \"wait\""),
@@ -3477,7 +3511,7 @@ mod tests {
         events.push(press(KeyCode::Left));
         events.push(press(KeyCode::Left));
 
-        let (state, _) = render(120, 40, &events);
+        let (state, _) = render_from(connected_state(), 120, 40, &events);
         let expected_source = state.controller_source().unwrap();
         let expected_cursor = state.controller().unwrap().cursor_line_col();
 
@@ -3485,7 +3519,7 @@ mod tests {
         round_trip.push(press(KeyCode::F(5))); // Review Run
         round_trip.push(press(KeyCode::F(4))); // back to Controller
 
-        let (state, _) = render(120, 40, &round_trip);
+        let (state, _) = render_from(connected_state(), 120, 40, &round_trip);
         assert_eq!(state.current_view(), View::Controller);
         assert_eq!(state.controller_source(), Some(expected_source));
         assert_eq!(
@@ -3511,7 +3545,7 @@ mod tests {
         events.push(press(KeyCode::Tab)); // TIMELINE -> SOURCE
         events.push(press(KeyCode::Down)); // nonzero source_scroll
 
-        let (state, _) = render(120, 40, &events);
+        let (state, _) = render_from(connected_state(), 120, 40, &events);
         assert_eq!(
             state.review_selected(),
             Some(1),
@@ -3532,7 +3566,7 @@ mod tests {
         ));
         redeploy.push(press(KeyCode::F(6))); // redeploy
 
-        let (state, _) = render(120, 40, &redeploy);
+        let (state, _) = render_from(connected_state(), 120, 40, &redeploy);
         assert_eq!(state.current_view(), View::Operation);
         assert_eq!(
             state.review_selected(),
