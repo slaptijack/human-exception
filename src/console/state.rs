@@ -594,6 +594,15 @@ pub struct AppState {
     /// in [`AppState::step_operation`]'s terminal branch, and never
     /// reverted.
     connected: bool,
+    /// Whether First Contact's connecting success is currently awaiting its
+    /// one-time Network Bootstrap presentation (`docs/TUI_DESIGN.md`,
+    /// "Network Bootstrap"). Set exactly once, alongside `connected`, in
+    /// [`AppState::step_operation`]'s terminal branch, the moment
+    /// connectivity becomes authoritative — never seeded at startup, never
+    /// persisted, and never set again afterward. Rendering and clearing
+    /// this flag once its presentation finishes are later concerns; this
+    /// field only marks that the transition is owed.
+    network_bootstrap_pending: bool,
     /// Whether the first-launch bootstrap introduction from `slaptijack@`
     /// (issue #173) is currently showing over the rest of the console.
     /// Seeded once before the session's first draw from durably persisted
@@ -626,6 +635,7 @@ impl Default for AppState {
             source_scroll: 0,
             should_quit: false,
             connected: false,
+            network_bootstrap_pending: false,
             bootstrap_intro_visible: false,
         }
     }
@@ -649,6 +659,17 @@ impl AppState {
     /// `console::bootstrap_state`. Never used to un-set connectivity.
     pub(crate) fn set_connected(&mut self, connected: bool) {
         self.connected = connected;
+    }
+
+    /// Whether First Contact's connecting success is currently awaiting its
+    /// one-time Network Bootstrap presentation. See the field doc comment
+    /// for the full contract.
+    ///
+    /// Not yet read by any rendering code — that's a later issue's
+    /// presentation — but exercised directly by this module's tests.
+    #[allow(dead_code)]
+    pub fn network_bootstrap_pending(&self) -> bool {
+        self.network_bootstrap_pending
     }
 
     /// Whether the first-launch bootstrap introduction is currently
@@ -1407,13 +1428,14 @@ impl AppState {
             // transition presentation finishes. Once set it never reverts:
             // a later failed run mustn't undo an already-established
             // connection.
-            if !self.connected
+            let just_connected = !self.connected
                 && matches!(
                     op.records.last().map(|record| record.outcome),
                     Some(crate::simulation::TickOutcome::Succeeded)
-                )
-            {
+                );
+            if just_connected {
                 self.connected = true;
+                self.network_bootstrap_pending = true;
             }
             // The run's chronology is now frozen, so its terminal review
             // point is already known — select it now, before the player
@@ -1423,7 +1445,17 @@ impl AppState {
                 review_points(&op.initial_snapshot, &op.records, op.error.as_ref())
                     .len()
                     .checked_sub(1);
-            self.current_view = View::AfterAction;
+            // The connecting success plays Network Bootstrap in place of
+            // the automatic landing on After Action, and lands on
+            // connected Signals rather than After Action once it's owed
+            // (`docs/TUI_DESIGN.md`, "Network Bootstrap"). After Action and
+            // Review Run remain reachable afterward exactly as before —
+            // nothing below this branches on `just_connected`.
+            self.current_view = if just_connected {
+                View::Signals
+            } else {
+                View::AfterAction
+            };
             self.scroll_offsets.insert(PaneId::Report, 0);
             self.set_focused_pane(View::AfterAction, PaneId::Report);
             self.review_selected = terminal_review_point;
@@ -3479,7 +3511,10 @@ mod tests {
             op.records.last().map(|record| record.outcome),
             Some(crate::simulation::TickOutcome::Succeeded)
         );
-        assert_eq!(state.current_view(), View::AfterAction);
+        // This is the connecting run (a fresh state starts disconnected),
+        // so it plays Network Bootstrap and lands on Signals rather than
+        // After Action — see the `network_bootstrap_pending` tests below.
+        assert_eq!(state.current_view(), View::Signals);
     }
 
     #[test]
@@ -3600,6 +3635,123 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_app_state_has_no_network_bootstrap_pending() {
+        assert!(!AppState::new().network_bootstrap_pending());
+    }
+
+    #[test]
+    fn a_successful_first_contact_run_enters_network_bootstrap_pending_and_lands_on_signals() {
+        let mut state = working_state();
+        state.controller = Some(ControllerDocument::new(ROUTE_TO_UPLINK));
+        state.apply(Msg::RequestDeploy);
+
+        for _ in 0..8 {
+            state.advance_running_operation();
+        }
+
+        assert!(state.connected());
+        assert!(state.network_bootstrap_pending());
+        assert_eq!(
+            state.current_view(),
+            View::Signals,
+            "the connecting success plays Network Bootstrap in place of the \
+             automatic landing on After Action"
+        );
+    }
+
+    #[test]
+    fn a_budget_exhausted_run_does_not_enter_network_bootstrap_pending() {
+        let mut state = working_state();
+        state.controller = Some(ControllerDocument::new(ALWAYS_WAITS));
+        state.apply(Msg::RequestDeploy);
+
+        for _ in 0..15 {
+            state.advance_running_operation();
+        }
+
+        assert!(!state.network_bootstrap_pending());
+        assert_eq!(state.current_view(), View::AfterAction);
+    }
+
+    #[test]
+    fn a_controller_error_run_does_not_enter_network_bootstrap_pending() {
+        let mut state = working_state();
+        state.controller = Some(ControllerDocument::new(ALWAYS_ERRORS));
+        state.apply(Msg::RequestDeploy);
+
+        state.advance_running_operation();
+
+        assert!(state.operation().unwrap().finished);
+        assert!(!state.network_bootstrap_pending());
+        assert_eq!(state.current_view(), View::AfterAction);
+    }
+
+    #[test]
+    fn a_deploy_time_load_failure_does_not_enter_network_bootstrap_pending() {
+        let mut state = working_state();
+        state.controller = Some(ControllerDocument::new("function on_tick("));
+
+        state.apply(Msg::RequestDeploy);
+
+        assert!(!state.connected());
+        assert!(!state.network_bootstrap_pending());
+        assert_eq!(state.current_view(), View::AfterAction);
+    }
+
+    #[test]
+    fn a_later_successful_run_after_connecting_does_not_replay_network_bootstrap() {
+        let mut state = working_state();
+        state.controller = Some(ControllerDocument::new(ROUTE_TO_UPLINK));
+        state.apply(Msg::RequestDeploy);
+        for _ in 0..8 {
+            state.advance_running_operation();
+        }
+        assert!(state.connected());
+        assert!(state.network_bootstrap_pending());
+
+        // Simulate the (later, #167) presentation having already consumed
+        // the first transition, then redeploy and succeed again.
+        state.network_bootstrap_pending = false;
+        state.controller = Some(ControllerDocument::new(ROUTE_TO_UPLINK));
+        state.apply(Msg::RequestDeploy);
+        for _ in 0..8 {
+            state.advance_running_operation();
+        }
+
+        assert!(
+            !state.network_bootstrap_pending(),
+            "a second success after connectivity is already established must not \
+             re-trigger Network Bootstrap"
+        );
+        assert_eq!(
+            state.current_view(),
+            View::AfterAction,
+            "a second success routes to After Action like any other terminal outcome"
+        );
+    }
+
+    #[test]
+    fn reviewing_the_connecting_run_preserves_its_immutable_review_data() {
+        let mut state = working_state();
+        state.controller = Some(ControllerDocument::new(ROUTE_TO_UPLINK));
+        state.apply(Msg::RequestDeploy);
+        for _ in 0..8 {
+            state.advance_running_operation();
+        }
+        assert_eq!(state.current_view(), View::Signals);
+
+        let review_selected_before = state.review_selected;
+        let records_before = state.operation.as_ref().unwrap().records.clone();
+
+        state.apply(Msg::Navigate(View::Operation));
+
+        assert_eq!(state.review_selected, review_selected_before);
+        assert_eq!(state.operation.as_ref().unwrap().records, records_before);
+        assert!(state.connected());
+        assert!(state.network_bootstrap_pending());
+    }
+
+    #[test]
     fn a_deploy_time_load_failure_reaches_a_controller_error_conclusion() {
         let mut state = working_state();
         state.controller = Some(ControllerDocument::new("function on_tick("));
@@ -3647,7 +3799,11 @@ mod tests {
 
     #[test]
     fn reviewing_a_finished_run_returns_to_operation_with_the_frozen_telemetry() {
+        // Already connected, so this run is a non-connecting success and
+        // this test stays about generic post-completion navigation rather
+        // than the Network Bootstrap routing covered separately below.
         let mut state = working_state();
+        state.set_connected(true);
         state.controller = Some(ControllerDocument::new(ROUTE_TO_UPLINK));
         state.apply(Msg::RequestDeploy);
         for _ in 0..8 {
