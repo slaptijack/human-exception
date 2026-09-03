@@ -5076,7 +5076,13 @@ end
 
     #[test]
     fn a_successful_operation_shows_the_uplink_reached_report() {
-        let state = succeeded_state();
+        // `succeeded_state` is this session's connecting First Contact
+        // success, so it lands on Signals to play Network Bootstrap
+        // (`console::state`'s `network_bootstrap_pending` tests cover that
+        // routing) — navigate to After Action explicitly, since it remains
+        // reachable and this test is about the report's content.
+        let mut state = succeeded_state();
+        state.apply(super::super::state::Msg::Navigate(View::AfterAction));
         assert_eq!(state.current_view(), View::AfterAction);
         let terminal = render(120, 40, &state);
 
@@ -5139,7 +5145,11 @@ end
 
     #[test]
     fn a_successful_operation_defaults_to_the_report_pane_at_the_minimum_geometry() {
-        let state = succeeded_state();
+        // See `a_successful_operation_shows_the_uplink_reached_report`:
+        // navigate past the connecting run's Network Bootstrap routing to
+        // reach After Action, which remains reachable.
+        let mut state = succeeded_state();
+        state.apply(super::super::state::Msg::Navigate(View::AfterAction));
         let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
 
         // At the console's supported minimum geometry, the outcome must be
@@ -5154,7 +5164,11 @@ end
     fn the_full_success_closure_reaches_the_bottom_at_the_minimum_geometry() {
         use super::super::state::Msg;
 
+        // See `a_successful_operation_shows_the_uplink_reached_report`:
+        // navigate past the connecting run's Network Bootstrap routing to
+        // reach After Action, which remains reachable.
         let mut state = succeeded_state();
+        state.apply(Msg::Navigate(View::AfterAction));
 
         // `MIN_COLUMNS` is the narrowest supported width, giving the report
         // pane's 40%-width inner area the tightest fit the full success

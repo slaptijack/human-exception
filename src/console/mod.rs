@@ -1973,7 +1973,13 @@ mod tests {
         events.push(press(KeyCode::Char(' '))); // pause
         events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
 
-        let (state, terminal) = render(120, 40, &events);
+        // Already connected, so this success is a non-connecting run and
+        // lands on After Action as usual, rather than playing Network
+        // Bootstrap (`console::state`'s `network_bootstrap_pending` tests
+        // cover the connecting case).
+        let mut state = AppState::new();
+        state.set_connected(true);
+        let (state, terminal) = render_from(state, 120, 40, &events);
 
         assert_eq!(state.current_view(), View::AfterAction);
         assert!(state.operation().unwrap().finished);
@@ -2551,7 +2557,17 @@ mod tests {
         let mut events = vec![press(KeyCode::Enter), press(KeyCode::Enter)];
         events.extend(clear_and_type(ROUTE_TO_UPLINK));
         events.push(press_ctrl(KeyCode::Char('v')));
-        let (state, _) = render(120, 40, &events);
+        // Already connected throughout, so this run is a non-connecting
+        // success and lands on After Action as usual, rather than playing
+        // Network Bootstrap (`console::state`'s `network_bootstrap_pending`
+        // tests cover the connecting case) — this test is about provenance,
+        // not connectivity routing.
+        let connected_state = || {
+            let mut state = AppState::new();
+            state.set_connected(true);
+            state
+        };
+        let (state, _) = render_from(connected_state(), 120, 40, &events);
         assert_eq!(state.validation(), &state::Validation::Valid);
 
         // Deploy, pause, and step every tick so the run finishes
@@ -2561,7 +2577,7 @@ mod tests {
         events.push(press(KeyCode::F(6)));
         events.push(press(KeyCode::Char(' '))); // pause
         events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step 8 ticks
-        let (state, _) = render(120, 40, &events);
+        let (state, _) = render_from(connected_state(), 120, 40, &events);
         assert_eq!(state.current_view(), View::AfterAction);
         assert!(state.operation().unwrap().finished);
         let deployed_before = state.operation().unwrap().deployed_source.to_string();
@@ -2575,7 +2591,7 @@ mod tests {
             "function on_tick(observation) return \"wait\" end",
         ));
         events.push(press(KeyCode::F(5)));
-        let (state, terminal) = render(120, 40, &events);
+        let (state, terminal) = render_from(connected_state(), 120, 40, &events);
         assert_eq!(state.current_view(), View::Operation);
         assert!(buffer_contains(&terminal, "DEPLOYED SOURCE"));
         assert!(
@@ -2599,7 +2615,7 @@ mod tests {
         // and provenance now updates to the newly typed source — it only
         // ever changes on an explicit new deploy, never implicitly.
         events.push(press(KeyCode::F(6)));
-        let (state, _) = render(120, 40, &events);
+        let (state, _) = render_from(connected_state(), 120, 40, &events);
         assert_eq!(state.current_view(), View::Operation);
         assert_eq!(
             state.operation().unwrap().deployed_source,
@@ -2609,11 +2625,11 @@ mod tests {
         // Quit safety still gates on the new, unfinished run after this
         // whole sequence, and cancelling leaves it running.
         events.push(press_ctrl(KeyCode::Char('q')));
-        let (state, _) = render(120, 40, &events);
+        let (state, _) = render_from(connected_state(), 120, 40, &events);
         assert!(state.quit_confirmation_pending());
 
         events.push(press(KeyCode::Esc));
-        let (state, _) = render(120, 40, &events);
+        let (state, _) = render_from(connected_state(), 120, 40, &events);
         assert!(!state.quit_confirmation_pending());
         assert_eq!(
             state.operation().unwrap().deployed_source,
