@@ -38,6 +38,15 @@ pub(crate) const NETWORK_BOOTSTRAP_STEPS: &[&str] = &[
     "network services online",
 ];
 
+/// How many extra ticks Network Bootstrap holds at its fully-revealed,
+/// 100%-progress state before the transition actually completes and the
+/// modal closes — beyond the one cadence that showing the last step itself
+/// already occupies. Issue #179 calls for the completed state to linger
+/// "briefly" so the Player can register completion before the reveal; a
+/// single cadence read as closing immediately, so this gives it more than
+/// one.
+pub(crate) const NETWORK_BOOTSTRAP_LINGER_TICKS: usize = 2;
+
 /// Whether `pane` can be scrolled at all. Only [`PaneId::Help`] and
 /// [`PaneId::Report`] have scrollable content today — every other pane must
 /// never accumulate a `scroll_offsets` entry. Kept in sync with the
@@ -677,6 +686,22 @@ impl AppState {
         self.connected
     }
 
+    /// Whether the console should currently *render* as connected — durable
+    /// connectivity (`connected`) may already be `true` the instant First
+    /// Contact succeeds, but the console must keep presenting as
+    /// pre-connectivity (`LOCAL LOG`, disconnected header, no Signals
+    /// content) for the entire Network Bootstrap window, only switching to
+    /// the connected presentation as the single final reveal beat once the
+    /// modal closes (`docs/TUI_DESIGN.md`, "Network Bootstrap"). Every
+    /// rendering call site in `ui.rs` that used to read [`connected`]
+    /// directly reads this instead, so they can't disagree about whether
+    /// connected content is visible yet.
+    ///
+    /// [`connected`]: AppState::connected
+    pub fn presentation_connected(&self) -> bool {
+        self.connected && !self.network_bootstrap_pending
+    }
+
     /// Seeds the connectivity fact from durably persisted state. Only
     /// meant to be called once, before the session's first draw — see
     /// `console::bootstrap_state`. Never used to un-set connectivity.
@@ -691,36 +716,53 @@ impl AppState {
         self.network_bootstrap_pending
     }
 
-    /// Whether Network Bootstrap should advance one step per timer wakeup,
+    /// Whether Network Bootstrap should advance one tick per timer wakeup,
     /// independent of any player key — the same "presentation paces itself,
     /// not the player" rule as [`AppState::operation_auto_advancing`], but
     /// with no way for the player to pause or leave it, per `docs/
     /// TUI_DESIGN.md`'s "ordinary gameplay/navigation/editing input is
-    /// suppressed while it owns the interface." Stays `true` for one extra
-    /// wakeup after the last step has been revealed — see
-    /// [`AppState::advance_network_bootstrap`] — so that final state is
-    /// actually shown for a cadence before the transition completes.
+    /// suppressed while it owns the interface." Stays `true` for
+    /// [`NETWORK_BOOTSTRAP_LINGER_TICKS`] extra wakeups after the last step
+    /// has been revealed — see [`AppState::advance_network_bootstrap`] — so
+    /// that final, fully-progressed state is actually shown for more than a
+    /// single cadence before the transition completes.
+    ///
+    /// `false` while [`quit_confirmation_pending`] holds, even if bootstrap
+    /// is otherwise pending: the confirmation is the one thing allowed to
+    /// cover the Network Bootstrap modal (`docs/TUI_DESIGN.md`, "Quit
+    /// safety"), and it renders full-frame, so nothing about the
+    /// transition's own progress — including its completion — should
+    /// advance somewhere the Player can't see it. Cancelling the
+    /// confirmation resumes bootstrap exactly where it left off.
+    ///
+    /// [`quit_confirmation_pending`]: AppState::quit_confirmation_pending
     pub fn network_bootstrap_auto_advancing(&self) -> bool {
-        self.network_bootstrap_pending
+        self.network_bootstrap_pending && !self.quit_confirmation_pending
     }
 
-    /// Advances Network Bootstrap by exactly one step if
+    /// Advances Network Bootstrap by exactly one tick if
     /// [`network_bootstrap_auto_advancing`] allows it right now, returning
     /// whether anything actually changed (and so a redraw is needed).
     /// Reaching the last entry in [`NETWORK_BOOTSTRAP_STEPS`] does not by
-    /// itself clear `network_bootstrap_pending` — that reveal must actually
-    /// be rendered for one cadence first (a redraw only happens after this
-    /// call returns), so completion is deferred to the *following* call,
-    /// which clears the flag without revealing anything further. Only then
-    /// does the console return to its already-routed connected `SIGNALS`
-    /// view.
+    /// itself clear `network_bootstrap_pending` — the internal tick counter
+    /// keeps counting past `NETWORK_BOOTSTRAP_STEPS.len()`, up to
+    /// [`NETWORK_BOOTSTRAP_LINGER_TICKS`] further, with
+    /// [`network_bootstrap_steps_shown`]/[`network_bootstrap_progress`]
+    /// clamping their view of it to the step list's own length so the
+    /// fully-revealed, 100%-progress state simply holds on screen across
+    /// those extra ticks. Only the tick *after* that lingering window clears
+    /// the flag, without revealing anything further — only then does the
+    /// console return to its already-routed connected `SIGNALS` view.
     ///
     /// [`network_bootstrap_auto_advancing`]: AppState::network_bootstrap_auto_advancing
+    /// [`network_bootstrap_steps_shown`]: AppState::network_bootstrap_steps_shown
+    /// [`network_bootstrap_progress`]: AppState::network_bootstrap_progress
     pub fn advance_network_bootstrap(&mut self) -> bool {
         if !self.network_bootstrap_auto_advancing() {
             return false;
         }
-        if self.network_bootstrap_step < NETWORK_BOOTSTRAP_STEPS.len() {
+        let total_ticks = NETWORK_BOOTSTRAP_STEPS.len() + NETWORK_BOOTSTRAP_LINGER_TICKS;
+        if self.network_bootstrap_step < total_ticks {
             self.network_bootstrap_step += 1;
         } else {
             self.network_bootstrap_pending = false;
@@ -730,14 +772,25 @@ impl AppState {
 
     /// The Network Bootstrap steps revealed so far, oldest first, for
     /// rendering as a running log. Empty before the first
-    /// [`AppState::advance_network_bootstrap`] call.
+    /// [`AppState::advance_network_bootstrap`] call. Clamped to
+    /// [`NETWORK_BOOTSTRAP_STEPS`]'s own length — the internal tick counter
+    /// keeps advancing during the post-completion linger window, but there's
+    /// nothing further to reveal by then.
     pub fn network_bootstrap_steps_shown(&self) -> &'static [&'static str] {
-        &NETWORK_BOOTSTRAP_STEPS[..self.network_bootstrap_step]
+        &NETWORK_BOOTSTRAP_STEPS[..self
+            .network_bootstrap_step
+            .min(NETWORK_BOOTSTRAP_STEPS.len())]
     }
 
-    /// `(revealed, total)` step counts for a progress indicator.
+    /// `(revealed, total)` step counts for a progress indicator. `revealed`
+    /// is clamped to `total` for the same reason as
+    /// [`network_bootstrap_steps_shown`](AppState::network_bootstrap_steps_shown).
     pub fn network_bootstrap_progress(&self) -> (usize, usize) {
-        (self.network_bootstrap_step, NETWORK_BOOTSTRAP_STEPS.len())
+        (
+            self.network_bootstrap_step
+                .min(NETWORK_BOOTSTRAP_STEPS.len()),
+            NETWORK_BOOTSTRAP_STEPS.len(),
+        )
     }
 
     /// Whether the first-launch bootstrap introduction is currently
@@ -3834,6 +3887,69 @@ mod tests {
     }
 
     #[test]
+    fn presentation_connected_lags_durable_connectivity_until_bootstrap_completes() {
+        let state = working_state();
+        assert!(!state.connected());
+        assert!(!state.presentation_connected());
+
+        let mut state = connected_and_pending_network_bootstrap();
+        assert!(
+            state.connected(),
+            "durable connectivity is recorded the instant success is determined"
+        );
+        assert!(
+            !state.presentation_connected(),
+            "but presentation must keep rendering as disconnected while the \
+             modal is still playing"
+        );
+
+        while state.advance_network_bootstrap() {}
+        assert!(!state.network_bootstrap_pending());
+        assert!(
+            state.presentation_connected(),
+            "presentation catches up to durable connectivity only once the \
+             transition completes"
+        );
+    }
+
+    #[test]
+    fn network_bootstrap_pauses_while_quit_confirmation_covers_it() {
+        // Quit confirmation renders full-frame over the Network Bootstrap
+        // modal, so nothing about the transition — including reaching its
+        // completed, lingering state — should advance somewhere the Player
+        // can't see it (Codex review on #180).
+        let mut state = connected_and_pending_network_bootstrap();
+        assert!(state.network_bootstrap_auto_advancing());
+
+        state.quit_confirmation_pending = true;
+        assert!(
+            !state.network_bootstrap_auto_advancing(),
+            "paused while the confirmation covers the modal"
+        );
+        assert!(
+            !state.advance_network_bootstrap(),
+            "advancing is a no-op while paused"
+        );
+        assert_eq!(
+            state.network_bootstrap_progress(),
+            (0, NETWORK_BOOTSTRAP_STEPS.len()),
+            "no progress was made while paused"
+        );
+
+        state.quit_confirmation_pending = false;
+        assert!(
+            state.network_bootstrap_auto_advancing(),
+            "resumes exactly where it left off once the confirmation is \
+             answered"
+        );
+        assert!(state.advance_network_bootstrap());
+        assert_eq!(
+            state.network_bootstrap_progress(),
+            (1, NETWORK_BOOTSTRAP_STEPS.len())
+        );
+    }
+
+    #[test]
     fn network_bootstrap_auto_advancing_only_while_pending() {
         let state = working_state();
         assert!(
@@ -3849,10 +3965,19 @@ mod tests {
         }
         assert!(
             state.network_bootstrap_auto_advancing(),
-            "every step has shown, but the transition needs one more cadence \
-             to actually complete — see advance_network_bootstrap_clears_\
-             pending_after_the_last_step_and_then_no_ops"
+            "every step has shown, but the transition needs its linger \
+             window and one more cadence to actually complete — see \
+             advance_network_bootstrap_clears_pending_after_the_last_step_\
+             and_then_no_ops"
         );
+
+        for _ in 0..NETWORK_BOOTSTRAP_LINGER_TICKS {
+            state.advance_network_bootstrap();
+            assert!(
+                state.network_bootstrap_auto_advancing(),
+                "still lingering on the completed state"
+            );
+        }
 
         state.advance_network_bootstrap();
         assert!(
@@ -3892,9 +4017,22 @@ mod tests {
         assert_eq!(
             state.network_bootstrap_steps_shown(),
             NETWORK_BOOTSTRAP_STEPS,
-            "every step is revealed by this point, and stays visible for one \
-             more cadence before the transition completes"
+            "every step is revealed by this point, and stays visible \
+             through the linger window before the transition completes"
         );
+
+        for _ in 0..NETWORK_BOOTSTRAP_LINGER_TICKS {
+            assert!(state.advance_network_bootstrap());
+            assert!(
+                state.network_bootstrap_pending(),
+                "still lingering on the completed, 100%-progress state"
+            );
+            assert_eq!(
+                state.network_bootstrap_steps_shown(),
+                NETWORK_BOOTSTRAP_STEPS,
+                "the fully-revealed step list stays as-is through lingering"
+            );
+        }
 
         assert!(
             state.advance_network_bootstrap(),
@@ -3903,8 +4041,8 @@ mod tests {
         );
         assert!(
             !state.network_bootstrap_pending(),
-            "the transition completes only after the last step has been \
-             visible for a full cadence"
+            "the transition completes only after the last step has lingered \
+             through its full window"
         );
 
         assert!(
