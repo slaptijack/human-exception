@@ -45,20 +45,6 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
         return;
     }
 
-    // Checked after the geometry warning, and before the bootstrap intro —
-    // like that panel (issue #173), Network Bootstrap (issue #167) only
-    // needs to work at the supported minimum geometry and larger, so it
-    // doesn't need to preempt the geometry check the way quit-safety must.
-    // The two can never actually be showing at once (the intro only shows
-    // to a disconnected Player, and this flag only exists on a Player who
-    // just connected), but this is still checked first since Network
-    // Bootstrap is mid-transition, blocking presentation, not a gate the
-    // Player consciously acknowledges.
-    if state.network_bootstrap_pending() {
-        draw_network_bootstrap(frame, area, state);
-        return;
-    }
-
     // Checked after the geometry warning — unlike the quit confirmation
     // above, this first-launch panel (issue #173) only needs to work at
     // the supported minimum geometry and larger, so it doesn't need to
@@ -68,7 +54,19 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
         return;
     }
 
+    // Network Bootstrap (issue #167, reframed as an in-place transition by
+    // issue #179) renders *on top of* the ordinary console rather than
+    // replacing it: the Player's still-disconnected console keeps drawing
+    // underneath (via `state.presentation_connected()`, which every
+    // rendering call site below consults instead of the raw, already-`true`
+    // `state.connected()`), then gets visibly dimmed and covered by a
+    // centered modal. This is what makes the transition read as the
+    // Player's existing Console coming online in place, rather than a
+    // full-screen interstitial.
     draw_console(frame, area, state);
+    if state.network_bootstrap_pending() {
+        draw_network_bootstrap(frame, area, state);
+    }
 }
 
 /// The header/body/footer layout `draw` renders once the quit-confirmation
@@ -178,9 +176,9 @@ fn draw_geometry_warning(frame: &mut Frame, area: Rect) {
 
 /// The first-launch bootstrap introduction from `slaptijack@` (issue
 /// #173): rendered full-frame, like [`draw_quit_confirmation`] and
-/// [`draw_geometry_warning`] above — this codebase has no floating/
-/// centered popup widget, so every one-off panel is a full-frame content
-/// replacement rather than an overlay on top of the normal layout.
+/// [`draw_geometry_warning`] above. [`draw_network_bootstrap`] is the one
+/// exception to this module's full-frame-replacement convention — see its
+/// own doc comment.
 ///
 /// Deliberately restrained per `docs/TUI_DESIGN.md`'s "Bootstrap and
 /// network connectivity": `slaptijack@` appears only through
@@ -218,16 +216,54 @@ fn draw_bootstrap_intro(frame: &mut Frame, area: Rect) {
     );
 }
 
-/// The one-time Network Bootstrap transition (issue #167) that plays
-/// immediately after First Contact's connecting success, in place of the
-/// automatic landing on After Action (`docs/TUI_DESIGN.md`, "Network
-/// Bootstrap"). Full-frame, like [`draw_bootstrap_intro`] above: the
-/// console itself visibly coming online over the newly acquired uplink,
-/// not a conventional "feature unlocked" screen. Advances entirely on its
-/// own timer (`AppState::advance_network_bootstrap`) — there is no key the
-/// Player presses to move it along, so unlike the other full-frame panels
-/// here it shows no input hint.
+/// Width/height of the Network Bootstrap modal (issue #179): tall enough
+/// for the title line, package line, a blank, all
+/// [`NETWORK_BOOTSTRAP_STEPS`], a blank, and the progress bar, plus borders.
+const NETWORK_BOOTSTRAP_MODAL_WIDTH: u16 = 66;
+const NETWORK_BOOTSTRAP_MODAL_HEIGHT: u16 = 15;
+
+/// Returns the `width`×`height` `Rect` centered within `area`, clamped so it
+/// never exceeds `area`'s own bounds (relevant only below the supported
+/// minimum geometry, which `ui::draw` already routes around before this can
+/// be reached).
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    }
+}
+
+/// The one-time Network Bootstrap transition (issue #167, reframed as an
+/// in-place Console transition by issue #179) that plays immediately after
+/// First Contact's connecting success, in place of the automatic landing on
+/// After Action (`docs/TUI_DESIGN.md`, "Network Bootstrap"). Rendered as a
+/// centered modal *over* the ordinary console, which `ui::draw` has already
+/// drawn (and dimmed) into `area` this frame — the Player's existing,
+/// still-disconnected console visibly coming online over the newly acquired
+/// uplink, not a full-screen interstitial. Advances entirely on its own
+/// timer (`AppState::advance_network_bootstrap`) — there is no key the
+/// Player presses to move it along, so unlike the other panels in this
+/// module it shows no input hint.
 fn draw_network_bootstrap(frame: &mut Frame, area: Rect, state: &AppState) {
+    // Dim everything `draw_console` already drew into `area` this frame, so
+    // the underlying console reads as visually subdued but still
+    // recognizable — merging a style onto the existing buffer contents
+    // rather than touching how any individual widget renders.
+    frame
+        .buffer_mut()
+        .set_style(area, Style::default().add_modifier(Modifier::DIM));
+
+    let modal = centered_rect(
+        NETWORK_BOOTSTRAP_MODAL_WIDTH,
+        NETWORK_BOOTSTRAP_MODAL_HEIGHT,
+        area,
+    );
+    frame.render_widget(ratatui::widgets::Clear, modal);
+
     let shown = state.network_bootstrap_steps_shown();
     let (revealed, total) = state.network_bootstrap_progress();
 
@@ -256,7 +292,7 @@ fn draw_network_bootstrap(frame: &mut Frame, area: Rect, state: &AppState) {
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .block(block),
-        area,
+        modal,
     );
 }
 
@@ -320,7 +356,7 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
         None => "none",
     };
     let working = format!("WORKING SET: {working_set}");
-    let mesh = mesh_field(state.connected());
+    let mesh = mesh_field(state.presentation_connected());
 
     // Candidates in priority order (most detail first): the working set is
     // always the last-dropped field, since it's the one status the header
@@ -332,8 +368,8 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
         View::Signals => {
             let signals = format!(
                 "{}: {:02}",
-                front_door_label(state.connected()),
-                visible_signals(state.connected()).len()
+                front_door_label(state.presentation_connected()),
+                visible_signals(state.presentation_connected()).len()
             );
             let mut candidates = Vec::new();
             // A controller's status — `starter`/`modified`/`invalid`, plus
@@ -419,7 +455,7 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
 /// operation's own status field (`docs/TUI_DESIGN.md`'s "Persistent
 /// header" shows exactly one STATUS field per view).
 fn operation_status_header_candidates(state: &AppState, working: &str) -> Vec<String> {
-    let mesh = mesh_field(state.connected());
+    let mesh = mesh_field(state.presentation_connected());
     let controller = controller_status_only(state).map(|status| format!("CONTROLLER: {status}"));
     let op_status = state
         .operation()
@@ -724,7 +760,7 @@ fn draw_after_action(frame: &mut Frame, area: Rect, state: &AppState) {
         &op,
         scroll,
         focused == PaneId::Report,
-        state.connected(),
+        state.presentation_connected(),
     );
 }
 
@@ -1467,7 +1503,7 @@ fn draw_pane_with_pinned_action(
 }
 
 fn draw_signals(frame: &mut Frame, area: Rect, state: &AppState) {
-    let signal = visible_signals(state.connected())[state.selected_signal()];
+    let signal = visible_signals(state.presentation_connected())[state.selected_signal()];
     let focused = state.focused_pane(View::Signals);
 
     let [left, right] =
@@ -1478,7 +1514,7 @@ fn draw_signals(frame: &mut Frame, area: Rect, state: &AppState) {
         frame,
         left,
         pane_title(
-            front_door_label(state.connected()),
+            front_door_label(state.presentation_connected()),
             focused == PaneId::SignalsList,
         ),
         signal_list_lines(state, visible_items),
@@ -1488,7 +1524,7 @@ fn draw_signals(frame: &mut Frame, area: Rect, state: &AppState) {
         right,
         signal,
         focused == PaneId::SelectedSignal,
-        state.connected(),
+        state.presentation_connected(),
     );
 }
 
@@ -1538,7 +1574,7 @@ const SIGNAL_ROWS_PER_ITEM: usize = 3;
 /// every signal unwindowed rather than nothing, since Signals has no
 /// separate fallback content the way Review Run does.
 fn signal_list_lines(state: &AppState, visible_items: usize) -> Vec<Line<'static>> {
-    let signals = visible_signals(state.connected());
+    let signals = visible_signals(state.presentation_connected());
     let (start, end) = if visible_items == 0 {
         (0, signals.len())
     } else {
@@ -1611,7 +1647,7 @@ fn draw_target(frame: &mut Frame, area: Rect, state: &AppState) {
         right,
         pane_title("PROVENANCE / ACCESS", focused == PaneId::Provenance),
         target_provenance_lines(&dossier),
-        if state.connected() {
+        if state.presentation_connected() {
             "Esc  back to signals"
         } else {
             "Esc  back to local log"
@@ -1780,7 +1816,7 @@ pub(crate) fn after_action_max_scroll(
         after_action_report_inner_dimensions(frame_width, frame_height);
     let pinned_action_row = u16::from(!after_action_succeeded(&op));
     let content_rows = wrapped_row_count(
-        &after_action_report_lines(&op, state.connected()),
+        &after_action_report_lines(&op, state.presentation_connected()),
         content_width,
     );
     content_rows.saturating_sub(content_height.saturating_sub(pinned_action_row) as usize) as u16
@@ -2233,7 +2269,7 @@ fn help_lines(state: &AppState) -> Vec<Line<'static>> {
         Style::default().add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from("F1 Help          toggle this overlay"));
-    lines.push(Line::from(if state.connected() {
+    lines.push(Line::from(if state.presentation_connected() {
         "F2 Signals       the intelligence stream"
     } else {
         "F2 Local Log     locally available intelligence"
@@ -2430,7 +2466,7 @@ fn view_specific_help(state: &AppState, view: View) -> Vec<Line<'static>> {
         ],
         View::Target => vec![
             Line::from("Enter  work this opportunity"),
-            Line::from(if state.connected() {
+            Line::from(if state.presentation_connected() {
                 "Esc    back to Signals"
             } else {
                 "Esc    back to Local Log"
@@ -2499,7 +2535,7 @@ fn view_specific_help(state: &AppState, view: View) -> Vec<Line<'static>> {
             Line::from(
                 "Up/Down/PageUp/PageDown/Home/End  scroll the report if it doesn't fully fit",
             ),
-            Line::from(if state.connected() {
+            Line::from(if state.presentation_connected() {
                 "F2       back to Signals"
             } else {
                 "F2       back to Local Log"
@@ -2537,7 +2573,7 @@ fn footer_hint_items(state: &AppState, show_f8: bool) -> Vec<(&'static str, &'st
     // as the header and pane title, so it never advertises network
     // functionality that isn't actually available yet (`docs/TUI_DESIGN.md`,
     // "Bootstrap and network connectivity").
-    let f2_item = if state.connected() {
+    let f2_item = if state.presentation_connected() {
         ("F2 Signals", "F2 Sig", true)
     } else {
         ("F2 Local Log", "F2 Log", true)
@@ -3504,17 +3540,66 @@ mod tests {
     }
 
     #[test]
-    fn network_bootstrap_hides_the_normal_console_underneath() {
+    fn network_bootstrap_overlays_the_still_disconnected_console_underneath() {
+        // Issue #179: the modal renders over the ordinary console rather
+        // than replacing it, and the console underneath keeps presenting as
+        // pre-connectivity for the whole window — `LOCAL LOG`, not
+        // `SIGNALS` — even though durable `connected` is already `true`.
         let mut state = connecting_state();
+        assert!(state.connected());
         state.advance_network_bootstrap();
 
         let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
 
+        assert!(buffer_contains(&terminal, "LOCAL LOG"));
         assert!(!buffer_contains(&terminal, "SIGNALS"));
+        assert!(!buffer_contains(&terminal, "MESH: DEGRADED"));
     }
 
     #[test]
-    fn network_bootstrap_shows_the_final_step_for_one_cadence_before_completing() {
+    fn network_bootstrap_is_a_centered_modal_not_a_full_frame_replacement() {
+        // The footer (and its `Ctrl+Q Quit` hint) sit outside the modal's
+        // centered bounds at both supported geometries, so their presence
+        // proves the console frame is still actually being drawn under the
+        // modal, not replaced by it.
+        let mut state = connecting_state();
+        state.advance_network_bootstrap();
+
+        let min = render(MIN_COLUMNS, MIN_ROWS, &state);
+        assert!(buffer_contains(&min, "Ctrl+Q Quit"));
+
+        let larger = render(150, 50, &state);
+        assert!(buffer_contains(&larger, "Ctrl+Q Quit"));
+    }
+
+    #[test]
+    fn network_bootstrap_visibly_dims_the_console_underneath() {
+        let mut state = connecting_state();
+        state.advance_network_bootstrap();
+
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+        let buf = terminal.backend().buffer();
+
+        // The footer's top-left border corner is well outside the centered
+        // modal at this geometry, so it's still the ordinary console frame
+        // — but visibly subdued, not full brightness.
+        let footer_corner = buf.cell((0, MIN_ROWS - 3)).expect("cell in bounds");
+        assert!(footer_corner.modifier.contains(Modifier::DIM));
+
+        // The modal's own content must not be dimmed by the same pass.
+        let modal = centered_rect(
+            NETWORK_BOOTSTRAP_MODAL_WIDTH,
+            NETWORK_BOOTSTRAP_MODAL_HEIGHT,
+            Rect::new(0, 0, MIN_COLUMNS, MIN_ROWS),
+        );
+        let modal_title_cell = buf
+            .cell((modal.x + 1, modal.y))
+            .expect("modal border cell in bounds");
+        assert!(!modal_title_cell.modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn network_bootstrap_shows_the_final_step_before_completing() {
         use super::super::state::NETWORK_BOOTSTRAP_STEPS;
 
         let mut state = connecting_state();
@@ -3539,6 +3624,39 @@ mod tests {
                 NETWORK_BOOTSTRAP_STEPS.len()
             )
         ));
+    }
+
+    #[test]
+    fn network_bootstrap_holds_the_completed_state_across_the_full_linger_window() {
+        // Issue #179: the completed, 100%-progress state must stay on
+        // screen for more than a single cadence so the Player can actually
+        // register completion, not just a single-frame flash before reveal.
+        use super::super::state::{NETWORK_BOOTSTRAP_LINGER_TICKS, NETWORK_BOOTSTRAP_STEPS};
+
+        let mut state = connecting_state();
+        for _ in 0..NETWORK_BOOTSTRAP_STEPS.len() {
+            state.advance_network_bootstrap();
+        }
+
+        for tick in 0..NETWORK_BOOTSTRAP_LINGER_TICKS {
+            state.advance_network_bootstrap();
+            assert!(
+                state.network_bootstrap_pending(),
+                "still lingering at linger tick {tick}"
+            );
+            let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+            assert!(
+                buffer_contains(
+                    &terminal,
+                    &format!(
+                        "{}/{}",
+                        NETWORK_BOOTSTRAP_STEPS.len(),
+                        NETWORK_BOOTSTRAP_STEPS.len()
+                    )
+                ),
+                "full progress stays visible through linger tick {tick}"
+            );
+        }
     }
 
     #[test]

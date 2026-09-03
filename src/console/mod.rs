@@ -376,8 +376,14 @@ const OPERATION_TICK_INTERVAL: Duration = Duration::from_millis(350);
 /// an injectable tick/cadence, mirroring Operation's own boundary").
 /// Wall-clock only paces *when* the redraw happens; which step is showing
 /// is driven purely by [`AppState::advance_network_bootstrap`], so tests can
-/// drive the same cadence directly without waiting on real time.
-const NETWORK_BOOTSTRAP_TICK_INTERVAL: Duration = Duration::from_millis(450);
+/// drive the same cadence directly without waiting on real time. 800ms ×
+/// 10 ticks (7 steps, plus `NETWORK_BOOTSTRAP_LINGER_TICKS` extra ticks
+/// holding the completed state, plus one final completing tick — see
+/// [`AppState::advance_network_bootstrap`]) lands the whole sequence at
+/// ~8s, comfortably within issue #179's targeted 5-8s range and giving the
+/// completed state itself several full seconds on screen before the modal
+/// closes.
+const NETWORK_BOOTSTRAP_TICK_INTERVAL: Duration = Duration::from_millis(800);
 
 /// The last (code, modifiers, timestamp) of an accepted-or-debounced press
 /// of one of [`is_repeat_untrustworthy`]'s keys — see
