@@ -2699,6 +2699,206 @@ mod tests {
         );
     }
 
+    fn intro_scratch_path(label: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "human-exception-mod-intro-test-{label}-{}-{n}",
+            std::process::id()
+        ))
+    }
+
+    // Issue #169: composition-level proof that the whole isolated-to-
+    // operator lifecycle — fresh launch, the `slaptijack@` bootstrap
+    // introduction, disconnected `LOCAL LOG`, an independently-chosen
+    // First Contact attempt, a failure/retry, a success that routes into
+    // Network Bootstrap instead of After Action, the modal's multi-step
+    // pacing over the still-disconnected Console underneath, the
+    // subsequent connected `SIGNALS` reveal, continued After Action/Review
+    // Run access, and a real filesystem-backed relaunch — behaves as one
+    // coherent experience rather than a set of independently-correct
+    // fragments. Every subsystem already has focused unit/render coverage
+    // of its own (this file's `bootstrap_state_*`/`*bootstrap_intro*`
+    // tests; `console::state`'s and `console::ui`'s `network_bootstrap_*`
+    // tests; `profile.rs`'s/`intro.rs`'s marker round-trip tests); this
+    // test strings them together through the real `should_redraw`/
+    // `ui::draw` pipeline and genuine marker files rather than
+    // `connected_state()`'s in-memory shortcut, since persistence across a
+    // simulated relaunch is the one thing no lower-level test proves.
+    #[test]
+    fn fresh_launch_through_first_contact_success_bootstrap_and_relaunch_is_one_coherent_lifecycle()
+    {
+        let profile_path = profile_scratch_path("lifecycle-relaunch");
+        let intro_path = intro_scratch_path("lifecycle-relaunch");
+
+        for (width, height) in [(120, 40), (150, 50)] {
+            // 1. Fresh launch, no persisted connectivity: the bootstrap
+            // intro shows before anything else is reachable.
+            let fresh = bootstrap_state(Some(&profile_path), Some(&intro_path));
+            let (state, terminal) = render_from(fresh, width, height, &[]);
+            assert!(state.bootstrap_intro_visible());
+            assert!(buffer_contains(&terminal, "slaptijack@"));
+            assert!(!buffer_contains(&terminal, "LOCAL LOG"));
+            assert!(!buffer_contains(&terminal, "SIGNALS"));
+
+            // 2. Acknowledging it reveals the disconnected front door, with
+            // no ordinary operator-network Signals content leaking in.
+            let (state, terminal) = render_from(
+                bootstrap_state(Some(&profile_path), Some(&intro_path)),
+                width,
+                height,
+                &[press(KeyCode::Enter)],
+            );
+            assert!(!state.bootstrap_intro_visible());
+            assert!(!state.connected());
+            assert!(buffer_contains(&terminal, "LOCAL LOG"));
+            assert!(buffer_contains(&terminal, "MESH: NONE"));
+            assert!(
+                !buffer_contains(&terminal, "MESH: DEGRADED"),
+                "a new, not-yet-connected Player must not see the connected \
+                 mesh status"
+            );
+
+            // 3. A new Player can independently reach and choose First
+            // Contact.
+            let mut events = vec![
+                press(KeyCode::Enter), // dismiss the bootstrap intro
+                press(KeyCode::Enter), // LOCAL LOG -> Target
+                press(KeyCode::Enter), // Target -> Controller, commits to First Contact
+            ];
+            let (state, _) = render_from(
+                bootstrap_state(Some(&profile_path), Some(&intro_path)),
+                width,
+                height,
+                &events,
+            );
+            assert_eq!(state.current_view(), View::Controller);
+
+            // 4. Failure grants no connectivity and supports another
+            // attempt from the same bootstrap session.
+            let mut failing_events = events.clone();
+            failing_events.extend(clear_and_type(ALWAYS_WAITS));
+            failing_events.push(press(KeyCode::F(6)));
+            failing_events.push(press(KeyCode::Char(' '))); // pause
+            failing_events.extend(std::iter::repeat_n(press(KeyCode::Enter), 15)); // exhaust the budget
+            let (state, _) = render_from(
+                bootstrap_state(Some(&profile_path), Some(&intro_path)),
+                width,
+                height,
+                &failing_events,
+            );
+            assert!(!state.connected());
+            assert!(!state.network_bootstrap_pending());
+            assert_eq!(state.current_view(), View::AfterAction);
+
+            failing_events.push(press(KeyCode::F(4))); // back to Controller for another attempt
+            let (state, _) = render_from(
+                bootstrap_state(Some(&profile_path), Some(&intro_path)),
+                width,
+                height,
+                &failing_events,
+            );
+            assert_eq!(state.current_view(), View::Controller);
+            assert!(!state.connected());
+
+            // 5. Success connects and routes into Network Bootstrap rather
+            // than After Action, with the Console still rendering
+            // disconnected underneath the still-pending modal.
+            events.extend(clear_and_type(ROUTE_TO_UPLINK));
+            events.push(press_ctrl(KeyCode::Char('v')));
+            events.push(press(KeyCode::F(6)));
+            events.push(press(KeyCode::Char(' '))); // pause
+            events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step to success
+            let (mut state, terminal) = render_from(
+                bootstrap_state(Some(&profile_path), Some(&intro_path)),
+                width,
+                height,
+                &events,
+            );
+            assert!(
+                state.connected(),
+                "durable connectivity is recorded the instant success is determined"
+            );
+            assert!(state.network_bootstrap_pending());
+            assert!(
+                !state.presentation_connected(),
+                "presentation must lag durable connectivity until the modal completes"
+            );
+            assert_eq!(state.current_view(), View::Signals);
+            assert!(buffer_contains(&terminal, "LOCAL LOG"));
+            assert!(!buffer_contains(&terminal, "SIGNALS"));
+
+            // 6. The transition visibly advances through multiple stages
+            // rather than resolving instantly, still with no connected-
+            // looking content showing through.
+            assert!(state.advance_network_bootstrap());
+            let (after_first, total) = state.network_bootstrap_progress();
+            let (mut state, terminal) = render_from(state, width, height, &[]);
+            assert!(buffer_contains(&terminal, "uplink established"));
+            assert!(!buffer_contains(&terminal, "SIGNALS"));
+
+            assert!(state.advance_network_bootstrap());
+            let (after_second, _) = state.network_bootstrap_progress();
+            assert!(after_second > after_first && after_second < total);
+            let (mut state, terminal) = render_from(state, width, height, &[]);
+            assert!(buffer_contains(&terminal, "peer network reachable"));
+            assert!(!buffer_contains(&terminal, "SIGNALS"));
+
+            // 7. Completion reveals connected Signals, with the resolved
+            // First Contact entry withdrawn from it.
+            while state.advance_network_bootstrap() {}
+            assert!(!state.network_bootstrap_pending());
+            assert!(state.presentation_connected());
+            let (state, terminal) = render_from(state, width, height, &[]);
+            assert!(buffer_contains(&terminal, "SIGNALS"));
+            assert!(
+                !buffer_contains(&terminal, "Fabricator node 31B"),
+                "the resolved First Contact entry must be withdrawn from connected Signals"
+            );
+
+            // 8. After Action / Review Run can still inspect the completed
+            // run afterward.
+            assert!(state.operation().unwrap().finished);
+            assert!(
+                state
+                    .operation()
+                    .unwrap()
+                    .deployed_source
+                    .contains("local route"),
+                "the successful run's real deployed source must still be reachable"
+            );
+
+            // 9. Persist exactly as the real event loop would on each edge
+            // (connectivity became true just now; the intro was
+            // acknowledged back in step 2, so both edges fire once here),
+            // then simulate a relaunch through a brand-new `AppState` built
+            // from the same marker paths — proving persistence through the
+            // real filesystem-backed markers, not just in-memory state.
+            assert!(persist_if_newly_connected(false, &state, Some(&profile_path)).is_none());
+            assert!(persist_if_newly_acknowledged(true, &state, Some(&intro_path)).is_none());
+
+            let relaunched = bootstrap_state(Some(&profile_path), Some(&intro_path));
+            let (relaunched, terminal) = render_from(relaunched, width, height, &[]);
+            assert!(!relaunched.bootstrap_intro_visible());
+            assert!(relaunched.connected());
+            assert!(buffer_contains(&terminal, "SIGNALS"));
+            assert!(
+                !buffer_contains(&terminal, "[ Enter ] continue"),
+                "a relaunched, already-connected Player must not see the \
+                 bootstrap introduction replay"
+            );
+            assert!(
+                !buffer_contains(&terminal, "Fabricator node 31B"),
+                "a relaunched, already-connected Player must not see stale \
+                 First Contact bootstrap content"
+            );
+
+            let _ = std::fs::remove_file(&profile_path);
+            let _ = std::fs::remove_file(&intro_path);
+        }
+    }
+
     // Issue #137's remaining coverage: composition-level e2e proof that
     // Review Run behaves correctly across every meaningful First Contact
     // outcome, its full chronology/source navigation, source divergence,
