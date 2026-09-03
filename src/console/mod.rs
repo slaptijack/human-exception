@@ -169,6 +169,15 @@ fn event_loop(
     let mut state = bootstrap_state(profile_path.as_deref(), intro_path.as_deref());
     let mut frame_size = (0u16, 0u16);
     let mut last_transition_press: TransitionKeyDebounce = None;
+    // Threaded across loop iterations (not recomputed inside the branch
+    // below) so a rapid stream of incoming events — a held or autorepeating
+    // key, or repeated attempts to interact with the blocking screen —
+    // can't indefinitely postpone `advance_network_bootstrap`: each
+    // iteration re-polls for whatever time remains until this deadline
+    // rather than restarting a full `NETWORK_BOOTSTRAP_TICK_INTERVAL` wait,
+    // so the deadline is always eventually reached regardless of how often
+    // `term_event::poll` returns early with an event to process.
+    let mut network_bootstrap_deadline: Option<Instant> = None;
     let mut persistence_errors = PersistenceErrors::default();
 
     terminal.draw(|frame| {
@@ -236,6 +245,7 @@ fn event_loop(
         let was_connected = state.connected();
         let was_bootstrap_intro_visible = state.bootstrap_intro_visible();
         let redraw = if state.operation_auto_advancing() {
+            network_bootstrap_deadline = None;
             if term_event::poll(OPERATION_TICK_INTERVAL)? {
                 let event = term_event::read()?;
                 should_redraw(&mut state, event, frame_size, &mut last_transition_press)
@@ -243,13 +253,21 @@ fn event_loop(
                 state.advance_running_operation()
             }
         } else if state.network_bootstrap_auto_advancing() {
-            if term_event::poll(NETWORK_BOOTSTRAP_TICK_INTERVAL)? {
+            let now = Instant::now();
+            let deadline =
+                *network_bootstrap_deadline.get_or_insert(now + NETWORK_BOOTSTRAP_TICK_INTERVAL);
+            if now >= deadline {
+                network_bootstrap_deadline = None;
+                state.advance_network_bootstrap()
+            } else if term_event::poll(deadline - now)? {
                 let event = term_event::read()?;
                 should_redraw(&mut state, event, frame_size, &mut last_transition_press)
             } else {
+                network_bootstrap_deadline = None;
                 state.advance_network_bootstrap()
             }
         } else {
+            network_bootstrap_deadline = None;
             let event = term_event::read()?;
             should_redraw(&mut state, event, frame_size, &mut last_transition_press)
         };

@@ -3514,13 +3514,37 @@ mod tests {
     }
 
     #[test]
-    fn network_bootstrap_is_not_shown_once_the_transition_completes() {
+    fn network_bootstrap_shows_the_final_step_for_one_cadence_before_completing() {
         use super::super::state::NETWORK_BOOTSTRAP_STEPS;
 
         let mut state = connecting_state();
         for _ in 0..NETWORK_BOOTSTRAP_STEPS.len() {
             state.advance_network_bootstrap();
         }
+        assert!(
+            state.network_bootstrap_pending(),
+            "every step revealed, but not yet completed"
+        );
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+        assert!(
+            buffer_contains(&terminal, "[ OK ] network services online"),
+            "the last step must actually be shown, not skipped straight to \
+             completion"
+        );
+        assert!(buffer_contains(
+            &terminal,
+            &format!(
+                "{}/{}",
+                NETWORK_BOOTSTRAP_STEPS.len(),
+                NETWORK_BOOTSTRAP_STEPS.len()
+            )
+        ));
+    }
+
+    #[test]
+    fn network_bootstrap_is_not_shown_once_the_transition_completes() {
+        let mut state = connecting_state();
+        while state.advance_network_bootstrap() {}
         assert!(!state.network_bootstrap_pending());
 
         let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);

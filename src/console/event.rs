@@ -45,14 +45,33 @@ pub fn map(
 
     let unmodified = key.modifiers.is_empty();
 
+    // Checked before the Network Bootstrap swallow below: `Ctrl+Q` (the
+    // always-global check above) can open the quit confirmation while
+    // Network Bootstrap is pending — an edited controller or an active run
+    // can both still be true right after a connecting success — and once
+    // that dialog is showing, `ui::draw` renders it (quit-confirmation
+    // preempts every other panel, including Network Bootstrap; see
+    // `ui::draw`'s ordering). It must stay answerable with `Enter`/`Esc`
+    // rather than swallowed by the bootstrap gate below, or the player
+    // would be stuck staring at an unanswerable prompt until the
+    // transition finished on its own.
+    if quit_confirmation_pending {
+        return match key.code {
+            KeyCode::Enter | KeyCode::Char('y') if unmodified => Some(Msg::ConfirmQuit),
+            KeyCode::Esc | KeyCode::Char('n') if unmodified => Some(Msg::CancelQuit),
+            _ => None,
+        };
+    }
+
     // Network Bootstrap advances entirely on its own timer
     // (`AppState::advance_network_bootstrap`, driven by `event_loop`) and
     // has no player-facing dismissal at all — `docs/TUI_DESIGN.md`'s
     // "Network Bootstrap" requires that "ordinary gameplay/navigation/
     // editing input is suppressed while it owns the interface; the only
     // input honored is the existing quit-safety behavior," already handled
-    // by the always-global `Ctrl+Q` check above. So every other key is
-    // simply swallowed, with no dismissal arm at all.
+    // by the always-global `Ctrl+Q` check above and the quit-confirmation
+    // branch just above this one. So every other key is simply swallowed,
+    // with no dismissal arm at all.
     if network_bootstrap_pending {
         return None;
     }
@@ -76,13 +95,6 @@ pub fn map(
     // accident via some other binding's modified form — `Ctrl+Enter`
     // (validate) and `Ctrl+Y` both have unmodified forms that must not
     // silently confirm a destructive action instead.
-    if quit_confirmation_pending {
-        return match key.code {
-            KeyCode::Enter | KeyCode::Char('y') if unmodified => Some(Msg::ConfirmQuit),
-            KeyCode::Esc | KeyCode::Char('n') if unmodified => Some(Msg::CancelQuit),
-            _ => None,
-        };
-    }
     if reset_confirmation_pending {
         return match key.code {
             KeyCode::Enter | KeyCode::Char('y') if unmodified => Some(Msg::ConfirmResetController),
@@ -995,6 +1007,61 @@ mod tests {
                 true
             ),
             Some(Msg::RequestQuit)
+        );
+    }
+
+    #[test]
+    fn an_open_quit_confirmation_stays_answerable_while_network_bootstrap_is_pending() {
+        // A connecting First Contact run can leave the controller modified
+        // (or an operation record around) at the exact moment connectivity
+        // is established, so `Ctrl+Q` can open the quit confirmation while
+        // Network Bootstrap is also pending. `ui::draw` renders that dialog
+        // (quit-confirmation preempts every other panel), so `Enter`/`Esc`
+        // must still resolve it here rather than being swallowed by the
+        // Network Bootstrap gate below it — otherwise the player would be
+        // staring at an unanswerable prompt.
+        assert_eq!(
+            map(
+                key(KeyCode::Enter),
+                View::Signals,
+                true,
+                false,
+                false,
+                true,
+                false,
+                PaneId::SignalsList,
+                true
+            ),
+            Some(Msg::ConfirmQuit)
+        );
+        assert_eq!(
+            map(
+                key(KeyCode::Esc),
+                View::Signals,
+                true,
+                false,
+                false,
+                true,
+                false,
+                PaneId::SignalsList,
+                true
+            ),
+            Some(Msg::CancelQuit)
+        );
+        assert_eq!(
+            map(
+                key(KeyCode::Char('x')),
+                View::Signals,
+                true,
+                false,
+                false,
+                true,
+                false,
+                PaneId::SignalsList,
+                true
+            ),
+            None,
+            "still only the dialog's own yes/no while it's open"
         );
     }
 

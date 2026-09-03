@@ -696,29 +696,33 @@ impl AppState {
     /// not the player" rule as [`AppState::operation_auto_advancing`], but
     /// with no way for the player to pause or leave it, per `docs/
     /// TUI_DESIGN.md`'s "ordinary gameplay/navigation/editing input is
-    /// suppressed while it owns the interface."
+    /// suppressed while it owns the interface." Stays `true` for one extra
+    /// wakeup after the last step has been revealed — see
+    /// [`AppState::advance_network_bootstrap`] — so that final state is
+    /// actually shown for a cadence before the transition completes.
     pub fn network_bootstrap_auto_advancing(&self) -> bool {
         self.network_bootstrap_pending
-            && self.network_bootstrap_step < NETWORK_BOOTSTRAP_STEPS.len()
     }
 
     /// Advances Network Bootstrap by exactly one step if
     /// [`network_bootstrap_auto_advancing`] allows it right now, returning
-    /// whether anything actually changed (and so a redraw is needed). The
-    /// step revealed when this reaches the last entry in
-    /// [`NETWORK_BOOTSTRAP_STEPS`] clears `network_bootstrap_pending`,
-    /// completing the transition and returning the console to its already-
-    /// routed connected `SIGNALS` view: nothing else reads this flag once
-    /// every step has shown, so there is no separate "finished but still
-    /// showing" state to represent.
+    /// whether anything actually changed (and so a redraw is needed).
+    /// Reaching the last entry in [`NETWORK_BOOTSTRAP_STEPS`] does not by
+    /// itself clear `network_bootstrap_pending` — that reveal must actually
+    /// be rendered for one cadence first (a redraw only happens after this
+    /// call returns), so completion is deferred to the *following* call,
+    /// which clears the flag without revealing anything further. Only then
+    /// does the console return to its already-routed connected `SIGNALS`
+    /// view.
     ///
     /// [`network_bootstrap_auto_advancing`]: AppState::network_bootstrap_auto_advancing
     pub fn advance_network_bootstrap(&mut self) -> bool {
         if !self.network_bootstrap_auto_advancing() {
             return false;
         }
-        self.network_bootstrap_step += 1;
-        if self.network_bootstrap_step >= NETWORK_BOOTSTRAP_STEPS.len() {
+        if self.network_bootstrap_step < NETWORK_BOOTSTRAP_STEPS.len() {
+            self.network_bootstrap_step += 1;
+        } else {
             self.network_bootstrap_pending = false;
         }
         true
@@ -3773,11 +3777,11 @@ mod tests {
         assert!(state.connected());
         assert!(state.network_bootstrap_pending());
 
-        // Let the Network Bootstrap presentation actually finish, then
-        // redeploy and succeed again.
-        for _ in 0..NETWORK_BOOTSTRAP_STEPS.len() {
-            state.advance_network_bootstrap();
-        }
+        // Let the Network Bootstrap presentation actually finish (one extra
+        // call beyond the step count, since the last step stays visible for
+        // a cadence before the transition completes), then redeploy and
+        // succeed again.
+        while state.advance_network_bootstrap() {}
         assert!(!state.network_bootstrap_pending());
         state.controller = Some(ControllerDocument::new(ROUTE_TO_UPLINK));
         state.apply(Msg::RequestDeploy);
@@ -3844,8 +3848,16 @@ mod tests {
             state.advance_network_bootstrap();
         }
         assert!(
+            state.network_bootstrap_auto_advancing(),
+            "every step has shown, but the transition needs one more cadence \
+             to actually complete — see advance_network_bootstrap_clears_\
+             pending_after_the_last_step_and_then_no_ops"
+        );
+
+        state.advance_network_bootstrap();
+        assert!(
             !state.network_bootstrap_auto_advancing(),
-            "every step has shown, so the transition is complete"
+            "the completing cadence has now run, so the transition is done"
         );
     }
 
@@ -3869,19 +3881,30 @@ mod tests {
     fn advance_network_bootstrap_clears_pending_after_the_last_step_and_then_no_ops() {
         let mut state = connected_and_pending_network_bootstrap();
 
-        for _ in 0..NETWORK_BOOTSTRAP_STEPS.len() - 1 {
+        for _ in 0..NETWORK_BOOTSTRAP_STEPS.len() {
             assert!(state.advance_network_bootstrap());
-            assert!(state.network_bootstrap_pending(), "not the last step yet");
+            assert!(
+                state.network_bootstrap_pending(),
+                "still pending — every step has been revealed, but the final \
+                 one hasn't been shown for a cadence yet"
+            );
         }
-
-        assert!(state.advance_network_bootstrap(), "the final step");
-        assert!(
-            !state.network_bootstrap_pending(),
-            "the transition completes once every step has shown"
-        );
         assert_eq!(
             state.network_bootstrap_steps_shown(),
-            NETWORK_BOOTSTRAP_STEPS
+            NETWORK_BOOTSTRAP_STEPS,
+            "every step is revealed by this point, and stays visible for one \
+             more cadence before the transition completes"
+        );
+
+        assert!(
+            state.advance_network_bootstrap(),
+            "the completing cadence — no further step to reveal, but this is \
+             what actually clears the flag"
+        );
+        assert!(
+            !state.network_bootstrap_pending(),
+            "the transition completes only after the last step has been \
+             visible for a full cadence"
         );
 
         assert!(
