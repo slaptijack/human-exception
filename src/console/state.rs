@@ -1457,7 +1457,11 @@ impl AppState {
         // called, and retained on `Operation` below regardless of whether
         // that call succeeds, so the run record always reflects what was
         // actually attempted rather than a recomputed global default.
-        let scenario = crate::simulation::Scenario::first_contact();
+        // `run_id` starts at 1 and increases by one per deployment, so the
+        // first deployment of a session always selects the original
+        // configuration, and later redeployments cycle deterministically
+        // through the rest of the authored set.
+        let scenario = crate::simulation::Scenario::select_first_contact(run_id);
 
         let operation = match LiveOperation::deploy(&source, scenario.clone()) {
             Ok(live) => {
@@ -2594,6 +2598,51 @@ mod tests {
         function on_tick(observation)
             step = step + 1
             return route[step]
+        end
+    "#;
+
+    /// A configuration-agnostic controller (matching
+    /// `tests/fixtures/success.lua`) that heads toward the uplink once
+    /// discovered, using only `observation.discovered`, rather than a fixed
+    /// blind route tied to one authored First Contact configuration. Used
+    /// where a test needs a run to succeed regardless of which authored
+    /// configuration `Scenario::select_first_contact` happens to pick.
+    const NAVIGATES_TO_DISCOVERED_UPLINK: &str = r#"
+        function on_tick(observation)
+            local function find_tile(x, y)
+                for _, tile in ipairs(observation.discovered) do
+                    if tile.x == x and tile.y == y then
+                        return tile
+                    end
+                end
+                return nil
+            end
+
+            local function is_open(x, y)
+                local tile = find_tile(x, y)
+                return tile ~= nil and tile.traversable
+            end
+
+            for _, tile in ipairs(observation.discovered) do
+                if tile.uplink then
+                    if observation.drone.y < tile.y and is_open(observation.drone.x, observation.drone.y + 1) then
+                        return "north"
+                    end
+                    if observation.drone.x < tile.x and is_open(observation.drone.x + 1, observation.drone.y) then
+                        return "east"
+                    end
+                    return "wait"
+                end
+            end
+
+            local x, y = observation.drone.x, observation.drone.y
+            if is_open(x, y + 1) then
+                return "north"
+            end
+            if is_open(x + 1, y) then
+                return "east"
+            end
+            return "scan"
         end
     "#;
 
@@ -3853,11 +3902,13 @@ mod tests {
         // succeed again.
         while state.advance_network_bootstrap() {}
         assert!(!state.network_bootstrap_pending());
-        state.controller = Some(ControllerDocument::new(ROUTE_TO_UPLINK));
+        // This second deploy lands on a different authored configuration
+        // than the first (`Scenario::select_first_contact`), so it needs a
+        // controller that reaches whichever uplink is active rather than
+        // `ROUTE_TO_UPLINK`'s fixed blind route.
+        state.controller = Some(ControllerDocument::new(NAVIGATES_TO_DISCOVERED_UPLINK));
         state.apply(Msg::RequestDeploy);
-        for _ in 0..8 {
-            state.advance_running_operation();
-        }
+        while state.advance_running_operation() {}
 
         assert!(
             !state.network_bootstrap_pending(),

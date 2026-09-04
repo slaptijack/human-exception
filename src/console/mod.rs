@@ -1997,6 +1997,51 @@ mod tests {
         end
     "#;
 
+    /// A configuration-agnostic controller (matching
+    /// `tests/fixtures/success.lua`) that heads toward the uplink once
+    /// discovered, using only `observation.discovered`, rather than a fixed
+    /// blind route tied to one authored First Contact configuration. Used
+    /// where a test needs a run to succeed regardless of which authored
+    /// configuration `Scenario::select_first_contact` happens to pick.
+    const NAVIGATES_TO_DISCOVERED_UPLINK: &str = r#"
+        function on_tick(observation)
+            local function find_tile(x, y)
+                for _, tile in ipairs(observation.discovered) do
+                    if tile.x == x and tile.y == y then
+                        return tile
+                    end
+                end
+                return nil
+            end
+
+            local function is_open(x, y)
+                local tile = find_tile(x, y)
+                return tile ~= nil and tile.traversable
+            end
+
+            for _, tile in ipairs(observation.discovered) do
+                if tile.uplink then
+                    if observation.drone.y < tile.y and is_open(observation.drone.x, observation.drone.y + 1) then
+                        return "north"
+                    end
+                    if observation.drone.x < tile.x and is_open(observation.drone.x + 1, observation.drone.y) then
+                        return "east"
+                    end
+                    return "wait"
+                end
+            end
+
+            local x, y = observation.drone.x, observation.drone.y
+            if is_open(x, y + 1) then
+                return "north"
+            end
+            if is_open(x + 1, y) then
+                return "east"
+            end
+            return "scan"
+        end
+    "#;
+
     /// Clears the starter controller (backspacing every character from its
     /// end-of-document starting cursor) and types `source` in its place,
     /// exactly as a player replacing the controller script would.
@@ -2806,12 +2851,17 @@ mod tests {
             // session (`retry_events`), not a fresh first attempt — connects
             // and routes into Network Bootstrap rather than After Action,
             // with the Console still rendering disconnected underneath the
-            // still-pending modal.
-            retry_events.extend(clear_and_type(ROUTE_TO_UPLINK));
+            // still-pending modal. This is the session's second deploy, so
+            // `Scenario::select_first_contact` selects a different authored
+            // configuration than the first attempt; `ROUTE_TO_UPLINK`'s
+            // fixed blind route is not guaranteed to reach that
+            // configuration's uplink, so this uses the configuration-
+            // agnostic controller instead.
+            retry_events.extend(clear_and_type(NAVIGATES_TO_DISCOVERED_UPLINK));
             retry_events.push(press_ctrl(KeyCode::Char('v')));
             retry_events.push(press(KeyCode::F(6)));
             retry_events.push(press(KeyCode::Char(' '))); // pause
-            retry_events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step to success
+            retry_events.extend(std::iter::repeat_n(press(KeyCode::Enter), 15)); // step to success
             let (mut state, terminal) = render_from(
                 bootstrap_state(Some(&profile_path), Some(&intro_path)),
                 width,
@@ -2867,7 +2917,7 @@ mod tests {
             assert_eq!(state.current_view(), View::Operation);
             assert!(buffer_contains(&terminal, "DEPLOYED SOURCE"));
             assert!(
-                buffer_contains(&terminal, "local route"),
+                buffer_contains(&terminal, "find_tile"),
                 "Review Run must render the successful run's real deployed source"
             );
 

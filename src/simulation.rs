@@ -296,6 +296,33 @@ const FIRST_CONTACT_ROWS: [&str; 5] = [
     "S###.", // y = 0
 ];
 
+/// An authored "First Contact" variant sharing [`FIRST_CONTACT_ROWS`]'s
+/// facility topology, but with the uplink moved to the opposite corner
+/// (`(0, 4)`) and the hazard moved onto the direct column route leading to
+/// it (`(0, 2)`). The direct route down that column (4 actions) crosses the
+/// hazard; the longer route around the block (12 actions) does not — both
+/// comfortably within the shared starting budget.
+const FIRST_CONTACT_WEST_UPLINK_ROWS: [&str; 5] = [
+    "U....", // y = 4
+    ".###.", // y = 3
+    "~###.", // y = 2
+    ".....", // y = 1
+    "S###.", // y = 0
+];
+
+/// An authored "First Contact" variant sharing [`FIRST_CONTACT_ROWS`]'s
+/// facility topology and uplink position, but with the hazard moved from
+/// `(4, 2)` to `(0, 2)`. This flips which of the two original eight-action
+/// routes is the risky one, so a controller cannot assume the row-`y=1`
+/// route is always the safe choice.
+const FIRST_CONTACT_WEST_HAZARD_ROWS: [&str; 5] = [
+    "....U", // y = 4
+    ".###.", // y = 3
+    "~###.", // y = 2
+    ".....", // y = 1
+    "S###.", // y = 0
+];
+
 /// Parses a north-up ASCII map (rows given top-down) into a row-major,
 /// bottom-up tile list matching [`FacilityMap`]'s coordinate system.
 fn tiles_from_rows(rows: &[&str]) -> Vec<TileKind> {
@@ -321,7 +348,8 @@ impl Scenario {
         }
     }
 
-    /// The one fixed "First Contact" reconnaissance scenario.
+    /// The original "First Contact" reconnaissance scenario: uplink at
+    /// `(4, 4)`, hazard at `(4, 2)`.
     pub fn first_contact() -> Self {
         let map = FacilityMap::new(
             5,
@@ -333,6 +361,63 @@ impl Scenario {
         .expect("the fixed first contact facility map is valid");
 
         Scenario::new(map, 15)
+    }
+
+    /// An authored "First Contact" variant: uplink at `(0, 4)`, hazard at
+    /// `(0, 2)`. See [`FIRST_CONTACT_WEST_UPLINK_ROWS`].
+    pub fn first_contact_west_uplink() -> Self {
+        let map = FacilityMap::new(
+            5,
+            5,
+            tiles_from_rows(&FIRST_CONTACT_WEST_UPLINK_ROWS),
+            Position { x: 0, y: 0 },
+            Position { x: 0, y: 4 },
+        )
+        .expect("the first-contact-west-uplink facility map is valid");
+
+        Scenario::new(map, 15)
+    }
+
+    /// An authored "First Contact" variant: uplink at `(4, 4)` (as in
+    /// [`Scenario::first_contact`]), hazard at `(0, 2)`. See
+    /// [`FIRST_CONTACT_WEST_HAZARD_ROWS`].
+    pub fn first_contact_west_hazard() -> Self {
+        let map = FacilityMap::new(
+            5,
+            5,
+            tiles_from_rows(&FIRST_CONTACT_WEST_HAZARD_ROWS),
+            Position { x: 0, y: 0 },
+            Position { x: 4, y: 4 },
+        )
+        .expect("the first-contact-west-hazard facility map is valid");
+
+        Scenario::new(map, 15)
+    }
+
+    /// The small, hand-authored set of "First Contact" configurations a
+    /// deployment may be run against (`docs/TUI_DESIGN.md`, "First Contact
+    /// configuration model"). Not procedurally generated: each entry is one
+    /// of the fixed constructors above, sharing the same facility topology
+    /// and varying only the active uplink and hazard placement.
+    fn first_contact_configurations() -> [Scenario; 3] {
+        [
+            Scenario::first_contact(),
+            Scenario::first_contact_west_uplink(),
+            Scenario::first_contact_west_hazard(),
+        ]
+    }
+
+    /// Deterministically selects one of [`Scenario::first_contact_configurations`]
+    /// for the deployment identified by `run_id`, with no runtime
+    /// randomness. `run_id`s are assigned starting at 1 and increase by one
+    /// per deployment, so the very first deployment of a session always
+    /// selects index 0 (`Scenario::first_contact()`), and later
+    /// redeployments cycle deterministically through the rest of the set.
+    /// The same `run_id` always selects an equal `Scenario`.
+    pub fn select_first_contact(run_id: u32) -> Self {
+        let configurations = Scenario::first_contact_configurations();
+        let index = run_id.saturating_sub(1) as usize % configurations.len();
+        configurations[index].clone()
     }
 
     pub fn map(&self) -> &FacilityMap {
@@ -986,6 +1071,80 @@ mod tests {
     #[test]
     fn first_contact_scenario_is_identical_on_every_construction() {
         assert_eq!(Scenario::first_contact(), Scenario::first_contact());
+    }
+
+    #[test]
+    fn every_authored_first_contact_configuration_has_a_reachable_uplink() {
+        // `FacilityMap::new` already proves reachability at construction
+        // time (it would have panicked via `.expect(...)` otherwise), but
+        // this test names the guarantee explicitly per each configuration
+        // rather than relying on that panic alone.
+        for scenario in Scenario::first_contact_configurations() {
+            assert!(scenario.map().tile_at(scenario.uplink()).is_some());
+        }
+    }
+
+    #[test]
+    fn select_first_contact_is_a_pure_function_of_run_id() {
+        assert_eq!(
+            Scenario::select_first_contact(1),
+            Scenario::select_first_contact(1)
+        );
+        assert_eq!(Scenario::select_first_contact(1), Scenario::first_contact());
+        assert_eq!(Scenario::select_first_contact(4), Scenario::first_contact());
+
+        // Distinct configurations are actually selected as run ids advance,
+        // not just re-selecting the same one under a different id.
+        let selections = [
+            Scenario::select_first_contact(1),
+            Scenario::select_first_contact(2),
+            Scenario::select_first_contact(3),
+        ];
+        assert_ne!(selections[0], selections[1]);
+        assert_ne!(selections[1], selections[2]);
+        assert_ne!(selections[0], selections[2]);
+    }
+
+    #[test]
+    fn no_single_blind_route_solves_every_authored_first_contact_configuration() {
+        // The blind route that solves the original scenario (row y=1 across,
+        // then north up column x=4): `tests/fixtures/hazard_route.lua` plays
+        // exactly this sequence against a live deployment.
+        let blind_route = [
+            Action::MoveNorth,
+            Action::MoveEast,
+            Action::MoveEast,
+            Action::MoveEast,
+            Action::MoveEast,
+            Action::MoveNorth,
+            Action::MoveNorth,
+            Action::MoveNorth,
+        ];
+
+        let outcomes: Vec<TickOutcome> = Scenario::first_contact_configurations()
+            .into_iter()
+            .map(|scenario| {
+                let mut sim = Simulation::from_scenario(scenario);
+                for &action in &blind_route {
+                    if sim.step(action).is_err() || sim.outcome() != TickOutcome::Running {
+                        break;
+                    }
+                }
+                sim.outcome()
+            })
+            .collect();
+
+        assert!(
+            outcomes.contains(&TickOutcome::Succeeded),
+            "the blind route should still solve at least one authored configuration"
+        );
+        assert!(
+            !outcomes
+                .iter()
+                .all(|outcome| *outcome == TickOutcome::Succeeded),
+            "no single blind route may be guaranteed to solve every authored \
+             configuration, but this route solved all of {outcomes:?}"
+        );
     }
 
     #[test]
