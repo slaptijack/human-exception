@@ -12,6 +12,7 @@
 //! process with them.
 
 use human_exception::ControllerError;
+use human_exception::Scenario;
 use human_exception::lua_controller::{LiveOperation, validate};
 
 #[test]
@@ -29,7 +30,7 @@ fn live_operation_deploy_bounds_a_top_level_loop_that_catches_the_instruction_ho
     // has, not just the same instruction hook.
     let source = "while true do pcall(function() while true do end end) end\n\
                   function on_tick(observation) return 'wait' end";
-    let err = LiveOperation::deploy(source).unwrap_err();
+    let err = LiveOperation::deploy(source, Scenario::first_contact()).unwrap_err();
     assert!(matches!(err, ControllerError::ScriptInvalid(_)));
     assert!(err.to_string().contains("execution allowance"));
     // Reported as `ScriptInvalid` (there's no simulation state yet to
@@ -52,7 +53,8 @@ fn live_operation_step_bounds_an_on_tick_that_never_returns_even_when_it_keeps_c
                       pcall(function() while true do end end)\n\
                     end\n\
                   end";
-    let mut op = LiveOperation::deploy(source).expect("script loads; the loop is only in on_tick");
+    let mut op = LiveOperation::deploy(source, Scenario::first_contact())
+        .expect("script loads; the loop is only in on_tick");
 
     let err = op.step().unwrap_err();
     assert!(

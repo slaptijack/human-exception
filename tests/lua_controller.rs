@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use human_exception::lua_controller;
-use human_exception::{Action, ControllerError, FailureReason, TickOutcome};
+use human_exception::{Action, ControllerError, FailureReason, Scenario, TickOutcome};
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -14,16 +14,19 @@ fn fixture(name: &str) -> PathBuf {
 
 #[test]
 fn a_navigating_controller_reaches_the_uplink() {
-    let outcome = lua_controller::run(&fixture("success.lua"), |_| {}).unwrap();
+    let outcome =
+        lua_controller::run(&fixture("success.lua"), Scenario::first_contact(), |_| {}).unwrap();
     assert_eq!(outcome, TickOutcome::Succeeded);
 }
 
 #[test]
 fn a_controller_that_scans_before_navigating_still_reaches_the_uplink() {
     let mut ticks = Vec::new();
-    let outcome = lua_controller::run(&fixture("scan_then_navigate.lua"), |record| {
-        ticks.push(record)
-    })
+    let outcome = lua_controller::run(
+        &fixture("scan_then_navigate.lua"),
+        Scenario::first_contact(),
+        |record| ticks.push(record),
+    )
     .unwrap();
 
     assert_eq!(outcome, TickOutcome::Succeeded);
@@ -32,15 +35,24 @@ fn a_controller_that_scans_before_navigating_still_reaches_the_uplink() {
 
 #[test]
 fn a_waiting_controller_fails_when_the_budget_is_exhausted() {
-    let outcome = lua_controller::run(&fixture("always_wait.lua"), |_| {}).unwrap();
+    let outcome = lua_controller::run(
+        &fixture("always_wait.lua"),
+        Scenario::first_contact(),
+        |_| {},
+    )
+    .unwrap();
     assert_eq!(outcome, TickOutcome::Failed(FailureReason::BudgetExhausted));
 }
 
 #[test]
 fn a_controller_that_routes_through_the_hazard_reports_a_hazard_entered_event() {
     let mut ticks = Vec::new();
-    let outcome =
-        lua_controller::run(&fixture("hazard_route.lua"), |record| ticks.push(record)).unwrap();
+    let outcome = lua_controller::run(
+        &fixture("hazard_route.lua"),
+        Scenario::first_contact(),
+        |record| ticks.push(record),
+    )
+    .unwrap();
 
     assert_eq!(outcome, TickOutcome::Succeeded);
     assert!(ticks.iter().any(|record| {
@@ -53,8 +65,10 @@ fn a_controller_that_routes_through_the_hazard_reports_a_hazard_entered_event() 
 
 #[test]
 fn rerunning_the_same_script_is_deterministic() {
-    let first = lua_controller::run(&fixture("success.lua"), |_| {}).unwrap();
-    let second = lua_controller::run(&fixture("success.lua"), |_| {}).unwrap();
+    let first =
+        lua_controller::run(&fixture("success.lua"), Scenario::first_contact(), |_| {}).unwrap();
+    let second =
+        lua_controller::run(&fixture("success.lua"), Scenario::first_contact(), |_| {}).unwrap();
     assert_eq!(first, second);
     assert_eq!(first, TickOutcome::Succeeded);
 }
@@ -69,12 +83,20 @@ fn a_script_using_math_random_is_deterministic_across_separate_runs() {
     // produce the same outputs" guarantee the rest of the simulation core
     // already relies on.
     let mut first = Vec::new();
-    let outcome_first =
-        lua_controller::run(&fixture("random_actions.lua"), |record| first.push(record)).unwrap();
+    let outcome_first = lua_controller::run(
+        &fixture("random_actions.lua"),
+        Scenario::first_contact(),
+        |record| first.push(record),
+    )
+    .unwrap();
 
     let mut second = Vec::new();
-    let outcome_second =
-        lua_controller::run(&fixture("random_actions.lua"), |record| second.push(record)).unwrap();
+    let outcome_second = lua_controller::run(
+        &fixture("random_actions.lua"),
+        Scenario::first_contact(),
+        |record| second.push(record),
+    )
+    .unwrap();
 
     assert_eq!(outcome_first, outcome_second);
     assert_eq!(first, second);
@@ -88,43 +110,78 @@ fn a_script_using_math_random_is_deterministic_across_separate_runs() {
 
 #[test]
 fn a_nonexistent_script_is_a_clean_error() {
-    let err = lua_controller::run(&fixture("does_not_exist.lua"), |_| {}).unwrap_err();
+    let err = lua_controller::run(
+        &fixture("does_not_exist.lua"),
+        Scenario::first_contact(),
+        |_| {},
+    )
+    .unwrap_err();
     assert!(matches!(err, ControllerError::ScriptUnreadable { .. }));
 }
 
 #[test]
 fn invalid_lua_syntax_is_a_clean_error() {
-    let err = lua_controller::run(&fixture("syntax_error.lua"), |_| {}).unwrap_err();
+    let err = lua_controller::run(
+        &fixture("syntax_error.lua"),
+        Scenario::first_contact(),
+        |_| {},
+    )
+    .unwrap_err();
     assert!(matches!(err, ControllerError::ScriptInvalid(_)));
 }
 
 #[test]
 fn a_script_reaching_for_a_host_capability_is_a_clean_error() {
-    let err = lua_controller::run(&fixture("host_capability.lua"), |_| {}).unwrap_err();
+    let err = lua_controller::run(
+        &fixture("host_capability.lua"),
+        Scenario::first_contact(),
+        |_| {},
+    )
+    .unwrap_err();
     assert!(matches!(err, ControllerError::ScriptInvalid(_)));
 }
 
 #[test]
 fn a_missing_callback_is_a_clean_error() {
-    let err = lua_controller::run(&fixture("missing_callback.lua"), |_| {}).unwrap_err();
+    let err = lua_controller::run(
+        &fixture("missing_callback.lua"),
+        Scenario::first_contact(),
+        |_| {},
+    )
+    .unwrap_err();
     assert!(matches!(err, ControllerError::MissingCallback));
 }
 
 #[test]
 fn a_callback_runtime_error_is_a_clean_error() {
-    let err = lua_controller::run(&fixture("callback_error.lua"), |_| {}).unwrap_err();
+    let err = lua_controller::run(
+        &fixture("callback_error.lua"),
+        Scenario::first_contact(),
+        |_| {},
+    )
+    .unwrap_err();
     assert!(matches!(err, ControllerError::CallbackFailed(_)));
 }
 
 #[test]
 fn an_unrecognized_action_name_is_a_clean_error() {
-    let err = lua_controller::run(&fixture("invalid_action.lua"), |_| {}).unwrap_err();
+    let err = lua_controller::run(
+        &fixture("invalid_action.lua"),
+        Scenario::first_contact(),
+        |_| {},
+    )
+    .unwrap_err();
     assert!(matches!(err, ControllerError::InvalidAction(_)));
 }
 
 #[test]
 fn an_out_of_bounds_move_is_a_clean_error_without_mutating_state() {
-    let err = lua_controller::run(&fixture("out_of_bounds.lua"), |_| {}).unwrap_err();
+    let err = lua_controller::run(
+        &fixture("out_of_bounds.lua"),
+        Scenario::first_contact(),
+        |_| {},
+    )
+    .unwrap_err();
     match err {
         ControllerError::InvalidAction(detail) => {
             assert!(detail.contains("south"));
@@ -135,7 +192,8 @@ fn an_out_of_bounds_move_is_a_clean_error_without_mutating_state() {
 
 #[test]
 fn a_move_into_a_wall_is_a_clean_error_without_mutating_state() {
-    let err = lua_controller::run(&fixture("into_wall.lua"), |_| {}).unwrap_err();
+    let err = lua_controller::run(&fixture("into_wall.lua"), Scenario::first_contact(), |_| {})
+        .unwrap_err();
     match err {
         ControllerError::InvalidAction(detail) => {
             assert!(detail.contains("east"));
@@ -148,8 +206,12 @@ fn a_move_into_a_wall_is_a_clean_error_without_mutating_state() {
 #[test]
 fn the_observer_receives_one_record_per_tick_in_order() {
     let mut ticks = Vec::new();
-    let outcome =
-        lua_controller::run(&fixture("success.lua"), |record| ticks.push(record)).unwrap();
+    let outcome = lua_controller::run(
+        &fixture("success.lua"),
+        Scenario::first_contact(),
+        |record| ticks.push(record),
+    )
+    .unwrap();
 
     assert_eq!(outcome, TickOutcome::Succeeded);
     assert!(!ticks.is_empty());

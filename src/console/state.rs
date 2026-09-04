@@ -186,6 +186,14 @@ struct Operation {
     initial_snapshot: Option<OperationSnapshot>,
     paused: bool,
     error: Option<ControllerError>,
+    /// The configuration selected for this deployment, retained as this
+    /// run's immutable provenance (`docs/TUI_DESIGN.md`, "First Contact
+    /// configuration model" and "Run records and source provenance"). Set
+    /// once at deploy time regardless of whether deploy itself succeeded,
+    /// so the run record always reflects what was actually attempted. Never
+    /// surfaced through `OperationView` — which authored configuration was
+    /// selected is run provenance, not player-facing intelligence.
+    scenario: crate::simulation::Scenario,
 }
 
 impl Operation {
@@ -873,7 +881,7 @@ impl AppState {
     /// deployed a controller at least once this session.
     pub fn operation(&self) -> Option<OperationView<'_>> {
         self.operation.as_ref().map(|op| {
-            let starting_budget = crate::simulation::Scenario::first_contact().starting_budget();
+            let starting_budget = op.scenario.starting_budget();
             let current = match (op.records.last(), &op.initial_snapshot) {
                 (Some(record), _) => OperationSnapshot {
                     drone_position: record.drone_position,
@@ -884,23 +892,22 @@ impl AppState {
                     budget_remaining: record.budget_remaining,
                 },
                 // No tick has completed yet: the deploy-time snapshot is
-                // still the current state, since the fixed scenario never
+                // still the current state, since this run's scenario never
                 // changes on its own between deploy and the first tick.
                 (None, Some(initial)) => initial.clone(),
                 // Deploy itself failed: nothing was ever observed, so fall
-                // back to the fixed scenario's public starting facts rather
-                // than any raw map/scenario internals.
-                (None, None) => {
-                    let scenario = crate::simulation::Scenario::first_contact();
-                    OperationSnapshot {
-                        drone_position: scenario.drone_start(),
-                        map_width: scenario.map().width(),
-                        map_height: scenario.map().height(),
-                        discovered: Vec::new(),
-                        tick: 0,
-                        budget_remaining: starting_budget,
-                    }
-                }
+                // back to the selected scenario's public starting facts
+                // (the same scenario that was actually attempted, not a
+                // recomputed global default) rather than any raw
+                // map/scenario internals.
+                (None, None) => OperationSnapshot {
+                    drone_position: op.scenario.drone_start(),
+                    map_width: op.scenario.map().width(),
+                    map_height: op.scenario.map().height(),
+                    discovered: Vec::new(),
+                    tick: 0,
+                    budget_remaining: starting_budget,
+                },
             };
             let finished = op.is_finished();
             let kind = if !finished {
@@ -1444,7 +1451,15 @@ impl AppState {
         let run_id = self.next_run_id;
         self.next_run_id += 1;
 
-        let operation = match LiveOperation::deploy(&source) {
+        // The single deterministic selection point for this deployment's
+        // configuration (`docs/TUI_DESIGN.md`, "First Contact configuration
+        // model"): selected once, before `LiveOperation::deploy` is even
+        // called, and retained on `Operation` below regardless of whether
+        // that call succeeds, so the run record always reflects what was
+        // actually attempted rather than a recomputed global default.
+        let scenario = crate::simulation::Scenario::first_contact();
+
+        let operation = match LiveOperation::deploy(&source, scenario.clone()) {
             Ok(live) => {
                 // Captured now, before any tick executes, so later ticks
                 // (and the eventual terminal outcome) can never retroactively
@@ -1459,6 +1474,7 @@ impl AppState {
                     initial_snapshot,
                     paused: false,
                     error: None,
+                    scenario,
                 }
             }
             Err(err) => Operation {
@@ -1469,6 +1485,7 @@ impl AppState {
                 initial_snapshot: None,
                 paused: false,
                 error: Some(err),
+                scenario,
             },
         };
         // A deployment that fails to load (bad Lua syntax, no `on_tick`)
