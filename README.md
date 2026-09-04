@@ -125,7 +125,7 @@ S = drone start   U = uplink objective
 . = floor   # = wall (impassable)   ~ = hazard (traversable; entering it costs extra budget)
 ```
 
-`(2, 0)` is a one-tile dead end off the shared corridor at `(2, 1)`; it never leads anywhere, but a scan reveals it without a detour, while confirming it by hand costs the full round trip.
+`(2, 0)` is a one-tile dead end off the shared corridor at `(2, 1)`; it never leads anywhere. Passive discovery reveals it as soon as the drone reaches `(2, 1)`, but reaching `(2, 1)` at all means committing to exploration east first, and backtracking to the known-safe route if it turns out not to help costs more than a single scan taken before ever leaving the start.
 
 ### Exit codes
 

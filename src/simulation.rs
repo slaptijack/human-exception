@@ -295,12 +295,14 @@ pub struct Scenario {
 /// route through the hazard (row `y = 1` then column `x = 4`) and a route
 /// around it (column `x = 0` then row `y = 4`) are both eight actions long.
 /// `(2, 0)` is a single-tile dead end off that corridor (its only floor
-/// neighbour is `(2, 1)`), shared by every authored configuration. A
-/// controller that wants to rule it out by physically walking in and back
-/// out before committing to a route pays for the full round trip from the
-/// drone's start; a single scan taken before ever leaving `(0, 0)` rules it
-/// out too, more cheaply — see
-/// `scanning_the_dead_end_pocket_is_cheaper_than_walking_in_and_back_out`.
+/// neighbour is `(2, 1)`), shared by every authored configuration. Passive
+/// discovery already reveals it the moment the drone reaches `(2, 1)` — no
+/// need to step into it — but reaching `(2, 1)` at all means committing two
+/// actions of exploration east before that information exists, and reacting
+/// to it by falling back to the known-safe west corridor costs two more
+/// backtracking to `(0, 1)`. A single scan taken before ever leaving
+/// `(0, 0)` reveals the same area for less — see
+/// `scanning_the_dead_end_pocket_saves_the_exploration_a_passive_backtrack_would_cost`.
 const FIRST_CONTACT_ROWS: [&str; 5] = [
     "....U", // y = 4
     ".###.", // y = 3
@@ -1767,14 +1769,20 @@ mod tests {
     }
 
     #[test]
-    fn scanning_the_dead_end_pocket_is_cheaper_than_walking_in_and_back_out() {
+    fn scanning_the_dead_end_pocket_saves_the_exploration_a_passive_backtrack_would_cost() {
         // `(2, 0)` (see `FIRST_CONTACT_ROWS`) is a dead end off the shared
-        // corridor. A controller that wants to rule out the uplink hiding
-        // there before committing to a route can either scan once from the
-        // start (revealing the pocket without ever approaching it) or walk
-        // in and back out to confirm it by hand. Both then take the same
-        // hazard-free route to the uplink, so the difference in remaining
-        // budget is exactly the exploration the scan saved.
+        // corridor. Passive discovery reveals the drone's tile plus its 4
+        // cardinal neighbours every tick, so a controller never needs to
+        // step into `(2, 0)` to rule it out — reaching `(2, 1)` already
+        // reveals it. But *reaching* `(2, 1)` at all is itself two actions
+        // spent probing east before ever confirming the west corridor is
+        // safe, and reacting to what it finds there by falling back to the
+        // known-safe west route costs two more actions backtracking to
+        // `(0, 1)`: four actions of committed-then-abandoned exploration,
+        // exactly what `a_careful_passive_strategy_without_scanning_succeeds_with_a_smaller_margin`'s
+        // route walks. A single scan from the start reveals the same area
+        // (and the hazard-free direction) for 2, without ever leaving
+        // `(0, 0)`.
         let scan_then_go = [
             Action::Scan,
             Action::MoveNorth,
@@ -1786,14 +1794,12 @@ mod tests {
             Action::MoveEast,
             Action::MoveEast,
         ];
-        let walk_the_pocket_then_go = [
+        let passive_probe_then_backtrack = [
             Action::MoveNorth,
             Action::MoveEast,
-            Action::MoveEast,
-            Action::MoveSouth, // into the pocket at (2, 0)
-            Action::MoveNorth, // back out to (2, 1)
+            Action::MoveEast, // (2, 1): passively discovers (2, 0) is a dead end
             Action::MoveWest,
-            Action::MoveWest,
+            Action::MoveWest, // back to (0, 1), committing to the west corridor
             Action::MoveNorth,
             Action::MoveNorth,
             Action::MoveNorth,
@@ -1804,19 +1810,19 @@ mod tests {
         ];
 
         let scanned = run_route(Scenario::first_contact(), &scan_then_go);
-        let walked = run_route(Scenario::first_contact(), &walk_the_pocket_then_go);
+        let passive = run_route(Scenario::first_contact(), &passive_probe_then_backtrack);
 
         assert_eq!(scanned.outcome(), TickOutcome::Succeeded);
-        assert_eq!(walked.outcome(), TickOutcome::Succeeded);
+        assert_eq!(passive.outcome(), TickOutcome::Succeeded);
         assert!(
-            scanned.observe().budget_remaining > walked.observe().budget_remaining,
-            "a scan that rules out the dead end should leave more budget than \
-             physically checking it: scanned {}, walked {}",
+            scanned.observe().budget_remaining > passive.observe().budget_remaining,
+            "a scan that resolves the branch up front should leave more budget \
+             than exploring into it and backtracking: scanned {}, passive {}",
             scanned.observe().budget_remaining,
-            walked.observe().budget_remaining
+            passive.observe().budget_remaining
         );
         assert_eq!(scanned.observe().budget_remaining, 5);
-        assert_eq!(walked.observe().budget_remaining, 1);
+        assert_eq!(passive.observe().budget_remaining, 3);
     }
 
     #[test]
