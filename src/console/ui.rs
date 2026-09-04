@@ -2397,11 +2397,14 @@ fn help_lines(state: &AppState) -> Vec<Line<'static>> {
         "the run with an error and does not consume budget",
     ));
     lines.push(Line::from(format!(
-        "each action costs {} budget; entering a hazard tile costs {} more,",
+        "move/wait costs {} budget; scan costs {}; entering a hazard tile",
         crate::simulation::ACTION_COST,
+        crate::simulation::SCAN_COST
+    )));
+    lines.push(Line::from(format!(
+        "costs {} more, charged only on the tick the drone enters it",
         crate::simulation::HAZARD_ENTRY_COST
     )));
-    lines.push(Line::from("charged only on the tick the drone enters it"));
     lines.push(Line::from(
         "scan does not move the drone; it reveals every tile within 2 tiles",
     ));

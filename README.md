@@ -79,7 +79,7 @@ Each entry in `observation.discovered` is a table `{ x, y, tile, traversable, up
 
 `on_tick` must return one of `"north"`, `"south"`, `"east"`, `"west"`, `"wait"`, or `"scan"`. Any other value, a move that would leave the map, or a move into a wall, ends the run with an error and does not consume budget.
 
-Every action — a move, `"wait"`, or `"scan"` — costs 1 budget. `"scan"` does not move the drone; it reveals every tile within 2 tiles of the drone in any direction (a 5x5 area, including diagonals), regardless of walls in the way — scanning is not blocked by line of sight. Moving onto a hazard tile costs an additional 5 budget on top of the action's base cost, charged only on the tick the drone enters it; waiting on a hazard, or continuing to occupy one, costs nothing extra. Discoveries, whether from passive local vision or a scan, persist for the rest of the run. The operation fails if the budget is exhausted before the drone reaches the uplink; reaching the uplink always succeeds, even on the same action that would have exhausted the budget.
+A move or `"wait"` costs 1 budget; `"scan"` costs 2. `"scan"` does not move the drone; it reveals every tile within 2 tiles of the drone in any direction (a 5x5 area, including diagonals), regardless of walls in the way — scanning is not blocked by line of sight. Moving onto a hazard tile costs an additional 4 budget on top of the action's base cost, charged only on the tick the drone enters it; waiting on a hazard, or continuing to occupy one, costs nothing extra. Discoveries, whether from passive local vision or a scan, persist for the rest of the run. The operation fails if the budget is exhausted before the drone reaches the uplink; reaching the uplink always succeeds, even on the same action that would have exhausted the budget.
 
 ### The satellite view
 
@@ -119,11 +119,13 @@ y=4  |  .    .    .    .    U
 y=3  |  .    #    #    #    .
 y=2  |  .    #    #    #    ~
 y=1  |  .    .    .    .    .
-y=0  |  S    #    #    #    .
+y=0  |  S    #    .    #    .
 
 S = drone start   U = uplink objective
 . = floor   # = wall (impassable)   ~ = hazard (traversable; entering it costs extra budget)
 ```
+
+`(2, 0)` is a one-tile dead end off the shared corridor at `(2, 1)`; it never leads anywhere, but a scan reveals it without a detour, while confirming it by hand costs the full round trip.
 
 ### Exit codes
 
