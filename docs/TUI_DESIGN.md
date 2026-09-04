@@ -441,6 +441,8 @@ A hazard should read as a meaningful choice between routes or exploration strate
 
 **No mandated programming construct.** The game does not inspect Player source code or require a particular programming construct, algorithm, or style. A controller succeeds because its behavior solves the operational problem it is presented with.
 
+**Shipped controllers currently trail the configuration set.** The checked-in reference and starter controllers (`examples/first_contact.lua` and the console's starter document) predate this configuration set and were written against the single original layout; they do not yet reliably solve every authored configuration (specifically, one whose uplink requires moving south rather than only north/east). `--developer-mode` is unaffected, since it always runs that original configuration. Bringing the shipped controllers up to date with the full authored set is tracked as follow-up work, not required by this contract.
+
 **Network Bootstrap boundary unchanged.** This contract does not alter the existing First Contact success routing established in Epic #160: authoritative success still routes through [Network Bootstrap](#network-bootstrap) into connected Signals; failure of any kind still lands on After Action (§5) with the Player free to revise and retry.
 
 ## 1. Signals

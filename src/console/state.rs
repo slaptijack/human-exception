@@ -1457,7 +1457,11 @@ impl AppState {
         // called, and retained on `Operation` below regardless of whether
         // that call succeeds, so the run record always reflects what was
         // actually attempted rather than a recomputed global default.
-        let scenario = crate::simulation::Scenario::first_contact();
+        // `run_id` starts at 1 and increases by one per deployment, so the
+        // first deployment of a session always selects the original
+        // configuration, and later redeployments cycle deterministically
+        // through the rest of the authored set.
+        let scenario = crate::simulation::Scenario::select_first_contact(run_id);
 
         let operation = match LiveOperation::deploy(&source, scenario.clone()) {
             Ok(live) => {
@@ -2590,6 +2594,22 @@ mod tests {
     const ALWAYS_ERRORS: &str = "function on_tick(observation) error('boom') end";
     const ROUTE_TO_UPLINK: &str = r#"
         local route = { "north", "east", "east", "east", "east", "north", "north", "north" }
+        local step = 0
+        function on_tick(observation)
+            step = step + 1
+            return route[step]
+        end
+    "#;
+
+    /// The blind route that solves `Scenario::first_contact_south_uplink()`
+    /// (row `y=1` across, then south onto the spur at `(4, 0)`). A session's
+    /// *second* deploy always selects that configuration
+    /// (`Scenario::select_first_contact`'s `run_id = 2`), so tests that
+    /// redeploy `ROUTE_TO_UPLINK` a second time and expect success use this
+    /// instead — `ROUTE_TO_UPLINK` only solves the first deploy's
+    /// configuration.
+    const SOUTH_UPLINK_ROUTE: &str = r#"
+        local route = { "north", "east", "east", "east", "east", "south" }
         local step = 0
         function on_tick(observation)
             step = step + 1
@@ -3853,9 +3873,13 @@ mod tests {
         // succeed again.
         while state.advance_network_bootstrap() {}
         assert!(!state.network_bootstrap_pending());
-        state.controller = Some(ControllerDocument::new(ROUTE_TO_UPLINK));
+        // This second deploy selects a different authored configuration
+        // than the first (`Scenario::select_first_contact`), so
+        // `ROUTE_TO_UPLINK`'s fixed blind route no longer reaches its
+        // uplink; `SOUTH_UPLINK_ROUTE` is the route for that configuration.
+        state.controller = Some(ControllerDocument::new(SOUTH_UPLINK_ROUTE));
         state.apply(Msg::RequestDeploy);
-        for _ in 0..8 {
+        for _ in 0..6 {
             state.advance_running_operation();
         }
 

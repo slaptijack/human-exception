@@ -1997,6 +1997,22 @@ mod tests {
         end
     "#;
 
+    /// The blind route that solves `Scenario::first_contact_south_uplink()`
+    /// (row `y=1` across, then south onto the spur at `(4, 0)`). A session's
+    /// *second* deploy always selects that configuration
+    /// (`Scenario::select_first_contact`'s `run_id = 2`), so tests that
+    /// redeploy `ROUTE_TO_UPLINK` a second time and expect success use this
+    /// instead — `ROUTE_TO_UPLINK` only solves the first deploy's
+    /// configuration.
+    const SOUTH_UPLINK_ROUTE: &str = r#"
+        local route = { "north", "east", "east", "east", "east", "south" }
+        local step = 0
+        function on_tick(observation)
+            step = step + 1
+            return route[step]
+        end
+    "#;
+
     /// Clears the starter controller (backspacing every character from its
     /// end-of-document starting cursor) and types `source` in its place,
     /// exactly as a player replacing the controller script would.
@@ -2806,12 +2822,18 @@ mod tests {
             // session (`retry_events`), not a fresh first attempt — connects
             // and routes into Network Bootstrap rather than After Action,
             // with the Console still rendering disconnected underneath the
-            // still-pending modal.
-            retry_events.extend(clear_and_type(ROUTE_TO_UPLINK));
+            // still-pending modal. This is the session's second deploy, so
+            // `Scenario::select_first_contact` selects a different authored
+            // configuration than the first attempt; `ROUTE_TO_UPLINK`'s
+            // fixed blind route is not guaranteed to reach that
+            // configuration's uplink, so this uses `SOUTH_UPLINK_ROUTE`,
+            // the route for the configuration a session's second deploy
+            // always selects.
+            retry_events.extend(clear_and_type(SOUTH_UPLINK_ROUTE));
             retry_events.push(press_ctrl(KeyCode::Char('v')));
             retry_events.push(press(KeyCode::F(6)));
             retry_events.push(press(KeyCode::Char(' '))); // pause
-            retry_events.extend(std::iter::repeat_n(press(KeyCode::Enter), 8)); // step to success
+            retry_events.extend(std::iter::repeat_n(press(KeyCode::Enter), 6)); // step to success
             let (mut state, terminal) = render_from(
                 bootstrap_state(Some(&profile_path), Some(&intro_path)),
                 width,
