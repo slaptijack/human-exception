@@ -3072,7 +3072,7 @@ mod tests {
         let (state, terminal) = render_from(connected_state(), 120, 40, &navigate);
         assert_eq!(state.review_selected(), Some(hazard_index));
         assert!(buffer_contains(&terminal, "[HAZARD]"));
-        assert!(buffer_contains(&terminal, "hazard entered — cost 5"));
+        assert!(buffer_contains(&terminal, "hazard entered — cost 4"));
     }
 
     #[test]

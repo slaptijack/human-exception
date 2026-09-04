@@ -34,6 +34,34 @@ fn a_controller_that_scans_before_navigating_still_reaches_the_uplink() {
 }
 
 #[test]
+fn a_navigating_controller_reaches_the_uplink_in_the_row1_hazard_configuration() {
+    // `success.lua`'s reactive "prefer north, then east, else scan" logic
+    // doesn't depend on the fixed configuration's hazard placement — only
+    // on discovered tiles — so it should solve `first_contact_row1_hazard()`
+    // exactly as it solves `first_contact()`, without any change to the
+    // fixture, exercising the second authored configuration through the
+    // Lua-controller boundary.
+    let outcome = lua_controller::run(
+        &fixture("success.lua"),
+        Scenario::first_contact_row1_hazard(),
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(outcome, TickOutcome::Succeeded);
+}
+
+#[test]
+fn a_scripted_controller_reaches_the_uplink_in_the_south_uplink_configuration() {
+    let outcome = lua_controller::run(
+        &fixture("south_uplink_route.lua"),
+        Scenario::first_contact_south_uplink(),
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(outcome, TickOutcome::Succeeded);
+}
+
+#[test]
 fn a_waiting_controller_fails_when_the_budget_is_exhausted() {
     let outcome = lua_controller::run(
         &fixture("always_wait.lua"),

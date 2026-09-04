@@ -5804,7 +5804,7 @@ end
             outcome: TickOutcome::Running,
             events: vec![SimEvent::ActionCost {
                 action: Action::Scan,
-                amount: 1,
+                amount: 2,
             }],
             map_width: 5,
             map_height: 5,
@@ -5820,7 +5820,7 @@ end
 
         assert!(text.contains("TICK 01"));
         assert!(text.contains("action        scanned"));
-        assert!(text.contains("scanned — cost 1"));
+        assert!(text.contains("scanned — cost 2"));
         // A tick still in progress is not the run's terminal boundary, so
         // no outcome headline belongs here.
         assert!(!text.contains("UPLINK REACHED"));
