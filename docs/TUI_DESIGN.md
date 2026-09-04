@@ -399,6 +399,50 @@ Persistent header priorities:
 
 The phrase **working set** is intentional: choosing an opportunity means “this is what I am working on now,” not “this mission has been assigned to me.”
 
+## First Contact configuration model
+
+This section is the public behavior contract for the First Contact operation itself — the small programming-strategy challenge the sections below present through the console UI. It defines what varies between attempts and what a controller can rely on, so that later implementation issues do not need to invent product behavior. It does not describe *how* variation is authored or tuned (see the child issues of Epic #185); it only fixes the shape of the contract those issues must satisfy.
+
+**Authored, not procedural.** A First Contact deployment is played against one of a small, hand-authored set of configurations. These are not procedurally or randomly generated. No configuration count is fixed by this document.
+
+**Mostly/entirely fixed topology.** Across the configuration set, the facility's physical topology, the drone's capabilities, the observation contract, the action vocabulary, and the objective (reach the uplink) are shared. Variation is concentrated in the smallest set of operational facts needed to make observation and adaptation valuable: which uplink is active, and where hazards are.
+
+**Deterministic per-deployment selection.** The configuration used for a given deployment is selected deterministically before that deployment begins — never by uncontrolled runtime randomness, consistent with keeping the simulation core deterministic.
+
+**Immutable run provenance.** The selected configuration is retained as part of that run's immutable record, alongside the deployed controller source (§4, [Run records and source provenance](#run-records-and-source-provenance)).
+
+**Objective discovery.** The active uplink remains unknown until legitimately discovered through observation, exactly as Target already requires (§2, [Target information model](#target-information-model)): no configuration exposes the uplink position, complete floor plan, or undiscovered hazard positions ahead of legitimate discovery.
+
+**Passive observation and scan.** Passive local discovery — the terrain the drone has already moved through or adjacent to — remains useful for cautious movement on its own. Scan exists to surface information early enough to change a decision before it is committed to. Scan is useful but optional: a controller that explores carefully using only passive observation has a viable strategy, though it may spend more budget than a well-timed scan would have saved.
+
+**Scan semantics unchanged initially.** This issue does not change scan's existing reveal behavior (currently: reveals the drone's surrounding area without occlusion). A later tuning issue may build the scenario's information pressure on top of this unchanged mechanic.
+
+**Hazard and budget design envelope.** Hazard and budget pressure exist to create Player decisions, not to impose arbitrary difficulty. The intended strategy envelope — approximate outcomes the authored configurations and budget should produce, not guarantees for every possible controller — is:
+
+| Strategy | Desired result |
+| --- | --- |
+| Good adaptive strategy with one useful scan | succeeds with roughly 4–6 budget left |
+| Careful passive exploration with no scan | succeeds with roughly 2–4 budget left |
+| Good strategy that accidentally crosses one hazard | still succeeds, but narrowly |
+| Repeated unnecessary scanning | begins putting success at risk |
+| Repeated revisits / dithering / wasted actions | can fail on budget |
+| Blind route that happens to match one configuration | may succeed |
+| Same blind route applied across every configuration | fails somewhere |
+
+A hazard should read as a meaningful choice between routes or exploration strategies, not merely a budget tax on a route that was already going to succeed. Entering a hazard remains survivable in ordinary circumstances — a new player can make a mistake, observe its cost, revise their controller, and try again.
+
+**Initial tuning values.** The authored-configuration model's initial tuning starting points are **18 starting budget**, **scan cost 2**, and **hazard entry penalty +4**. These are documented starting points for tuning, not immutable product constants, and a later tuning issue may adjust them. They are distinct from the values currently implemented by the single fixed scenario shown in this document's existing mockups (15 starting budget, scan costing the same as any other action, +5 hazard entry penalty) — those remain accurate today and stay so until a later implementation issue changes them (§4, [Operation](#4-operation)).
+
+**`wait` cost unchanged.** `wait` remains a normal-cost action, identical in cost to movement.
+
+**`observation.discovered` remains cumulative.** The observation field already documented in §3 Controller does not become per-tick or reset between scans.
+
+**No single blind route.** No single blind movement sequence is guaranteed to solve every authored configuration. This is not an anti-cheese rule — a simple controller that legitimately reacts to observations and happens to perform extremely well is a success, not a loophole to close.
+
+**No mandated programming construct.** The game does not inspect Player source code or require a particular programming construct, algorithm, or style. A controller succeeds because its behavior solves the operational problem it is presented with.
+
+**Network Bootstrap boundary unchanged.** This contract does not alter the existing First Contact success routing established in Epic #160: authoritative success still routes through [Network Bootstrap](#network-bootstrap) into connected Signals; failure of any kind still lands on After Action (§5) with the Player free to revise and retry.
+
 ## 1. Signals
 
 This front-door pane is the default screen after startup, in either connectivity state (§ [Bootstrap and network connectivity](#bootstrap-and-network-connectivity)). It should feel like a living intelligence stream assembled from unreliable, decentralized sources, never a clean list of quests — that principle applies to both of its presentations below.
@@ -536,7 +580,7 @@ A target dossier may contain:
 - **constraints** — budget, link stability, time window in fiction, or other operation limits;
 - **opportunity** — why acting could be useful or interesting.
 
-Do not reveal hidden authoritative scenario state. Specifically, First Contact must not expose the concealed uplink position, full facility map, or undiscovered hazard positions.
+Do not reveal hidden authoritative scenario state. Specifically, First Contact must not expose the concealed uplink position, full facility map, or undiscovered hazard positions. This includes which authored configuration (§ [First Contact configuration model](#first-contact-configuration-model)) was selected for the current attempt — that is run provenance, not player-facing intelligence, and is never surfaced through the dossier.
 
 ### Choosing to work an opportunity
 
@@ -886,7 +930,7 @@ The compromised satellite feed is visually dominant. Telemetry exists to explain
 └───────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-The sample budget is mechanically valid: four ordinary completed actions from a 15-point budget leave 11.
+The sample budget is mechanically valid: four ordinary completed actions from a 15-point budget leave 11. These figures reflect today's implemented single fixed scenario; see § [First Contact configuration model](#first-contact-configuration-model) for the authored-configuration set's tuning target.
 
 ### Satellite-feed rules
 
@@ -947,7 +991,7 @@ Runtime/script failures end the deployment the same as any other terminal outcom
 Every deployment creates an immutable run record that includes, directly or by immutable revision identity:
 
 - the exact controller source deployed for that run;
-- the scenario/working-set identity;
+- the scenario/working-set identity, including which authored First Contact configuration (§ [First Contact configuration model](#first-contact-configuration-model)) was selected for that deployment;
 - authoritative events and final result;
 - discovered state needed to review the run.
 
@@ -1061,7 +1105,9 @@ Returning to Signals does not imply abandoning or failing a formal assignment. I
 
 The initial After Action screen carries only the evidence needed to understand the result: final budget/ticks executed, tiles discovered, hazards entered, the run identifier (e.g. `deployed rev run-07`), and — where space allows — the final satellite frame. This evidence set is the same regardless of outcome.
 
-Detailed tick-by-tick telemetry, full event chronology, and the exact deployed-source provenance are **Review Run**'s responsibility (`F5` from After Action), not After Action's. After Action answers "what happened and what does it mean"; Review Run answers "show me exactly what the code did," down to browsing the complete deployed source in the run inspector's `SOURCE` mode. Neither view exposes hidden authoritative scenario state (§2, [Target information model](#target-information-model)) beyond what the run legitimately discovered.
+That evidence set may also include a small amount of factual First Contact-specific evidence where useful: scans performed, whether and roughly when the uplink was first legitimately observed, and ordinary action-budget spent versus budget lost to hazard penalties. This stays factual and mechanical — After Action must not become a strategy coach that tells the Player what they should have done differently.
+
+Detailed tick-by-tick telemetry, full event chronology, and the exact deployed-source provenance are **Review Run**'s responsibility (`F5` from After Action), not After Action's. After Action answers "what happened and what does it mean"; Review Run answers "show me exactly what the code did," down to browsing the complete deployed source in the run inspector's `SOURCE` mode, and to the tick-by-tick detail (including each scan and hazard event) that After Action only summarizes. Neither view exposes hidden authoritative scenario state (§2, [Target information model](#target-information-model)) beyond what the run legitimately discovered.
 
 ### Review Run
 
