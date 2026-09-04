@@ -29,8 +29,8 @@ use mlua::{
 };
 
 use crate::simulation::{
-    Action, ActionError, DiscoveredTile, Observation, Position, SimEvent, Simulation, TickOutcome,
-    TileKind,
+    Action, ActionError, DiscoveredTile, Observation, Position, Scenario, SimEvent, Simulation,
+    TickOutcome, TileKind,
 };
 
 /// The name of the one callback a player script must define.
@@ -851,14 +851,15 @@ pub struct TickRecord {
     pub discovered: Vec<DiscoveredTile>,
 }
 
-/// Loads `script_path`, then drives a fresh [`Simulation`] to completion by
-/// calling its `on_tick` callback once per tick until the operation
-/// succeeds or fails. After each completed tick, `observer` (the Rust-side
-/// caller's hook, not the Lua callback) is invoked with a [`TickRecord`]
-/// describing what happened, so a caller can render live telemetry without
-/// this module knowing anything about presentation.
+/// Loads `script_path`, then drives a fresh [`Simulation`] of the given
+/// `scenario` to completion by calling its `on_tick` callback once per tick
+/// until the operation succeeds or fails. After each completed tick,
+/// `observer` (the Rust-side caller's hook, not the Lua callback) is invoked
+/// with a [`TickRecord`] describing what happened, so a caller can render
+/// live telemetry without this module knowing anything about presentation.
 pub fn run(
     script_path: &Path,
+    scenario: Scenario,
     mut observer: impl FnMut(TickRecord),
 ) -> Result<TickOutcome, ControllerError> {
     let source =
@@ -870,7 +871,7 @@ pub fn run(
     let lua = sandboxed_lua();
     let callback = load_controller(&lua, &source)?;
 
-    let mut simulation = Simulation::new();
+    let mut simulation = Simulation::from_scenario(scenario);
 
     loop {
         let record = advance_tick(&lua, &callback, &mut simulation, None)?;
@@ -990,6 +991,12 @@ pub struct LiveOperation {
     to_worker: mpsc::Sender<()>,
     from_worker: mpsc::Receiver<Result<TickRecord, WorkerError>>,
     finished: bool,
+    /// The scenario this deployment was started against, captured at
+    /// [`LiveOperation::deploy`] time so `starting_budget`/`observe`/
+    /// `map_width`/`map_height` can read it back directly instead of
+    /// assuming every deployment shares one fixed global scenario
+    /// (`docs/TUI_DESIGN.md`, "First Contact configuration model").
+    scenario: Scenario,
 }
 
 // `mpsc::Sender`/`Receiver` don't implement `Debug`, so this can't be
@@ -999,6 +1006,7 @@ impl fmt::Debug for LiveOperation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LiveOperation")
             .field("finished", &self.finished)
+            .field("scenario", &self.scenario)
             .finish_non_exhaustive()
     }
 }
@@ -1087,19 +1095,21 @@ impl WorkerError {
 
 impl LiveOperation {
     /// Loads `source` into a fresh sandboxed `Lua` against a fresh
-    /// [`Simulation`] on a dedicated worker thread (see [`LiveOperation`]'s
-    /// own docs), and returns a handle that can step it one tick at a time
-    /// instead of driving it to completion immediately. The top-level load
-    /// itself is bounded exactly like [`validate`]'s (an instruction hook
-    /// plus a [`VALIDATE_TIMEOUT`] wall-clock backstop): unlike `validate`,
-    /// a controller is not required to pass validation before deployment,
-    /// and an edit invalidates any earlier validation result, so deploying
-    /// an unvalidated (or since-edited) source with a non-returning
-    /// top-level statement — e.g. a bare `while true do end` outside any
-    /// function — needs the same bounded-load guarantee `validate` already
-    /// has, not just protection for `on_tick` itself.
-    pub fn deploy(source: &str) -> Result<LiveOperation, ControllerError> {
+    /// [`Simulation`] of the given `scenario` on a dedicated worker thread
+    /// (see [`LiveOperation`]'s own docs), and returns a handle that can
+    /// step it one tick at a time instead of driving it to completion
+    /// immediately. The top-level load itself is bounded exactly like
+    /// [`validate`]'s (an instruction hook plus a [`VALIDATE_TIMEOUT`]
+    /// wall-clock backstop): unlike `validate`, a controller is not required
+    /// to pass validation before deployment, and an edit invalidates any
+    /// earlier validation result, so deploying an unvalidated (or
+    /// since-edited) source with a non-returning top-level statement — e.g.
+    /// a bare `while true do end` outside any function — needs the same
+    /// bounded-load guarantee `validate` already has, not just protection
+    /// for `on_tick` itself.
+    pub fn deploy(source: &str, scenario: Scenario) -> Result<LiveOperation, ControllerError> {
         let source = source.to_string();
+        let worker_scenario = scenario.clone();
         let (to_worker, step_requests) = mpsc::channel::<()>();
         let (results_tx, from_worker) = mpsc::channel::<Result<TickRecord, WorkerError>>();
         let (ready_tx, ready_rx) = mpsc::channel::<DeployOutcome>();
@@ -1145,7 +1155,7 @@ impl LiveOperation {
                 return;
             }
 
-            let mut simulation = Simulation::new();
+            let mut simulation = Simulation::from_scenario(worker_scenario);
             while step_requests.recv().is_ok() {
                 // Reinstalling the hook resets its instruction countdown,
                 // turning `TICK_INSTRUCTION_BUDGET` into a genuine per-tick
@@ -1193,6 +1203,7 @@ impl LiveOperation {
                 to_worker,
                 from_worker,
                 finished: false,
+                scenario,
             }),
             Ok(DeployOutcome::Failed(err)) => Err(err.into_controller_error()),
             Err(_) => Err(ControllerError::ScriptInvalid(mlua::Error::RuntimeError(
@@ -1255,36 +1266,39 @@ impl LiveOperation {
         self.finished
     }
 
-    /// The fixed scenario's starting operational budget, for rendering
-    /// `budget_remaining / starting_budget` telemetry. Every [`LiveOperation`]
-    /// runs the same fixed "First Contact" scenario (see [`Simulation::new`]),
-    /// so this needs no per-deployment state to compute.
+    /// This deployment's scenario's starting operational budget, for
+    /// rendering `budget_remaining / starting_budget` telemetry. Read from
+    /// the scenario captured at [`LiveOperation::deploy`] time rather than
+    /// any global default, so telemetry reflects whichever configuration
+    /// this specific deployment actually used.
     pub fn starting_budget(&self) -> u32 {
-        crate::simulation::Scenario::first_contact().starting_budget()
+        self.scenario.starting_budget()
     }
 
-    /// A read-only snapshot of the fixed scenario's starting state,
-    /// independent of whether any tick has run yet — the drone's starting
-    /// position and whatever a fresh [`Simulation::new`] reveals around it
-    /// — for rendering before the first tick completes. Every deployment
-    /// starts from the same fixed scenario (see
-    /// [`LiveOperation::starting_budget`]), so this needs no interaction
-    /// with the worker thread actually running this deployment; callers
-    /// only ever use it before any tick has advanced, at which point it's
-    /// identical to that live state anyway.
+    /// A read-only snapshot of this deployment's scenario's starting
+    /// state, independent of whether any tick has run yet — the drone's
+    /// starting position and whatever a fresh [`Simulation`] of that same
+    /// scenario reveals around it — for rendering before the first tick
+    /// completes. This needs no interaction with the worker thread actually
+    /// running this deployment: it's a pure function of the scenario
+    /// captured at deploy time, and callers only ever use it before any
+    /// tick has advanced, at which point it's identical to that live state
+    /// anyway.
     pub fn observe(&self) -> Observation {
-        Simulation::new().observe()
+        Simulation::from_scenario(self.scenario.clone()).observe()
     }
 
-    /// The fixed scenario's facility width, for rendering the satellite
-    /// feed before any [`TickRecord`] (which also carries it) exists yet.
+    /// This deployment's scenario's facility width, for rendering the
+    /// satellite feed before any [`TickRecord`] (which also carries it)
+    /// exists yet.
     pub fn map_width(&self) -> i32 {
-        crate::simulation::Scenario::first_contact().map().width()
+        self.scenario.map().width()
     }
 
-    /// The fixed scenario's facility height; see [`LiveOperation::map_width`].
+    /// This deployment's scenario's facility height; see
+    /// [`LiveOperation::map_width`].
     pub fn map_height(&self) -> i32 {
-        crate::simulation::Scenario::first_contact().map().height()
+        self.scenario.map().height()
     }
 }
 
@@ -2537,22 +2551,28 @@ mod tests {
 
     #[test]
     fn live_operation_deploy_rejects_a_syntax_error() {
-        let err = LiveOperation::deploy("function on_tick( ").unwrap_err();
+        let err =
+            LiveOperation::deploy("function on_tick( ", Scenario::first_contact()).unwrap_err();
         assert!(matches!(err, ControllerError::ScriptInvalid(_)));
     }
 
     #[test]
     fn live_operation_deploy_rejects_a_script_missing_on_tick() {
-        let err =
-            LiveOperation::deploy("function some_other_function(observation) return 'wait' end")
-                .unwrap_err();
+        let err = LiveOperation::deploy(
+            "function some_other_function(observation) return 'wait' end",
+            Scenario::first_contact(),
+        )
+        .unwrap_err();
         assert!(matches!(err, ControllerError::MissingCallback));
     }
 
     #[test]
     fn live_operation_step_advances_exactly_one_tick() {
-        let mut op = LiveOperation::deploy("function on_tick(observation) return 'wait' end")
-            .expect("valid controller");
+        let mut op = LiveOperation::deploy(
+            "function on_tick(observation) return 'wait' end",
+            Scenario::first_contact(),
+        )
+        .expect("valid controller");
         assert!(!op.is_finished());
 
         let first = op.step().expect("wait is always a valid action");
@@ -2569,6 +2589,7 @@ mod tests {
     fn live_operation_reports_a_callback_error_and_finishes() {
         let mut op = LiveOperation::deploy(
             "function on_tick(observation) error('simulated controller malfunction') end",
+            Scenario::first_contact(),
         )
         .expect("script loads even though on_tick will fail when called");
 
@@ -2579,8 +2600,11 @@ mod tests {
 
     #[test]
     fn live_operation_reports_an_invalid_action() {
-        let mut op = LiveOperation::deploy("function on_tick(observation) return 'north-east' end")
-            .expect("script loads");
+        let mut op = LiveOperation::deploy(
+            "function on_tick(observation) return 'north-east' end",
+            Scenario::first_contact(),
+        )
+        .expect("script loads");
 
         let err = op.step().unwrap_err();
         assert!(matches!(err, ControllerError::InvalidAction(_)), "{err}");
@@ -2597,7 +2621,8 @@ mod tests {
                 return route[step]
             end
         "#;
-        let mut op = LiveOperation::deploy(source).expect("valid controller");
+        let mut op =
+            LiveOperation::deploy(source, Scenario::first_contact()).expect("valid controller");
 
         let mut last_outcome = TickOutcome::Running;
         let mut ticks = 0;
@@ -2623,7 +2648,8 @@ mod tests {
         "#;
 
         let run_to_completion = || {
-            let mut op = LiveOperation::deploy(source).expect("valid controller");
+            let mut op =
+                LiveOperation::deploy(source, Scenario::first_contact()).expect("valid controller");
             let mut records = Vec::new();
             loop {
                 let record = op.step().expect("route never returns an invalid action");
@@ -2640,8 +2666,11 @@ mod tests {
 
     #[test]
     fn live_operation_budget_exhaustion_fails_deterministically() {
-        let mut op = LiveOperation::deploy("function on_tick(observation) return 'wait' end")
-            .expect("valid controller");
+        let mut op = LiveOperation::deploy(
+            "function on_tick(observation) return 'wait' end",
+            Scenario::first_contact(),
+        )
+        .expect("valid controller");
 
         let mut last_outcome = TickOutcome::Running;
         while last_outcome == TickOutcome::Running {
@@ -2658,6 +2687,7 @@ mod tests {
     fn live_operation_step_after_the_operation_finished_still_returns_a_stopped_result() {
         let mut op = LiveOperation::deploy(
             "function on_tick(observation) error('simulated controller malfunction') end",
+            Scenario::first_contact(),
         )
         .expect("script loads");
         let _ = step_to_completion(&mut op);
@@ -2666,8 +2696,11 @@ mod tests {
 
     #[test]
     fn live_operation_bounds_a_runaway_on_tick_instead_of_hanging() {
-        let mut op = LiveOperation::deploy("function on_tick(observation) while true do end end")
-            .expect("script loads; the infinite loop is only inside on_tick");
+        let mut op = LiveOperation::deploy(
+            "function on_tick(observation) while true do end end",
+            Scenario::first_contact(),
+        )
+        .expect("script loads; the infinite loop is only inside on_tick");
 
         let err = op.step().unwrap_err();
         assert!(
@@ -2690,7 +2723,8 @@ mod tests {
                 return "wait"
             end
         "#;
-        let mut op = LiveOperation::deploy(source).expect("script loads");
+        let mut op =
+            LiveOperation::deploy(source, Scenario::first_contact()).expect("script loads");
 
         let err = op.step().unwrap_err();
         assert!(
@@ -2702,8 +2736,44 @@ mod tests {
 
     #[test]
     fn live_operation_starting_budget_matches_the_fixed_scenario() {
-        let op = LiveOperation::deploy("function on_tick(observation) return 'wait' end")
-            .expect("valid controller");
+        let op = LiveOperation::deploy(
+            "function on_tick(observation) return 'wait' end",
+            Scenario::first_contact(),
+        )
+        .expect("valid controller");
         assert_eq!(op.starting_budget(), 15);
+    }
+
+    #[test]
+    fn live_operation_telemetry_reflects_the_deployed_scenario_not_a_global_default() {
+        let map = crate::simulation::FacilityMap::new(
+            3,
+            1,
+            vec![
+                crate::simulation::TileKind::Floor,
+                crate::simulation::TileKind::Floor,
+                crate::simulation::TileKind::Floor,
+            ],
+            Position { x: 0, y: 0 },
+            Position { x: 2, y: 0 },
+        )
+        .expect("valid 3x1 facility map");
+        let scenario = Scenario::new(map, 7);
+
+        let op = LiveOperation::deploy(
+            "function on_tick(observation) return 'wait' end",
+            scenario.clone(),
+        )
+        .expect("valid controller");
+
+        assert_eq!(op.starting_budget(), scenario.starting_budget());
+        assert_ne!(
+            op.starting_budget(),
+            Scenario::first_contact().starting_budget()
+        );
+        assert_eq!(op.map_width(), scenario.map().width());
+        assert_eq!(op.map_height(), scenario.map().height());
+        assert_ne!(op.map_width(), Scenario::first_contact().map().width());
+        assert_eq!(op.observe().drone_position, scenario.drone_start());
     }
 }

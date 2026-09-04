@@ -148,23 +148,27 @@ fn run_operation(script: &Path) -> i32 {
     println!();
 
     let mut tick_count = 0u32;
-    let result = human_exception::lua_controller::run(script, |record| {
-        tick_count = record.tick;
-        println!(
-            "{}",
-            human_exception::render_satellite_view(
-                record.drone_position,
-                record.map_width,
-                record.map_height,
-                &record.discovered,
-            )
-        );
-        println!("{}", format_tick_line(&record));
-        for line in format_event_lines(&record) {
-            println!("{line}");
-        }
-        println!();
-    });
+    let result = human_exception::lua_controller::run(
+        script,
+        human_exception::Scenario::first_contact(),
+        |record| {
+            tick_count = record.tick;
+            println!(
+                "{}",
+                human_exception::render_satellite_view(
+                    record.drone_position,
+                    record.map_width,
+                    record.map_height,
+                    &record.discovered,
+                )
+            );
+            println!("{}", format_tick_line(&record));
+            for line in format_event_lines(&record) {
+                println!("{line}");
+            }
+            println!();
+        },
+    );
 
     // Wording mirrors the interactive console's After Action outcome
     // hierarchy (`docs/TUI_DESIGN.md` §5, `src/console/ui.rs`

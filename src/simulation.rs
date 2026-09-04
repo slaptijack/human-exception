@@ -479,14 +479,19 @@ pub struct Simulation {
 }
 
 impl Simulation {
-    /// Starts a new simulation of the fixed "First Contact" scenario.
+    /// A test/convenience constructor for the fixed "First Contact"
+    /// scenario. Production callers select a [`Scenario`] explicitly and
+    /// use [`Simulation::from_scenario`] instead, so that each deployment
+    /// can carry its own configuration rather than assuming this one
+    /// global default.
     ///
     /// A new simulation always starts from the same state.
     pub fn new() -> Self {
         Self::from_scenario(Scenario::first_contact())
     }
 
-    fn from_scenario(scenario: Scenario) -> Self {
+    /// Starts a new simulation of the given `scenario`.
+    pub fn from_scenario(scenario: Scenario) -> Self {
         let drone_position = scenario.drone_start();
         let budget_remaining = scenario.starting_budget();
         let mut simulation = Simulation {
@@ -511,6 +516,11 @@ impl Simulation {
 
     pub fn outcome(&self) -> TickOutcome {
         self.outcome
+    }
+
+    /// The scenario this simulation was started from.
+    pub fn scenario(&self) -> &Scenario {
+        &self.scenario
     }
 
     /// The facility map this operation is being run against.
