@@ -297,17 +297,23 @@ const FIRST_CONTACT_ROWS: [&str; 5] = [
 ];
 
 /// An authored "First Contact" variant sharing [`FIRST_CONTACT_ROWS`]'s
-/// facility topology, but with the uplink moved to the opposite corner
-/// (`(0, 4)`) and the hazard moved onto the direct column route leading to
-/// it (`(0, 2)`). The direct route down that column (4 actions) crosses the
-/// hazard; the longer route around the block (12 actions) does not — both
-/// comfortably within the shared starting budget.
-const FIRST_CONTACT_WEST_UPLINK_ROWS: [&str; 5] = [
-    "U....", // y = 4
+/// facility topology, but with the uplink relocated to the south end of
+/// column `x=4` (`(4, 0)`) rather than either end of the shared row-`y=1`/
+/// row-`y=4` corridor. Unlike [`FIRST_CONTACT_WEST_HAZARD_ROWS`], reaching
+/// this uplink requires actually turning off that corridor onto column
+/// `x=4`'s south spur, so neither of the two eight-action routes that solve
+/// [`FIRST_CONTACT_ROWS`] (nor the boundary-walking sequence that chains
+/// them into one longer blind route) reaches it: see
+/// `no_single_blind_route_solves_every_authored_first_contact_configuration`.
+/// The hazard stays at the original `(4, 2)`, on the direct route down that
+/// spur, so a blind sequence built to visit every tile still runs out of
+/// budget there before ever reaching `(4, 0)`.
+const FIRST_CONTACT_SOUTH_UPLINK_ROWS: [&str; 5] = [
+    ".....", // y = 4
     ".###.", // y = 3
-    "~###.", // y = 2
+    ".###~", // y = 2
     ".....", // y = 1
-    "S###.", // y = 0
+    "S###U", // y = 0
 ];
 
 /// An authored "First Contact" variant sharing [`FIRST_CONTACT_ROWS`]'s
@@ -363,17 +369,17 @@ impl Scenario {
         Scenario::new(map, 15)
     }
 
-    /// An authored "First Contact" variant: uplink at `(0, 4)`, hazard at
-    /// `(0, 2)`. See [`FIRST_CONTACT_WEST_UPLINK_ROWS`].
-    pub fn first_contact_west_uplink() -> Self {
+    /// An authored "First Contact" variant: uplink at `(4, 0)`, hazard at
+    /// `(4, 2)`. See [`FIRST_CONTACT_SOUTH_UPLINK_ROWS`].
+    pub fn first_contact_south_uplink() -> Self {
         let map = FacilityMap::new(
             5,
             5,
-            tiles_from_rows(&FIRST_CONTACT_WEST_UPLINK_ROWS),
+            tiles_from_rows(&FIRST_CONTACT_SOUTH_UPLINK_ROWS),
             Position { x: 0, y: 0 },
-            Position { x: 0, y: 4 },
+            Position { x: 4, y: 0 },
         )
-        .expect("the first-contact-west-uplink facility map is valid");
+        .expect("the first-contact-south-uplink facility map is valid");
 
         Scenario::new(map, 15)
     }
@@ -399,10 +405,22 @@ impl Scenario {
     /// configuration model"). Not procedurally generated: each entry is one
     /// of the fixed constructors above, sharing the same facility topology
     /// and varying only the active uplink and hazard placement.
+    ///
+    /// No single short, direction-committed blind sequence (the two
+    /// original eight-action routes, or a longer sequence chaining them)
+    /// solves every entry — see
+    /// `no_single_blind_route_solves_every_authored_first_contact_configuration`.
+    /// This guarantee is bounded by the current starting budget and hazard
+    /// cost, both left unchanged by this configuration set on purpose: an
+    /// exhaustive sequence that is willing to retrace ground already
+    /// covered can still solve every entry within a generous-enough budget.
+    /// Tightening that margin, if ever needed, belongs to the budget/hazard
+    /// tuning pass (`docs/TUI_DESIGN.md`'s 18/2/+4 tuning starting points),
+    /// not to this configuration set.
     fn first_contact_configurations() -> [Scenario; 3] {
         [
             Scenario::first_contact(),
-            Scenario::first_contact_west_uplink(),
+            Scenario::first_contact_south_uplink(),
             Scenario::first_contact_west_hazard(),
         ]
     }
@@ -1107,10 +1125,28 @@ mod tests {
 
     #[test]
     fn no_single_blind_route_solves_every_authored_first_contact_configuration() {
-        // The blind route that solves the original scenario (row y=1 across,
-        // then north up column x=4): `tests/fixtures/hazard_route.lua` plays
-        // exactly this sequence against a live deployment.
-        let blind_route = [
+        // Plays a fixed action sequence against every authored
+        // configuration from a fresh `Simulation`, returning each one's
+        // final outcome.
+        fn outcomes_for(route: &[Action]) -> Vec<TickOutcome> {
+            Scenario::first_contact_configurations()
+                .into_iter()
+                .map(|scenario| {
+                    let mut sim = Simulation::from_scenario(scenario);
+                    for &action in route {
+                        if sim.step(action).is_err() || sim.outcome() != TickOutcome::Running {
+                            break;
+                        }
+                    }
+                    sim.outcome()
+                })
+                .collect()
+        }
+
+        // The blind route that solves the original scenario via row y=1
+        // across, then north up column x=4: `tests/fixtures/hazard_route.lua`
+        // plays exactly this sequence against a live deployment.
+        let row_then_column_route = [
             Action::MoveNorth,
             Action::MoveEast,
             Action::MoveEast,
@@ -1120,31 +1156,34 @@ mod tests {
             Action::MoveNorth,
             Action::MoveNorth,
         ];
+        // The mirror route: column x=0 up, then east across row y=4. Both
+        // routes solve `Scenario::first_contact()`, so a player who solved
+        // one run by either route might naturally try replaying it as-is.
+        let column_then_row_route = [
+            Action::MoveNorth,
+            Action::MoveNorth,
+            Action::MoveNorth,
+            Action::MoveNorth,
+            Action::MoveEast,
+            Action::MoveEast,
+            Action::MoveEast,
+            Action::MoveEast,
+        ];
 
-        let outcomes: Vec<TickOutcome> = Scenario::first_contact_configurations()
-            .into_iter()
-            .map(|scenario| {
-                let mut sim = Simulation::from_scenario(scenario);
-                for &action in &blind_route {
-                    if sim.step(action).is_err() || sim.outcome() != TickOutcome::Running {
-                        break;
-                    }
-                }
-                sim.outcome()
-            })
-            .collect();
-
-        assert!(
-            outcomes.contains(&TickOutcome::Succeeded),
-            "the blind route should still solve at least one authored configuration"
-        );
-        assert!(
-            !outcomes
-                .iter()
-                .all(|outcome| *outcome == TickOutcome::Succeeded),
-            "no single blind route may be guaranteed to solve every authored \
-             configuration, but this route solved all of {outcomes:?}"
-        );
+        for route in [row_then_column_route, column_then_row_route] {
+            let outcomes = outcomes_for(&route);
+            assert!(
+                outcomes.contains(&TickOutcome::Succeeded),
+                "{route:?} should still solve at least one authored configuration"
+            );
+            assert!(
+                !outcomes
+                    .iter()
+                    .all(|outcome| *outcome == TickOutcome::Succeeded),
+                "no single blind route may be guaranteed to solve every authored \
+                 configuration, but {route:?} solved all of {outcomes:?}"
+            );
+        }
     }
 
     #[test]
