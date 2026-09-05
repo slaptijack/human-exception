@@ -2776,4 +2776,65 @@ mod tests {
         assert_ne!(op.map_width(), Scenario::first_contact().map().width());
         assert_eq!(op.observe().drone_position, scenario.drone_start());
     }
+
+    /// The checked-in reference controller, run against a specific one of
+    /// [`Scenario::select_first_contact`]'s authored configurations. Used
+    /// below to check what the shipped example actually does against each
+    /// one, not just the single fixed scenario `--developer-mode` and the
+    /// rest of this module's inline stand-in scripts exercise elsewhere.
+    fn run_example_against(run_id: u32) -> TickOutcome {
+        let script_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("examples")
+            .join("first_contact.lua");
+        run(&script_path, Scenario::select_first_contact(run_id), |_| {})
+            .expect("the reference controller runs to completion without error")
+    }
+
+    /// `run_id`s 1 and 3 both select a scenario whose uplink sits at
+    /// `(4, 4)` (see `Scenario::first_contact` and
+    /// `Scenario::first_contact_row1_hazard`), reachable by the same
+    /// hazard-free route the reference controller's fixed direction
+    /// preference finds directly; `--developer-mode` always deploys
+    /// `run_id` 1's scenario, so this also keeps that path solved.
+    #[test]
+    fn the_reference_controller_succeeds_against_the_uplink_at_4_4_configurations() {
+        for run_id in [1, 3] {
+            assert_eq!(
+                run_example_against(run_id),
+                TickOutcome::Succeeded,
+                "expected the reference controller to reach the uplink for run_id {run_id}"
+            );
+        }
+    }
+
+    /// `run_id` 2 (`Scenario::first_contact_south_uplink`) is a known,
+    /// deterministic gap: kept deliberately, not disabled or weakened, so
+    /// this test fails loudly (rather than silently regresses further) if
+    /// the reference controller's behavior on this configuration ever
+    /// changes. issue #199 records why a small, honest reactive strategy
+    /// with no knowledge of the authored configuration matrix baked into
+    /// its logic cannot also solve this configuration within the current
+    /// budget, and asks whether that budget/geometry is too tight for the
+    /// programming lesson First Contact, as the very first operation, is
+    /// meant to teach -- see that issue before changing this test.
+    #[test]
+    fn the_reference_controller_runs_out_of_budget_on_the_south_uplink_configuration() {
+        assert_eq!(
+            run_example_against(2),
+            TickOutcome::Failed(FailureReason::BudgetExhausted),
+            "if this changed, see issue #199 before updating the assertion"
+        );
+    }
+
+    #[test]
+    fn the_reference_controller_is_deterministic_across_every_authored_configuration() {
+        for run_id in 1..=3 {
+            let first = run_example_against(run_id);
+            let second = run_example_against(run_id);
+            assert_eq!(
+                first, second,
+                "expected identical outcomes on repeated runs for run_id {run_id}"
+            );
+        }
+    }
 }
