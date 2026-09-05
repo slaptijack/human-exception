@@ -266,13 +266,19 @@ fn uplink_is_reachable(
     false
 }
 
-/// The fixed budget cost of any single action (move, wait, or scan alike).
+/// The fixed budget cost of a move or `wait` action.
 pub const ACTION_COST: u32 = 1;
+
+/// The fixed budget cost of a `scan` action, in place of [`ACTION_COST`].
+/// Priced higher than a move so that scanning continuously is not
+/// automatically the optimal strategy, while a single well-timed scan can
+/// still be cheaper than the exploration it saves.
+pub const SCAN_COST: u32 = 2;
 
 /// The additional budget cost of entering a hazard tile, on top of the
 /// action's [`ACTION_COST`]. Charged only on the tick the drone moves onto
 /// the hazard tile, not for continuing to occupy or waiting on it.
-pub const HAZARD_ENTRY_COST: u32 = 5;
+pub const HAZARD_ENTRY_COST: u32 = 4;
 
 /// The fixed reconnaissance scenario: one drone, one facility map, one
 /// operational budget.
@@ -288,12 +294,21 @@ pub struct Scenario {
 /// costly to enter). Row `y = 1` is open floor across its whole width, so a
 /// route through the hazard (row `y = 1` then column `x = 4`) and a route
 /// around it (column `x = 0` then row `y = 4`) are both eight actions long.
+/// `(2, 0)` is a single-tile dead end off that corridor (its only floor
+/// neighbour is `(2, 1)`), shared by every authored configuration. Passive
+/// discovery already reveals it the moment the drone reaches `(2, 1)` — no
+/// need to step into it — but reaching `(2, 1)` at all means committing two
+/// actions of exploration east before that information exists, and reacting
+/// to it by falling back to the known-safe west corridor costs two more
+/// backtracking to `(0, 1)`. A single scan taken before ever leaving
+/// `(0, 0)` reveals the same area for less — see
+/// `scanning_the_dead_end_pocket_saves_the_exploration_a_passive_backtrack_would_cost`.
 const FIRST_CONTACT_ROWS: [&str; 5] = [
     "....U", // y = 4
     ".###.", // y = 3
     ".###~", // y = 2
     ".....", // y = 1
-    "S###.", // y = 0
+    "S#.#.", // y = 0
 ];
 
 /// An authored "First Contact" variant sharing [`FIRST_CONTACT_ROWS`]'s
@@ -313,7 +328,7 @@ const FIRST_CONTACT_SOUTH_UPLINK_ROWS: [&str; 5] = [
     ".###.", // y = 3
     ".###~", // y = 2
     ".....", // y = 1
-    "S###U", // y = 0
+    "S#.#U", // y = 0
 ];
 
 /// An authored "First Contact" variant sharing [`FIRST_CONTACT_ROWS`]'s
@@ -330,7 +345,7 @@ const FIRST_CONTACT_ROW1_HAZARD_ROWS: [&str; 5] = [
     ".###.", // y = 3
     ".###.", // y = 2
     "....~", // y = 1
-    "S###.", // y = 0
+    "S#.#.", // y = 0
 ];
 
 /// Parses a north-up ASCII map (rows given top-down) into a row-major,
@@ -689,12 +704,17 @@ impl Simulation {
             self.reveal_scan();
         }
 
-        let cost = ACTION_COST + if entered_hazard { HAZARD_ENTRY_COST } else { 0 };
+        let action_cost = if action == Action::Scan {
+            SCAN_COST
+        } else {
+            ACTION_COST
+        };
+        let cost = action_cost + if entered_hazard { HAZARD_ENTRY_COST } else { 0 };
         self.budget_remaining = self.budget_remaining.saturating_sub(cost);
 
         let mut events = vec![SimEvent::ActionCost {
             action,
-            amount: ACTION_COST,
+            amount: action_cost,
         }];
         if entered_hazard {
             events.push(SimEvent::HazardEntered {
@@ -1090,6 +1110,10 @@ mod tests {
         // Row y=1 is the open corridor that lets a controller reach the
         // hazard via an alternate route instead of only the safe one.
         assert_eq!(map.tile_at(Position { x: 2, y: 1 }), Some(TileKind::Floor));
+        // The dead-end scan-value pocket, isolated from the walls on
+        // either side of it.
+        assert_eq!(map.tile_at(Position { x: 2, y: 0 }), Some(TileKind::Floor));
+        assert_eq!(map.tile_at(Position { x: 3, y: 0 }), Some(TileKind::Wall));
     }
 
     #[test]
@@ -1589,8 +1613,8 @@ mod tests {
     }
 
     #[test]
-    fn each_action_type_costs_the_documented_action_cost() {
-        for action in [Action::MoveNorth, Action::Wait, Action::Scan] {
+    fn move_and_wait_cost_the_documented_action_cost() {
+        for action in [Action::MoveNorth, Action::Wait] {
             let mut sim = Simulation::from_scenario(open_scenario(20));
             let before = sim.observe().budget_remaining;
 
@@ -1598,6 +1622,20 @@ mod tests {
 
             assert_eq!(sim.observe().budget_remaining, before - ACTION_COST);
         }
+    }
+
+    #[test]
+    fn scan_costs_the_documented_scan_cost() {
+        let mut sim = Simulation::from_scenario(open_scenario(20));
+        let before = sim.observe().budget_remaining;
+
+        let report = sim.step(Action::Scan).unwrap();
+
+        assert_eq!(sim.observe().budget_remaining, before - SCAN_COST);
+        assert!(report.events.contains(&SimEvent::ActionCost {
+            action: Action::Scan,
+            amount: SCAN_COST,
+        }));
     }
 
     #[test]
@@ -1716,6 +1754,260 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, SimEvent::HazardEntered { .. }))
         }));
+    }
+
+    /// Runs `route` against `scenario`, panicking if any action is rejected,
+    /// and returns the final [`Simulation`] for the caller to assert
+    /// against.
+    fn run_route(scenario: Scenario, route: &[Action]) -> Simulation {
+        let mut sim = Simulation::from_scenario(scenario);
+        for &action in route {
+            sim.step(action)
+                .expect("every action in the route is valid");
+        }
+        sim
+    }
+
+    #[test]
+    fn scanning_the_dead_end_pocket_saves_the_exploration_a_passive_backtrack_would_cost() {
+        // `(2, 0)` (see `FIRST_CONTACT_ROWS`) is a dead end off the shared
+        // corridor. Passive discovery reveals the drone's tile plus its 4
+        // cardinal neighbours every tick, so a controller never needs to
+        // step into `(2, 0)` to rule it out — reaching `(2, 1)` already
+        // reveals it. But *reaching* `(2, 1)` at all is itself two actions
+        // spent probing east before ever confirming the west corridor is
+        // safe, and reacting to what it finds there by falling back to the
+        // known-safe west route costs two more actions backtracking to
+        // `(0, 1)`: four actions of committed-then-abandoned exploration,
+        // exactly what `a_careful_passive_strategy_without_scanning_succeeds_with_a_smaller_margin`'s
+        // route walks. A single scan from the start reveals the same area
+        // (and the hazard-free direction) for 2, without ever leaving
+        // `(0, 0)`.
+        let scan_then_go = [
+            Action::Scan,
+            Action::MoveNorth,
+            Action::MoveNorth,
+            Action::MoveNorth,
+            Action::MoveNorth,
+            Action::MoveEast,
+            Action::MoveEast,
+            Action::MoveEast,
+            Action::MoveEast,
+        ];
+        let passive_probe_then_backtrack = [
+            Action::MoveNorth,
+            Action::MoveEast,
+            Action::MoveEast, // (2, 1): passively discovers (2, 0) is a dead end
+            Action::MoveWest,
+            Action::MoveWest, // back to (0, 1), committing to the west corridor
+            Action::MoveNorth,
+            Action::MoveNorth,
+            Action::MoveNorth,
+            Action::MoveEast,
+            Action::MoveEast,
+            Action::MoveEast,
+            Action::MoveEast,
+        ];
+
+        let scanned = run_route(Scenario::first_contact(), &scan_then_go);
+        let passive = run_route(Scenario::first_contact(), &passive_probe_then_backtrack);
+
+        assert_eq!(scanned.outcome(), TickOutcome::Succeeded);
+        assert_eq!(passive.outcome(), TickOutcome::Succeeded);
+        assert!(
+            scanned.observe().budget_remaining > passive.observe().budget_remaining,
+            "a scan that resolves the branch up front should leave more budget \
+             than exploring into it and backtracking: scanned {}, passive {}",
+            scanned.observe().budget_remaining,
+            passive.observe().budget_remaining
+        );
+        assert_eq!(scanned.observe().budget_remaining, 5);
+        assert_eq!(passive.observe().budget_remaining, 3);
+    }
+
+    #[test]
+    fn a_good_adaptive_strategy_with_one_scan_succeeds_with_the_intended_budget_margin() {
+        // One scan at the start, then the safe route it confirms: the
+        // strategy envelope's "good adaptive strategy with one useful scan"
+        // (`docs/TUI_DESIGN.md`, "First Contact configuration model").
+        let route = [
+            Action::Scan,
+            Action::MoveNorth,
+            Action::MoveNorth,
+            Action::MoveNorth,
+            Action::MoveNorth,
+            Action::MoveEast,
+            Action::MoveEast,
+            Action::MoveEast,
+            Action::MoveEast,
+        ];
+
+        let sim = run_route(Scenario::first_contact(), &route);
+
+        assert_eq!(sim.outcome(), TickOutcome::Succeeded);
+        let remaining = sim.observe().budget_remaining;
+        assert!(
+            (4..=6).contains(&remaining),
+            "expected the adaptive strategy to leave 4-6 budget, left {remaining}"
+        );
+    }
+
+    #[test]
+    fn a_careful_passive_strategy_without_scanning_succeeds_with_a_smaller_margin() {
+        // No scan: the controller probes two tiles east, reconsiders, and
+        // falls back to the known-safe west corridor. This is the strategy
+        // envelope's "careful passive exploration with no scan".
+        let route = [
+            Action::MoveNorth,
+            Action::MoveEast,
+            Action::MoveEast,
+            Action::MoveWest,
+            Action::MoveWest,
+            Action::MoveNorth,
+            Action::MoveNorth,
+            Action::MoveNorth,
+            Action::MoveEast,
+            Action::MoveEast,
+            Action::MoveEast,
+            Action::MoveEast,
+        ];
+
+        let sim = run_route(Scenario::first_contact(), &route);
+
+        assert_eq!(sim.outcome(), TickOutcome::Succeeded);
+        let remaining = sim.observe().budget_remaining;
+        assert!(
+            (2..=4).contains(&remaining),
+            "expected the careful passive strategy to leave 2-4 budget, left {remaining}"
+        );
+    }
+
+    #[test]
+    fn a_strategy_that_crosses_the_hazard_once_still_succeeds_but_narrowly() {
+        let route = [
+            Action::MoveNorth,
+            Action::MoveEast,
+            Action::MoveEast,
+            Action::MoveEast,
+            Action::MoveEast,
+            Action::MoveNorth, // onto the hazard at (4, 2)
+            Action::MoveNorth,
+            Action::MoveNorth,
+        ];
+
+        let sim = run_route(Scenario::first_contact(), &route);
+
+        assert_eq!(sim.outcome(), TickOutcome::Succeeded);
+        let remaining = sim.observe().budget_remaining;
+        assert!(
+            remaining <= 3,
+            "expected crossing the hazard once to leave only a narrow margin, left {remaining}"
+        );
+    }
+
+    #[test]
+    fn repeated_unnecessary_scanning_can_put_success_at_risk() {
+        // Four scans before ever moving, then the otherwise-safe route:
+        // scanning that much is never necessary on this map (one scan
+        // already reveals everything a route decision needs), and it costs
+        // enough that the operation fails on budget before reaching the
+        // uplink.
+        let mut sim = Simulation::from_scenario(Scenario::first_contact());
+        for _ in 0..4 {
+            assert_eq!(
+                sim.step(Action::Scan).unwrap().outcome,
+                TickOutcome::Running
+            );
+        }
+        let route = [
+            Action::MoveNorth,
+            Action::MoveNorth,
+            Action::MoveNorth,
+            Action::MoveNorth,
+            Action::MoveEast,
+            Action::MoveEast,
+            Action::MoveEast,
+            Action::MoveEast,
+        ];
+        let mut outcome = TickOutcome::Running;
+        for &action in &route {
+            if sim.outcome() != TickOutcome::Running {
+                break;
+            }
+            outcome = sim.step(action).unwrap().outcome;
+        }
+
+        assert_eq!(
+            outcome,
+            TickOutcome::Failed(FailureReason::BudgetExhausted),
+            "repeated unnecessary scanning should put success at risk on this budget"
+        );
+    }
+
+    #[test]
+    fn repeated_waiting_exhausts_the_budget_before_reaching_the_uplink() {
+        let mut sim = Simulation::from_scenario(Scenario::first_contact());
+        let mut outcome = TickOutcome::Running;
+        while outcome == TickOutcome::Running {
+            outcome = sim.step(Action::Wait).unwrap().outcome;
+        }
+
+        assert_eq!(outcome, TickOutcome::Failed(FailureReason::BudgetExhausted));
+    }
+
+    #[test]
+    fn the_south_uplink_configuration_admits_a_shorter_passive_route() {
+        // `first_contact_south_uplink()`'s uplink sits much closer to the
+        // shared corridor's fork than the other two configurations', so a
+        // purely passive route legitimately leaves more than the shared
+        // envelope's bands describe — the strategy envelope explicitly
+        // permits this ("where the configuration permits that envelope").
+        let route = [
+            Action::MoveNorth,
+            Action::MoveEast,
+            Action::MoveEast,
+            Action::MoveEast,
+            Action::MoveEast,
+            Action::MoveSouth,
+        ];
+
+        let sim = run_route(Scenario::first_contact_south_uplink(), &route);
+
+        assert_eq!(sim.outcome(), TickOutcome::Succeeded);
+        assert_eq!(sim.observe().budget_remaining, 9);
+    }
+
+    #[test]
+    fn the_row1_hazard_configuration_admits_the_same_adaptive_and_risky_margins() {
+        let adaptive_route = [
+            Action::Scan,
+            Action::MoveNorth,
+            Action::MoveNorth,
+            Action::MoveNorth,
+            Action::MoveNorth,
+            Action::MoveEast,
+            Action::MoveEast,
+            Action::MoveEast,
+            Action::MoveEast,
+        ];
+        let risky_route = [
+            Action::MoveNorth,
+            Action::MoveEast,
+            Action::MoveEast,
+            Action::MoveEast,
+            Action::MoveEast, // onto the hazard at (4, 1)
+            Action::MoveNorth,
+            Action::MoveNorth,
+            Action::MoveNorth,
+        ];
+
+        let adaptive = run_route(Scenario::first_contact_row1_hazard(), &adaptive_route);
+        let risky = run_route(Scenario::first_contact_row1_hazard(), &risky_route);
+
+        assert_eq!(adaptive.outcome(), TickOutcome::Succeeded);
+        assert_eq!(risky.outcome(), TickOutcome::Succeeded);
+        assert!((4..=6).contains(&adaptive.observe().budget_remaining));
+        assert!(risky.observe().budget_remaining <= 3);
     }
 
     /// A discovered floor tile, for building expected `discovered` lists in

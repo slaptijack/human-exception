@@ -2397,11 +2397,14 @@ fn help_lines(state: &AppState) -> Vec<Line<'static>> {
         "the run with an error and does not consume budget",
     ));
     lines.push(Line::from(format!(
-        "each action costs {} budget; entering a hazard tile costs {} more,",
+        "move/wait costs {} budget; scan costs {}; entering a hazard tile",
         crate::simulation::ACTION_COST,
+        crate::simulation::SCAN_COST
+    )));
+    lines.push(Line::from(format!(
+        "costs {} more, charged only on the tick the drone enters it",
         crate::simulation::HAZARD_ENTRY_COST
     )));
-    lines.push(Line::from("charged only on the tick the drone enters it"));
     lines.push(Line::from(
         "scan does not move the drone; it reveals every tile within 2 tiles",
     ));
@@ -5804,7 +5807,7 @@ end
             outcome: TickOutcome::Running,
             events: vec![SimEvent::ActionCost {
                 action: Action::Scan,
-                amount: 1,
+                amount: 2,
             }],
             map_width: 5,
             map_height: 5,
@@ -5820,7 +5823,7 @@ end
 
         assert!(text.contains("TICK 01"));
         assert!(text.contains("action        scanned"));
-        assert!(text.contains("scanned — cost 1"));
+        assert!(text.contains("scanned — cost 2"));
         // A tick still in progress is not the run's terminal boundary, so
         // no outcome headline belongs here.
         assert!(!text.contains("UPLINK REACHED"));
