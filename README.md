@@ -111,7 +111,7 @@ Paste your controller into the console's Controller editor and deploy it with `F
 cargo run -- --developer-mode path/to/your_script.lua
 ```
 
-See [`examples/first_contact.lua`](examples/first_contact.lua) for a reference reconnaissance controller against the "First Contact" scenario: a 5x5 facility map and a 15-budget operation. It opens with a `"scan"` to map the surrounding area before committing to a direction, remembers every tile it discovers in its own Lua state, prefers a known non-hazard tile over a known hazard tile, heads for the uplink once it turns up in that memory, and scans again if it ever runs out of confirmed safe moves. The layout below documents the fixed map that `--developer-mode` always runs; it is not exposed directly through the API, so a controller must still discover it through observation and scanning. Two equal-length routes lead from the start to the uplink: one along column `x=0` and row `y=4` that never touches the hazard, and one along row `y=1` and column `x=4` that passes through it — a controller must discover and choose between them. This example only ever moves north or east, which solves the configuration documented below and some of the console's other authored configurations, but not one whose uplink instead requires moving south to reach; a genuinely direction-agnostic reference controller is tracked as follow-up work.
+See [`examples/first_contact.lua`](examples/first_contact.lua) for a reference reconnaissance controller against the "First Contact" scenario: a 5x5 facility map and a 15-budget operation. It moves in all four directions, remembers every tile it discovers in its own Lua state, and reasons about that memory rather than what tick it's on: it explores fresh, non-dead-end ground first, heads straight for the uplink once it turns up, will cross a known hazard rather than get stuck once nothing safer is left, and takes one deliberate follow-up `"scan"` partway through blind exploration rather than as an up-front ritual. This lets it succeed against every configuration the console's `F6` deploy can select, not only the single fixed layout below that `--developer-mode` always runs. The layout is not exposed directly through the API, so a controller must still discover it through observation and scanning. Two equal-length routes lead from the start to the uplink: one along column `x=0` and row `y=4` that never touches the hazard, and one along row `y=1` and column `x=4` that passes through it — a controller must discover and choose between them.
 
 ```
        x=0  x=1  x=2  x=3  x=4
@@ -125,7 +125,7 @@ S = drone start   U = uplink objective
 . = floor   # = wall (impassable)   ~ = hazard (traversable; entering it costs extra budget)
 ```
 
-`(2, 0)` is a one-tile dead end off the shared corridor at `(2, 1)`; it never leads anywhere. Passive discovery reveals it as soon as the drone reaches `(2, 1)`, but reaching `(2, 1)` at all means committing to exploration east first, and backtracking to the known-safe route if it turns out not to help costs more than a single scan taken before ever leaving the start.
+`(2, 0)` is a one-tile dead end off the shared corridor at `(2, 1)`; it never leads anywhere. Passive discovery reveals it as soon as the drone reaches `(2, 1)`, so a controller never needs to step into it to rule it out.
 
 ### Exit codes
 

@@ -2776,4 +2776,41 @@ mod tests {
         assert_ne!(op.map_width(), Scenario::first_contact().map().width());
         assert_eq!(op.observe().drone_position, scenario.drone_start());
     }
+
+    /// The checked-in reference controller, run against a specific one of
+    /// [`Scenario::select_first_contact`]'s authored configurations. Used
+    /// below to prove the shipped example succeeds against every one of
+    /// them (issue #190's dominant review question), not just the single
+    /// fixed scenario `--developer-mode` and the rest of this module's
+    /// inline stand-in scripts exercise elsewhere.
+    fn run_example_against(run_id: u32) -> TickOutcome {
+        let script_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("examples")
+            .join("first_contact.lua");
+        run(&script_path, Scenario::select_first_contact(run_id), |_| {})
+            .expect("the reference controller runs to completion without error")
+    }
+
+    #[test]
+    fn the_reference_controller_succeeds_against_every_authored_first_contact_configuration() {
+        for run_id in 1..=3 {
+            assert_eq!(
+                run_example_against(run_id),
+                TickOutcome::Succeeded,
+                "expected the reference controller to reach the uplink for run_id {run_id}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_reference_controller_is_deterministic_across_every_authored_configuration() {
+        for run_id in 1..=3 {
+            let first = run_example_against(run_id);
+            let second = run_example_against(run_id);
+            assert_eq!(
+                first, second,
+                "expected identical outcomes on repeated runs for run_id {run_id}"
+            );
+        }
+    }
 }
