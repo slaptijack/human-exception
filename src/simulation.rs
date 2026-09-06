@@ -280,6 +280,19 @@ pub const SCAN_COST: u32 = 2;
 /// the hazard tile, not for continuing to occupy or waiting on it.
 pub const HAZARD_ENTRY_COST: u32 = 4;
 
+/// The starting budget shared by every authored First Contact
+/// configuration (see [`Scenario::first_contact_configurations`]).
+/// Deliberately uniform, not tuned per configuration: `observation`
+/// exposes `budget_remaining`, so a value that varied by configuration
+/// would let a controller infer which one was selected from the very
+/// first tick, before any legitimate discovery — exactly what the
+/// objective-discovery contract (`docs/TUI_DESIGN.md`) forbids. 18 is the
+/// smallest value at which the reference reactive controller
+/// (`examples/first_contact.lua`) solves every authored configuration
+/// under either generic tie-break order it might use to break its first
+/// fork; see issues #199 and #200.
+const FIRST_CONTACT_STARTING_BUDGET: u32 = 18;
+
 /// The fixed reconnaissance scenario: one drone, one facility map, one
 /// operational budget.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -368,13 +381,8 @@ impl Scenario {
     }
 
     /// The original "First Contact" reconnaissance scenario: uplink at
-    /// `(4, 4)`, hazard at `(4, 2)`. Budget 16, one point above the other two
-    /// configurations: the reference reactive controller's east-first
-    /// tie-break order commits to the row-`y=1` corridor first, discovers
-    /// this configuration's uplink isn't at the south spur, and must cross
-    /// the hazard once to recover — see
-    /// `the_reference_controller_succeeds_against_every_authored_configuration_under_both_tie_break_orders`
-    /// in `lua_controller`.
+    /// `(4, 4)`, hazard at `(4, 2)`. Budget: [`FIRST_CONTACT_STARTING_BUDGET`],
+    /// shared uniformly with the other two configurations.
     pub fn first_contact() -> Self {
         let map = FacilityMap::new(
             5,
@@ -385,15 +393,13 @@ impl Scenario {
         )
         .expect("the fixed first contact facility map is valid");
 
-        Scenario::new(map, 16)
+        Scenario::new(map, FIRST_CONTACT_STARTING_BUDGET)
     }
 
     /// An authored "First Contact" variant: uplink at `(4, 0)`, hazard at
-    /// `(4, 2)`. See [`FIRST_CONTACT_SOUTH_UPLINK_ROWS`]. Budget 18: the
-    /// largest of the three, because the reference controller's north-first
-    /// tie-break order commits to the full west-column/row-`y=4` loop before
-    /// discovering the uplink is actually down the south spur, and
-    /// recovering from that costs a full backtrack plus a hazard crossing.
+    /// `(4, 2)`. See [`FIRST_CONTACT_SOUTH_UPLINK_ROWS`]. Budget:
+    /// [`FIRST_CONTACT_STARTING_BUDGET`], shared uniformly with the other
+    /// two configurations.
     pub fn first_contact_south_uplink() -> Self {
         let map = FacilityMap::new(
             5,
@@ -404,14 +410,14 @@ impl Scenario {
         )
         .expect("the first-contact-south-uplink facility map is valid");
 
-        Scenario::new(map, 18)
+        Scenario::new(map, FIRST_CONTACT_STARTING_BUDGET)
     }
 
     /// An authored "First Contact" variant: uplink at `(4, 4)` (as in
     /// [`Scenario::first_contact`]), hazard at `(4, 1)`. See
-    /// [`FIRST_CONTACT_ROW1_HAZARD_ROWS`]. Budget 15 (unchanged): the
-    /// reference controller already solves this configuration under both
-    /// tie-break orders at the original budget.
+    /// [`FIRST_CONTACT_ROW1_HAZARD_ROWS`]. Budget:
+    /// [`FIRST_CONTACT_STARTING_BUDGET`], shared uniformly with the other
+    /// two configurations.
     pub fn first_contact_row1_hazard() -> Self {
         let map = FacilityMap::new(
             5,
@@ -422,20 +428,22 @@ impl Scenario {
         )
         .expect("the first-contact-row1-hazard facility map is valid");
 
-        Scenario::new(map, 15)
+        Scenario::new(map, FIRST_CONTACT_STARTING_BUDGET)
     }
 
     /// The small, hand-authored set of "First Contact" configurations a
     /// deployment may be run against (`docs/TUI_DESIGN.md`, "First Contact
     /// configuration model"). Not procedurally generated: each entry is one
-    /// of the fixed constructors above, sharing the same facility topology
-    /// and varying only the active uplink, hazard placement, and (per
-    /// issue #199/#200) starting budget needed for the reference reactive
-    /// controller to solve it under either generic tie-break order.
+    /// of the fixed constructors above, sharing the same facility topology,
+    /// the same [`FIRST_CONTACT_STARTING_BUDGET`], and varying only the
+    /// active uplink and hazard placement. The shared budget is
+    /// deliberate, not incidental: varying it per configuration would leak
+    /// which one was selected through `observation.budget_remaining` on the
+    /// very first tick, before any legitimate discovery (see #199, #200).
     ///
     /// This set does not guarantee that no single blind (non-adaptive)
     /// movement sequence can solve every entry — that guarantee was
-    /// deprioritized in favor of these budgets (see #199, #200, and the
+    /// deprioritized in favor of this budget (see #199, #200, and the
     /// product-direction note on epic #185): it defended against a threat
     /// model not worth the tuning cost of preserving it this early in
     /// development.
@@ -1290,7 +1298,7 @@ mod tests {
         assert_eq!(outcome, TickOutcome::Succeeded);
         assert_eq!(sim.drone_position(), Position { x: 4, y: 4 });
         assert_eq!(sim.ticks_elapsed(), 8);
-        assert_eq!(sim.observe().budget_remaining, 16 - 8);
+        assert_eq!(sim.observe().budget_remaining, 18 - 8);
     }
 
     #[test]
@@ -1539,8 +1547,8 @@ mod tests {
 
         assert_eq!(safe.outcome(), TickOutcome::Succeeded);
         assert_eq!(risky.outcome(), TickOutcome::Succeeded);
-        assert_eq!(safe.observe().budget_remaining, 16 - 8);
-        assert_eq!(risky.observe().budget_remaining, 16 - 8 - HAZARD_ENTRY_COST);
+        assert_eq!(safe.observe().budget_remaining, 18 - 8);
+        assert_eq!(risky.observe().budget_remaining, 18 - 8 - HAZARD_ENTRY_COST);
         assert!(!safe_events.iter().any(|report| {
             report
                 .events
@@ -1620,8 +1628,8 @@ mod tests {
             scanned.observe().budget_remaining,
             passive.observe().budget_remaining
         );
-        assert_eq!(scanned.observe().budget_remaining, 6);
-        assert_eq!(passive.observe().budget_remaining, 4);
+        assert_eq!(scanned.observe().budget_remaining, 8);
+        assert_eq!(passive.observe().budget_remaining, 6);
     }
 
     #[test]
@@ -1646,8 +1654,8 @@ mod tests {
         assert_eq!(sim.outcome(), TickOutcome::Succeeded);
         let remaining = sim.observe().budget_remaining;
         assert!(
-            (4..=6).contains(&remaining),
-            "expected the adaptive strategy to leave 4-6 budget, left {remaining}"
+            (6..=8).contains(&remaining),
+            "expected the adaptive strategy to leave 6-8 budget, left {remaining}"
         );
     }
 
@@ -1676,8 +1684,8 @@ mod tests {
         assert_eq!(sim.outcome(), TickOutcome::Succeeded);
         let remaining = sim.observe().budget_remaining;
         assert!(
-            (2..=4).contains(&remaining),
-            "expected the careful passive strategy to leave 2-4 budget, left {remaining}"
+            (4..=6).contains(&remaining),
+            "expected the careful passive strategy to leave 4-6 budget, left {remaining}"
         );
     }
 
@@ -1699,20 +1707,20 @@ mod tests {
         assert_eq!(sim.outcome(), TickOutcome::Succeeded);
         let remaining = sim.observe().budget_remaining;
         assert!(
-            remaining <= 4,
+            remaining <= 6,
             "expected crossing the hazard once to leave only a narrow margin, left {remaining}"
         );
     }
 
     #[test]
     fn repeated_unnecessary_scanning_can_put_success_at_risk() {
-        // Five scans before ever moving, then the otherwise-safe route:
+        // Six scans before ever moving, then the otherwise-safe route:
         // scanning that much is never necessary on this map (one scan
         // already reveals everything a route decision needs), and it costs
         // enough that the operation fails on budget before reaching the
         // uplink.
         let mut sim = Simulation::from_scenario(Scenario::first_contact());
-        for _ in 0..5 {
+        for _ in 0..6 {
             assert_eq!(
                 sim.step(Action::Scan).unwrap().outcome,
                 TickOutcome::Running
@@ -1805,8 +1813,8 @@ mod tests {
 
         assert_eq!(adaptive.outcome(), TickOutcome::Succeeded);
         assert_eq!(risky.outcome(), TickOutcome::Succeeded);
-        assert!((4..=6).contains(&adaptive.observe().budget_remaining));
-        assert!(risky.observe().budget_remaining <= 3);
+        assert!((6..=8).contains(&adaptive.observe().budget_remaining));
+        assert!(risky.observe().budget_remaining <= 6);
     }
 
     /// A discovered floor tile, for building expected `discovered` lists in

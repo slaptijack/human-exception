@@ -2741,7 +2741,7 @@ mod tests {
             Scenario::first_contact(),
         )
         .expect("valid controller");
-        assert_eq!(op.starting_budget(), 16);
+        assert_eq!(op.starting_budget(), 18);
     }
 
     #[test]

@@ -3716,7 +3716,7 @@ mod tests {
         state.controller = Some(ControllerDocument::new(ALWAYS_WAITS));
         state.apply(Msg::RequestDeploy);
 
-        for _ in 0..16 {
+        for _ in 0..18 {
             state.advance_running_operation();
         }
 
@@ -3762,7 +3762,7 @@ mod tests {
         state.controller = Some(ControllerDocument::new(ALWAYS_WAITS));
         state.apply(Msg::RequestDeploy);
 
-        for _ in 0..16 {
+        for _ in 0..18 {
             state.advance_running_operation();
         }
 
@@ -3782,7 +3782,7 @@ mod tests {
 
         state.controller = Some(ControllerDocument::new(ALWAYS_WAITS));
         state.apply(Msg::RequestDeploy);
-        for _ in 0..16 {
+        for _ in 0..18 {
             state.advance_running_operation();
         }
 
@@ -3823,7 +3823,7 @@ mod tests {
         state.controller = Some(ControllerDocument::new(ALWAYS_WAITS));
         state.apply(Msg::RequestDeploy);
 
-        for _ in 0..16 {
+        for _ in 0..18 {
             state.advance_running_operation();
         }
 

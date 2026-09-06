@@ -4615,7 +4615,7 @@ end
         state.apply(super::super::state::Msg::RequestDeploy);
 
         // The starter controller scans once, then waits forever, so it
-        // always ends in budget exhaustion on the fixed 16-budget scenario.
+        // always ends in budget exhaustion on the fixed 18-budget scenario.
         for _ in 0..20 {
             if state.operation().is_some_and(|op| op.finished) {
                 break;
@@ -4976,7 +4976,7 @@ end
 
     /// Deploys the seeded starter controller and steps it to its
     /// deterministic budget-exhaustion conclusion (it scans once, then
-    /// waits forever, on the fixed 15-budget scenario) — the failure
+    /// waits forever, on the fixed 18-budget scenario) — the failure
     /// counterpart to [`succeeded_state`].
     fn budget_exhausted_state() -> AppState {
         let mut state = working_state();

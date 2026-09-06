@@ -411,7 +411,7 @@ This section is the public behavior contract for the First Contact operation its
 
 **Immutable run provenance.** The selected configuration is retained as part of that run's immutable record, alongside the deployed controller source (§4, [Run records and source provenance](#run-records-and-source-provenance)).
 
-**Objective discovery.** The active uplink remains unknown until legitimately discovered through observation, exactly as Target already requires (§2, [Target information model](#target-information-model)): no configuration exposes the uplink position, complete floor plan, or undiscovered hazard positions ahead of legitimate discovery.
+**Objective discovery.** The active uplink remains unknown until legitimately discovered through observation, exactly as Target already requires (§2, [Target information model](#target-information-model)): no configuration exposes the uplink position, complete floor plan, or undiscovered hazard positions ahead of legitimate discovery. This extends to metadata that would let a controller infer which configuration is active without discovering anything: the starting operational budget, visible from the first tick via `observation.budget_remaining`, is shared uniformly across every configuration for exactly this reason (see "Tuned values" below).
 
 **Passive observation and scan.** Passive local discovery — the terrain the drone has already moved through or adjacent to — remains useful for cautious movement on its own. Scan exists to surface information early enough to change a decision before it is committed to. Scan is useful but optional: a controller that explores carefully using only passive observation has a viable strategy, though it may spend more budget than a well-timed scan would have saved.
 
@@ -421,8 +421,8 @@ This section is the public behavior contract for the First Contact operation its
 
 | Strategy | Desired result |
 | --- | --- |
-| Good adaptive strategy with one useful scan | succeeds with roughly 4–6 budget left |
-| Careful passive exploration with no scan | succeeds with roughly 2–4 budget left |
+| Good adaptive strategy with one useful scan | succeeds with roughly 6–8 budget left |
+| Careful passive exploration with no scan | succeeds with roughly 4–6 budget left |
 | Good strategy that accidentally crosses one hazard | still succeeds, but narrowly |
 | Repeated unnecessary scanning | begins putting success at risk |
 | Repeated revisits / dithering / wasted actions | can fail on budget |
@@ -431,7 +431,7 @@ This section is the public behavior contract for the First Contact operation its
 
 A hazard should read as a meaningful choice between routes or exploration strategies, not merely a budget tax on a route that was already going to succeed. Entering a hazard remains survivable in ordinary circumstances — a new player can make a mistake, observe its cost, revise their controller, and try again.
 
-**Tuned values.** Scan cost 2 and hazard entry penalty +4 are shared across the matrix. Starting budget is tuned **per configuration** — `first_contact()` and `first_contact_row1_hazard()` at **16**, `first_contact_south_uplink()` at **18** — the smallest per-configuration increases (from a shared 15) that let the shipped five-rule reference controller (`examples/first_contact.lua`) succeed against every authored configuration under either generic direction it might use to break its first fork. See [issues #199 and #200](https://github.com/slaptijack/human-exception/issues/200) for the tuning history and the product-direction decision behind this approach (below). Every authored configuration also carries one single-tile dead end, off the shared corridor at `(2, 0)`, purely so a well-timed scan has a legitimate use. Passive discovery already reveals the dead end once the drone reaches the adjacent corridor tile `(2, 1)` — no need to step into it — but reaching `(2, 1)` at all means committing to real exploration first, and reacting to what it finds by backtracking to the known-safe route costs more than a single scan taken before ever leaving the start would have (`src/simulation.rs`'s `scanning_the_dead_end_pocket_saves_the_exploration_a_passive_backtrack_would_cost`).
+**Tuned values.** The authored configuration matrix is tuned to **18 starting budget**, **scan cost 2**, and **hazard entry penalty +4**. Starting budget is shared uniformly across all three configurations — it is not tuned per configuration, deliberately: `observation.budget_remaining` is visible from the very first tick, so a value that varied by configuration would let a controller infer which one was selected before any legitimate discovery, contradicting the objective-discovery contract below. 18 is the smallest uniform value at which the shipped five-rule reference controller (`examples/first_contact.lua`) succeeds against every authored configuration under either generic direction it might use to break its first fork. See [issues #199 and #200](https://github.com/slaptijack/human-exception/issues/200) for the tuning history and the product-direction decision behind this approach (below). Every authored configuration also carries one single-tile dead end, off the shared corridor at `(2, 0)`, purely so a well-timed scan has a legitimate use. Passive discovery already reveals the dead end once the drone reaches the adjacent corridor tile `(2, 1)` — no need to step into it — but reaching `(2, 1)` at all means committing to real exploration first, and reacting to what it finds by backtracking to the known-safe route costs more than a single scan taken before ever leaving the start would have (`src/simulation.rs`'s `scanning_the_dead_end_pocket_saves_the_exploration_a_passive_backtrack_would_cost`).
 
 **`wait` cost unchanged.** `wait` remains a normal-cost action, identical in cost to movement.
 
@@ -917,7 +917,7 @@ The compromised satellite feed is visually dominant. Telemetry exists to explain
 │ COMPROMISED SATELLITE FEED                                           │ OPERATION TELEMETRY                        │
 │                                                                      │                                            │
 │              ?   ?   ?   ?   ?                                       │ tick          04                           │
-│              .   #   ?   ?   ?                                       │ budget        12 / 16                      │
+│              .   #   ?   ?   ?                                       │ budget        14 / 18                      │
 │              .   #   ?   ?   ?                                       │ last action   north                        │
 │              .   .   .   ?   ?                                       │ controller    running                      │
 │              ·   #   ?   ?   ?                                       │                                            │
@@ -934,7 +934,7 @@ The compromised satellite feed is visually dominant. Telemetry exists to explain
 └───────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-The sample budget is mechanically valid: four ordinary completed actions from a 16-point budget leave 12. These figures reflect today's implemented single fixed scenario; see § [First Contact configuration model](#first-contact-configuration-model) for the authored-configuration set's tuning target.
+The sample budget is mechanically valid: four ordinary completed actions from an 18-point budget leave 14. These figures reflect today's implemented single fixed scenario; see § [First Contact configuration model](#first-contact-configuration-model) for the authored-configuration set's tuning target.
 
 ### Satellite-feed rules
 
