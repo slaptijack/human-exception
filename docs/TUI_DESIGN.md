@@ -411,7 +411,7 @@ This section is the public behavior contract for the First Contact operation its
 
 **Immutable run provenance.** The selected configuration is retained as part of that run's immutable record, alongside the deployed controller source (§4, [Run records and source provenance](#run-records-and-source-provenance)).
 
-**Objective discovery.** The active uplink remains unknown until legitimately discovered through observation, exactly as Target already requires (§2, [Target information model](#target-information-model)): no configuration exposes the uplink position, complete floor plan, or undiscovered hazard positions ahead of legitimate discovery.
+**Objective discovery.** The active uplink remains unknown until legitimately discovered through observation, exactly as Target already requires (§2, [Target information model](#target-information-model)): no configuration exposes the uplink position, complete floor plan, or undiscovered hazard positions ahead of legitimate discovery. This extends to metadata that would let a controller infer which configuration is active without discovering anything: the starting operational budget, visible from the first tick via `observation.budget_remaining`, is shared uniformly across every configuration for exactly this reason (see "Tuned values" below).
 
 **Passive observation and scan.** Passive local discovery — the terrain the drone has already moved through or adjacent to — remains useful for cautious movement on its own. Scan exists to surface information early enough to change a decision before it is committed to. Scan is useful but optional: a controller that explores carefully using only passive observation has a viable strategy, though it may spend more budget than a well-timed scan would have saved.
 
@@ -421,29 +421,29 @@ This section is the public behavior contract for the First Contact operation its
 
 | Strategy | Desired result |
 | --- | --- |
-| Good adaptive strategy with one useful scan | succeeds with roughly 4–6 budget left |
-| Careful passive exploration with no scan | succeeds with roughly 2–4 budget left |
+| Good adaptive strategy with one useful scan | succeeds with roughly 6–8 budget left |
+| Careful passive exploration with no scan | succeeds with roughly 4–6 budget left |
 | Good strategy that accidentally crosses one hazard | still succeeds, but narrowly |
 | Repeated unnecessary scanning | begins putting success at risk |
 | Repeated revisits / dithering / wasted actions | can fail on budget |
 | Blind route that happens to match one configuration | may succeed |
-| Same blind route applied across every configuration | fails somewhere |
+| Same blind route applied across every configuration | not guaranteed to fail (see "No guarantee against a memorized blind route" below) |
 
 A hazard should read as a meaningful choice between routes or exploration strategies, not merely a budget tax on a route that was already going to succeed. Entering a hazard remains survivable in ordinary circumstances — a new player can make a mistake, observe its cost, revise their controller, and try again.
 
-**Tuned values.** The authored configuration matrix is tuned to **15 starting budget**, **scan cost 2**, and **hazard entry penalty +4**. Starting budget stays at its pre-tuning value rather than moving to the 18 this section originally proposed as a starting point: at 18, no combination of scan cost and hazard penalty kept a single blind movement sequence from solving every authored configuration (§4, [Operation](#4-operation)), and both the "good adaptive strategy" and "careful passive exploration" bands below landed with more budget to spare than intended. 15 keeps that guarantee and lands both bands in range. Every authored configuration also carries one single-tile dead end, off the shared corridor at `(2, 0)`, purely so a well-timed scan has a legitimate use. Passive discovery already reveals the dead end once the drone reaches the adjacent corridor tile `(2, 1)` — no need to step into it — but reaching `(2, 1)` at all means committing to real exploration first, and reacting to what it finds by backtracking to the known-safe route costs more than a single scan taken before ever leaving the start would have (`src/simulation.rs`'s `scanning_the_dead_end_pocket_saves_the_exploration_a_passive_backtrack_would_cost`).
+**Tuned values.** The authored configuration matrix is tuned to **18 starting budget**, **scan cost 2**, and **hazard entry penalty +4**. Starting budget is shared uniformly across all three configurations — it is not tuned per configuration, deliberately: `observation.budget_remaining` is visible from the very first tick, so a value that varied by configuration would let a controller infer which one was selected before any legitimate discovery, contradicting the objective-discovery contract below. 18 is the smallest uniform value at which the shipped five-rule reference controller (`examples/first_contact.lua`) succeeds against every authored configuration under either generic direction it might use to break its first fork. See [issues #199 and #200](https://github.com/slaptijack/human-exception/issues/200) for the tuning history and the product-direction decision behind this approach (below). Every authored configuration also carries one single-tile dead end, off the shared corridor at `(2, 0)`, purely so a well-timed scan has a legitimate use. Passive discovery already reveals the dead end once the drone reaches the adjacent corridor tile `(2, 1)` — no need to step into it — but reaching `(2, 1)` at all means committing to real exploration first, and reacting to what it finds by backtracking to the known-safe route costs more than a single scan taken before ever leaving the start would have (`src/simulation.rs`'s `scanning_the_dead_end_pocket_saves_the_exploration_a_passive_backtrack_would_cost`).
 
 **`wait` cost unchanged.** `wait` remains a normal-cost action, identical in cost to movement.
 
 **`observation.discovered` remains cumulative.** The observation field already documented in §3 Controller does not become per-tick or reset between scans.
 
-**No single blind route.** No single blind movement sequence is guaranteed to solve every authored configuration. This is not an anti-cheese rule — a simple controller that legitimately reacts to observations and happens to perform extremely well is a success, not a loophole to close.
+**No guarantee against a memorized blind route (deprioritized).** Earlier tuning work aimed to guarantee that no single, fixed movement sequence (one that ignores every observation) could solve every authored configuration, verified by an exhaustive search over the full action-sequence space. That guarantee turned out to be mathematically incompatible with also letting a small, honest reactive controller solve every configuration within a shared budget — closing one gap always reopened the other. [Issues #199 and #200](https://github.com/slaptijack/human-exception/issues/200) record the analysis; the product decision was to deprioritize the guarantee rather than keep tuning around it, since it defends against a threat model (a player who ignores all observation and replays one memorized sequence) not worth this much design churn this early, particularly in an open-source project where a sufficiently motivated player can find some way around a specific tuning value regardless. A blind route may now happen to solve every configuration; that is an accepted tradeoff, not a bug.
 
 **No mandated programming construct.** The game does not inspect Player source code or require a particular programming construct, algorithm, or style. A controller succeeds because its behavior solves the operational problem it is presented with.
 
 **The starter controller is a stub, not a solution.** The console's starter document (seeded into a fresh Controller) takes one opening scan and otherwise always `wait`s; it exists as a minimal, editable starting point for a Player to build on, not as something meant to reach the uplink on its own, so it does not solve any authored configuration unmodified. This is by design, not a gap to close.
 
-**The reference controller's known gap is a scenario-tuning question, not an implementation shortcoming.** `examples/first_contact.lua` is a small, five-rule reactive strategy with no privileged knowledge of the authored configuration set: it succeeds on the configuration `--developer-mode` runs, but is known to run out of budget on at least one other authored configuration, because reaching that one's uplink requires guessing correctly, from an identical-looking early fork, which of two directions to commit to, and a wrong guess costs more to correct than the budget allows. [Issue #199](https://github.com/slaptijack/human-exception/issues/199) records this finding in full and asks whether the intended fix is a small budget or geometry adjustment, since a small, honest, first-operation strategy should not need map-specific cleverness just to fit inside the budget.
+**The reference controller solves every authored configuration.** `examples/first_contact.lua` is a small, five-rule reactive strategy with no privileged knowledge of the authored configuration set. With the per-configuration budgets above, it succeeds against every authored configuration, regardless of which of the two generic tie-break orders it uses to break its first fork.
 
 **Network Bootstrap boundary unchanged.** This contract does not alter the existing First Contact success routing established in Epic #160: authoritative success still routes through [Network Bootstrap](#network-bootstrap) into connected Signals; failure of any kind still lands on After Action (§5) with the Player free to revise and retry.
 
@@ -917,7 +917,7 @@ The compromised satellite feed is visually dominant. Telemetry exists to explain
 │ COMPROMISED SATELLITE FEED                                           │ OPERATION TELEMETRY                        │
 │                                                                      │                                            │
 │              ?   ?   ?   ?   ?                                       │ tick          04                           │
-│              .   #   ?   ?   ?                                       │ budget        11 / 15                      │
+│              .   #   ?   ?   ?                                       │ budget        14 / 18                      │
 │              .   #   ?   ?   ?                                       │ last action   north                        │
 │              .   .   .   ?   ?                                       │ controller    running                      │
 │              ·   #   ?   ?   ?                                       │                                            │
@@ -934,7 +934,7 @@ The compromised satellite feed is visually dominant. Telemetry exists to explain
 └───────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-The sample budget is mechanically valid: four ordinary completed actions from a 15-point budget leave 11. These figures reflect today's implemented single fixed scenario; see § [First Contact configuration model](#first-contact-configuration-model) for the authored-configuration set's tuning target.
+The sample budget is mechanically valid: four ordinary completed actions from an 18-point budget leave 14. These figures reflect today's implemented single fixed scenario; see § [First Contact configuration model](#first-contact-configuration-model) for the authored-configuration set's tuning target.
 
 ### Satellite-feed rules
 

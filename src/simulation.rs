@@ -280,6 +280,19 @@ pub const SCAN_COST: u32 = 2;
 /// the hazard tile, not for continuing to occupy or waiting on it.
 pub const HAZARD_ENTRY_COST: u32 = 4;
 
+/// The starting budget shared by every authored First Contact
+/// configuration (see [`Scenario::first_contact_configurations`]).
+/// Deliberately uniform, not tuned per configuration: `observation`
+/// exposes `budget_remaining`, so a value that varied by configuration
+/// would let a controller infer which one was selected from the very
+/// first tick, before any legitimate discovery — exactly what the
+/// objective-discovery contract (`docs/TUI_DESIGN.md`) forbids. 18 is the
+/// smallest value at which the reference reactive controller
+/// (`examples/first_contact.lua`) solves every authored configuration
+/// under either generic tie-break order it might use to break its first
+/// fork; see issues #199 and #200.
+const FIRST_CONTACT_STARTING_BUDGET: u32 = 18;
+
 /// The fixed reconnaissance scenario: one drone, one facility map, one
 /// operational budget.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -314,15 +327,12 @@ const FIRST_CONTACT_ROWS: [&str; 5] = [
 /// An authored "First Contact" variant sharing [`FIRST_CONTACT_ROWS`]'s
 /// facility topology, but with the uplink relocated to the south end of
 /// column `x=4` (`(4, 0)`) rather than either end of the shared row-`y=1`/
-/// row-`y=4` corridor. Unlike [`FIRST_CONTACT_WEST_HAZARD_ROWS`], reaching
-/// this uplink requires actually turning off that corridor onto column
-/// `x=4`'s south spur, so neither of the two eight-action routes that solve
-/// [`FIRST_CONTACT_ROWS`] (nor the boundary-walking sequence that chains
-/// them into one longer blind route) reaches it: see
-/// `no_single_blind_route_solves_every_authored_first_contact_configuration`.
-/// The hazard stays at the original `(4, 2)`, on the direct route down that
-/// spur, so a blind sequence built to visit every tile still runs out of
-/// budget there before ever reaching `(4, 0)`.
+/// row-`y=4` corridor. Reaching this uplink requires actually turning off
+/// that corridor onto column `x=4`'s south spur, so a controller that
+/// commits to the wrong branch at the shared early fork must backtrack and
+/// cross the hazard at `(4, 2)` to recover — the reason this configuration
+/// needs a larger starting budget than the other two; see
+/// [`Scenario::first_contact_south_uplink`].
 const FIRST_CONTACT_SOUTH_UPLINK_ROWS: [&str; 5] = [
     ".....", // y = 4
     ".###.", // y = 3
@@ -335,11 +345,8 @@ const FIRST_CONTACT_SOUTH_UPLINK_ROWS: [&str; 5] = [
 /// facility topology and uplink position, but with the hazard moved from
 /// `(4, 2)` to `(4, 1)` — the single gateway tile row `y=1` and column
 /// `x=4` share with [`FIRST_CONTACT_SOUTH_UPLINK_ROWS`]'s south spur. This
-/// still flips which of the two original eight-action routes is the risky
-/// one, exactly as a hazard moved to `(0, 2)` would, but a script that
-/// detours onto that spur and back (as one would to also solve the
-/// south-uplink configuration) crosses this tile twice, not once: see
-/// `no_single_blind_movement_sequence_solves_every_authored_first_contact_configuration`.
+/// flips which of the two original eight-action routes is the risky one,
+/// exactly as a hazard moved to `(0, 2)` would.
 const FIRST_CONTACT_ROW1_HAZARD_ROWS: [&str; 5] = [
     "....U", // y = 4
     ".###.", // y = 3
@@ -374,7 +381,8 @@ impl Scenario {
     }
 
     /// The original "First Contact" reconnaissance scenario: uplink at
-    /// `(4, 4)`, hazard at `(4, 2)`.
+    /// `(4, 4)`, hazard at `(4, 2)`. Budget: [`FIRST_CONTACT_STARTING_BUDGET`],
+    /// shared uniformly with the other two configurations.
     pub fn first_contact() -> Self {
         let map = FacilityMap::new(
             5,
@@ -385,11 +393,13 @@ impl Scenario {
         )
         .expect("the fixed first contact facility map is valid");
 
-        Scenario::new(map, 15)
+        Scenario::new(map, FIRST_CONTACT_STARTING_BUDGET)
     }
 
     /// An authored "First Contact" variant: uplink at `(4, 0)`, hazard at
-    /// `(4, 2)`. See [`FIRST_CONTACT_SOUTH_UPLINK_ROWS`].
+    /// `(4, 2)`. See [`FIRST_CONTACT_SOUTH_UPLINK_ROWS`]. Budget:
+    /// [`FIRST_CONTACT_STARTING_BUDGET`], shared uniformly with the other
+    /// two configurations.
     pub fn first_contact_south_uplink() -> Self {
         let map = FacilityMap::new(
             5,
@@ -400,12 +410,14 @@ impl Scenario {
         )
         .expect("the first-contact-south-uplink facility map is valid");
 
-        Scenario::new(map, 15)
+        Scenario::new(map, FIRST_CONTACT_STARTING_BUDGET)
     }
 
     /// An authored "First Contact" variant: uplink at `(4, 4)` (as in
     /// [`Scenario::first_contact`]), hazard at `(4, 1)`. See
-    /// [`FIRST_CONTACT_ROW1_HAZARD_ROWS`].
+    /// [`FIRST_CONTACT_ROW1_HAZARD_ROWS`]. Budget:
+    /// [`FIRST_CONTACT_STARTING_BUDGET`], shared uniformly with the other
+    /// two configurations.
     pub fn first_contact_row1_hazard() -> Self {
         let map = FacilityMap::new(
             5,
@@ -416,28 +428,25 @@ impl Scenario {
         )
         .expect("the first-contact-row1-hazard facility map is valid");
 
-        Scenario::new(map, 15)
+        Scenario::new(map, FIRST_CONTACT_STARTING_BUDGET)
     }
 
     /// The small, hand-authored set of "First Contact" configurations a
     /// deployment may be run against (`docs/TUI_DESIGN.md`, "First Contact
     /// configuration model"). Not procedurally generated: each entry is one
-    /// of the fixed constructors above, sharing the same facility topology
-    /// and varying only the active uplink and hazard placement.
+    /// of the fixed constructors above, sharing the same facility topology,
+    /// the same [`FIRST_CONTACT_STARTING_BUDGET`], and varying only the
+    /// active uplink and hazard placement. The shared budget is
+    /// deliberate, not incidental: varying it per configuration would leak
+    /// which one was selected through `observation.budget_remaining` on the
+    /// very first tick, before any legitimate discovery (see #199, #200).
     ///
-    /// No single blind movement sequence — of any length, including one
-    /// that revisits ground already covered — solves every entry within
-    /// the shared starting budget. This is exhaustively proven, not just
-    /// checked against a couple of hand-picked routes, by
-    /// `no_single_blind_movement_sequence_solves_every_authored_first_contact_configuration`,
-    /// which explores the full reachable action-sequence space. The
-    /// guarantee depends on [`Scenario::first_contact_row1_hazard`]'s
-    /// hazard sitting exactly on the gateway a detour to
-    /// [`Scenario::first_contact_south_uplink`]'s spur must cross twice
-    /// (there and back) — moving either configuration's hazard elsewhere
-    /// can reopen a universal blind solver, so treat these placements, not
-    /// just the general "one hazard per configuration" shape, as load-
-    /// bearing.
+    /// This set does not guarantee that no single blind (non-adaptive)
+    /// movement sequence can solve every entry — that guarantee was
+    /// deprioritized in favor of this budget (see #199, #200, and the
+    /// product-direction note on epic #185): it defended against a threat
+    /// model not worth the tuning cost of preserving it this early in
+    /// development.
     fn first_contact_configurations() -> [Scenario; 3] {
         [
             Scenario::first_contact(),
@@ -1154,208 +1163,6 @@ mod tests {
     }
 
     #[test]
-    fn two_natural_blind_routes_each_fail_at_least_one_authored_configuration() {
-        // A quick, human-readable illustration of the property the
-        // exhaustive `no_single_blind_movement_sequence_solves_every_authored_first_contact_configuration`
-        // below actually proves: the two obvious "replay what solved my
-        // last run" routes for `Scenario::first_contact()` each fail
-        // against at least one of the other authored configurations.
-        fn outcomes_for(route: &[Action]) -> Vec<TickOutcome> {
-            Scenario::first_contact_configurations()
-                .into_iter()
-                .map(|scenario| {
-                    let mut sim = Simulation::from_scenario(scenario);
-                    for &action in route {
-                        if sim.step(action).is_err() || sim.outcome() != TickOutcome::Running {
-                            break;
-                        }
-                    }
-                    sim.outcome()
-                })
-                .collect()
-        }
-
-        // Row y=1 across, then north up column x=4:
-        // `tests/fixtures/hazard_route.lua` plays exactly this sequence.
-        let row_then_column_route = [
-            Action::MoveNorth,
-            Action::MoveEast,
-            Action::MoveEast,
-            Action::MoveEast,
-            Action::MoveEast,
-            Action::MoveNorth,
-            Action::MoveNorth,
-            Action::MoveNorth,
-        ];
-        // The mirror route: column x=0 up, then east across row y=4. Both
-        // routes solve `Scenario::first_contact()`.
-        let column_then_row_route = [
-            Action::MoveNorth,
-            Action::MoveNorth,
-            Action::MoveNorth,
-            Action::MoveNorth,
-            Action::MoveEast,
-            Action::MoveEast,
-            Action::MoveEast,
-            Action::MoveEast,
-        ];
-
-        for route in [row_then_column_route, column_then_row_route] {
-            let outcomes = outcomes_for(&route);
-            assert!(
-                outcomes.contains(&TickOutcome::Succeeded),
-                "{route:?} should still solve at least one authored configuration"
-            );
-            assert!(
-                !outcomes
-                    .iter()
-                    .all(|outcome| *outcome == TickOutcome::Succeeded),
-                "no single blind route may be guaranteed to solve every authored \
-                 configuration, but {route:?} solved all of {outcomes:?}"
-            );
-        }
-    }
-
-    /// A simplified, hashable summary of one [`Simulation`]'s state: enough
-    /// to tell whether two independent action-sequence prefixes have left a
-    /// configuration in an equivalent position, budget, and outcome,
-    /// without dragging the (unbounded, order-independent) `discovered` set
-    /// into the equality/hash used for search memoization below.
-    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-    struct BlindSearchState {
-        position: Position,
-        budget_remaining: u32,
-        outcome: BlindOutcome,
-    }
-
-    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-    enum BlindOutcome {
-        Running,
-        Succeeded,
-        Failed,
-    }
-
-    impl From<TickOutcome> for BlindOutcome {
-        fn from(outcome: TickOutcome) -> Self {
-            match outcome {
-                TickOutcome::Running => BlindOutcome::Running,
-                TickOutcome::Succeeded => BlindOutcome::Succeeded,
-                TickOutcome::Failed(_) => BlindOutcome::Failed,
-            }
-        }
-    }
-
-    fn blind_search_key(sims: &[Simulation]) -> Vec<BlindSearchState> {
-        sims.iter()
-            .map(|sim| BlindSearchState {
-                position: sim.drone_position(),
-                budget_remaining: sim.observe().budget_remaining,
-                outcome: sim.outcome().into(),
-            })
-            .collect()
-    }
-
-    /// Exhaustively searches for a single blind (non-reactive, fixed in
-    /// advance) movement sequence that reaches every one of `configs`'
-    /// uplinks — i.e. a "solved one run, replay the exact moves" strategy
-    /// that would work no matter which authored configuration got
-    /// selected. Returns the sequence if one exists, `None` if none does.
-    ///
-    /// The search space is only the four movement actions: `wait` and
-    /// `scan` never help a non-reactive sequence reach a not-yet-succeeded
-    /// uplink sooner or more cheaply (they cost the same as a move without
-    /// changing position), so a solver using them, if one existed, would
-    /// still exist with them stripped out. This is a breadth-first search
-    /// over joint simulation states (one per configuration, all stepped
-    /// with the same action), memoized on [`BlindSearchState`] so that two
-    /// different prefixes reaching an equivalent position/budget/outcome
-    /// tuple for every configuration are only explored once. Movement
-    /// always costs at least 1 budget for a configuration still `Running`,
-    /// and every configuration shares the same starting budget, so the
-    /// search terminates in a bounded number of steps: by the time as many
-    /// actions have been taken as the starting budget allows, every
-    /// configuration must already be terminal (succeeded or failed).
-    fn universal_blind_movement_solver(configs: &[Scenario]) -> Option<Vec<Action>> {
-        let moves = [
-            Action::MoveNorth,
-            Action::MoveSouth,
-            Action::MoveEast,
-            Action::MoveWest,
-        ];
-
-        let start: Vec<Simulation> = configs
-            .iter()
-            .cloned()
-            .map(Simulation::from_scenario)
-            .collect();
-        let mut visited = HashSet::new();
-        visited.insert(blind_search_key(&start));
-        let mut queue = VecDeque::new();
-        queue.push_back((start, Vec::new()));
-
-        while let Some((sims, path)) = queue.pop_front() {
-            if sims
-                .iter()
-                .all(|sim| sim.outcome() == TickOutcome::Succeeded)
-            {
-                return Some(path);
-            }
-            // Every configuration is terminal but not every one succeeded:
-            // nothing further can change any of their fixed outcomes.
-            if sims.iter().all(|sim| sim.outcome() != TickOutcome::Running) {
-                continue;
-            }
-
-            for &action in &moves {
-                let mut next = sims.clone();
-                for sim in &mut next {
-                    if sim.outcome() == TickOutcome::Running {
-                        // An invalid move (wall/out-of-bounds) is a no-op
-                        // for that configuration, exactly as it would be
-                        // for a real deployment; the search just carries
-                        // its unchanged state forward.
-                        let _ = sim.step(action);
-                    }
-                }
-                let key = blind_search_key(&next);
-                if visited.insert(key) {
-                    let mut next_path = path.clone();
-                    next_path.push(action);
-                    queue.push_back((next, next_path));
-                }
-            }
-        }
-
-        None
-    }
-
-    #[test]
-    fn no_single_blind_movement_sequence_solves_every_authored_first_contact_configuration() {
-        assert_eq!(
-            universal_blind_movement_solver(&Scenario::first_contact_configurations()),
-            None,
-            "a single blind movement sequence must not be able to reach every \
-             authored configuration's uplink"
-        );
-    }
-
-    #[test]
-    fn the_blind_search_itself_can_find_a_universal_solver_when_one_exists() {
-        // Sanity check on `universal_blind_movement_solver` itself: three
-        // configurations that all share the same uplink are trivially
-        // solved by whatever blind route solves `Scenario::first_contact()`
-        // alone, so the search must find one rather than vacuously
-        // returning `None` because a real solver happens not to exist for
-        // the actual authored set.
-        let identical = [
-            Scenario::first_contact(),
-            Scenario::first_contact(),
-            Scenario::first_contact(),
-        ];
-        assert!(universal_blind_movement_solver(&identical).is_some());
-    }
-
-    #[test]
     fn new_simulation_has_fixed_starting_state() {
         let sim = Simulation::new();
         let scenario = Scenario::first_contact();
@@ -1491,7 +1298,7 @@ mod tests {
         assert_eq!(outcome, TickOutcome::Succeeded);
         assert_eq!(sim.drone_position(), Position { x: 4, y: 4 });
         assert_eq!(sim.ticks_elapsed(), 8);
-        assert_eq!(sim.observe().budget_remaining, 15 - 8);
+        assert_eq!(sim.observe().budget_remaining, 18 - 8);
     }
 
     #[test]
@@ -1740,8 +1547,8 @@ mod tests {
 
         assert_eq!(safe.outcome(), TickOutcome::Succeeded);
         assert_eq!(risky.outcome(), TickOutcome::Succeeded);
-        assert_eq!(safe.observe().budget_remaining, 15 - 8);
-        assert_eq!(risky.observe().budget_remaining, 15 - 8 - HAZARD_ENTRY_COST);
+        assert_eq!(safe.observe().budget_remaining, 18 - 8);
+        assert_eq!(risky.observe().budget_remaining, 18 - 8 - HAZARD_ENTRY_COST);
         assert!(!safe_events.iter().any(|report| {
             report
                 .events
@@ -1821,8 +1628,8 @@ mod tests {
             scanned.observe().budget_remaining,
             passive.observe().budget_remaining
         );
-        assert_eq!(scanned.observe().budget_remaining, 5);
-        assert_eq!(passive.observe().budget_remaining, 3);
+        assert_eq!(scanned.observe().budget_remaining, 8);
+        assert_eq!(passive.observe().budget_remaining, 6);
     }
 
     #[test]
@@ -1847,8 +1654,8 @@ mod tests {
         assert_eq!(sim.outcome(), TickOutcome::Succeeded);
         let remaining = sim.observe().budget_remaining;
         assert!(
-            (4..=6).contains(&remaining),
-            "expected the adaptive strategy to leave 4-6 budget, left {remaining}"
+            (6..=8).contains(&remaining),
+            "expected the adaptive strategy to leave 6-8 budget, left {remaining}"
         );
     }
 
@@ -1877,8 +1684,8 @@ mod tests {
         assert_eq!(sim.outcome(), TickOutcome::Succeeded);
         let remaining = sim.observe().budget_remaining;
         assert!(
-            (2..=4).contains(&remaining),
-            "expected the careful passive strategy to leave 2-4 budget, left {remaining}"
+            (4..=6).contains(&remaining),
+            "expected the careful passive strategy to leave 4-6 budget, left {remaining}"
         );
     }
 
@@ -1900,20 +1707,20 @@ mod tests {
         assert_eq!(sim.outcome(), TickOutcome::Succeeded);
         let remaining = sim.observe().budget_remaining;
         assert!(
-            remaining <= 3,
+            remaining <= 6,
             "expected crossing the hazard once to leave only a narrow margin, left {remaining}"
         );
     }
 
     #[test]
     fn repeated_unnecessary_scanning_can_put_success_at_risk() {
-        // Four scans before ever moving, then the otherwise-safe route:
+        // Six scans before ever moving, then the otherwise-safe route:
         // scanning that much is never necessary on this map (one scan
         // already reveals everything a route decision needs), and it costs
         // enough that the operation fails on budget before reaching the
         // uplink.
         let mut sim = Simulation::from_scenario(Scenario::first_contact());
-        for _ in 0..4 {
+        for _ in 0..6 {
             assert_eq!(
                 sim.step(Action::Scan).unwrap().outcome,
                 TickOutcome::Running
@@ -1974,7 +1781,7 @@ mod tests {
         let sim = run_route(Scenario::first_contact_south_uplink(), &route);
 
         assert_eq!(sim.outcome(), TickOutcome::Succeeded);
-        assert_eq!(sim.observe().budget_remaining, 9);
+        assert_eq!(sim.observe().budget_remaining, 12);
     }
 
     #[test]
@@ -2006,8 +1813,8 @@ mod tests {
 
         assert_eq!(adaptive.outcome(), TickOutcome::Succeeded);
         assert_eq!(risky.outcome(), TickOutcome::Succeeded);
-        assert!((4..=6).contains(&adaptive.observe().budget_remaining));
-        assert!(risky.observe().budget_remaining <= 3);
+        assert!((6..=8).contains(&adaptive.observe().budget_remaining));
+        assert!(risky.observe().budget_remaining <= 6);
     }
 
     /// A discovered floor tile, for building expected `discovered` lists in
