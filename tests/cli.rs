@@ -162,8 +162,8 @@ fn each_tick_reports_position_action_and_remaining_time() {
         .expect("binary should run");
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    assert!(stdout.contains("tick  1 | drone (0, 1) | action: north | budget remaining: 14"));
-    assert!(stdout.contains("tick  2 | drone (0, 2) | action: north | budget remaining: 13"));
+    assert!(stdout.contains("tick  1 | drone (0, 1) | action: north | budget remaining: 15"));
+    assert!(stdout.contains("tick  2 | drone (0, 2) | action: north | budget remaining: 14"));
 }
 
 #[test]
@@ -238,7 +238,7 @@ fn a_hazard_route_script_reports_the_hazard_telemetry_line_and_lower_final_budge
 
     assert!(output.status.success());
     assert!(stdout.contains("UPLINK REACHED"));
-    assert!(stdout.contains("tick  6 | drone (4, 2) | action: north | budget remaining: 5"));
+    assert!(stdout.contains("tick  6 | drone (4, 2) | action: north | budget remaining: 6"));
     assert!(stdout.contains("hazard triggered at (4, 2): -4 budget"));
 }
 

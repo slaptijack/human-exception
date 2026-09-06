@@ -1,42 +1,10 @@
--- A reference reconnaissance controller for the "First Contact"
--- operation. Run it with:
---
---   cargo run -- --developer-mode examples/first_contact.lua
---
--- Each tick, on_tick(observation) receives a read-only snapshot of the
--- drone's own position, the current tick, the operational budget
--- remaining (observation.budget_remaining), and observation.discovered:
--- every tile learned about so far (its own tile and cardinal neighbours
--- every tick, plus anything revealed by a completed "scan"). It must
--- return one action name: "north", "south", "east", "west", "wait", or
--- "scan".
---
--- The strategy is five plain rules, checked in order every tick:
---
---  1. Remember every tile discovered so far, and remember everywhere
---     the drone has already been.
---  2. If the uplink has been discovered, move toward it one step at a
---     time, using only ground already confirmed safe.
---  3. Otherwise, prefer a safe tile the drone hasn't visited yet,
---     breaking ties in a fixed order (see DIRECTIONS below) -- an
---     arbitrary but consistent tie-break, not a claim that any one
---     direction matters more than another.
---  4. If there's no such tile (every neighbour is either unsafe or
---     already visited) and the drone hasn't just looked around, scan:
---     a wider look is the obvious next move once nearby ground is used
---     up.
---  5. If a scan doesn't turn up anywhere fresh to go either, the
---     drone is boxed in by what little it knows: cross a known hazard
---     if one is available rather than sit still, and failing even
---     that, step back onto ground it's already covered.
---
--- This strategy has no privileged knowledge of the facility: it reacts
--- only to what it discovers and to its own memory of where it's been.
--- It reliably solves every authored configuration `--developer-mode`
--- or a console deployment may run, under either generic tie-break
--- order it might use to break a fork -- see issues #199 and #200 for
--- the tuning history behind the per-configuration budgets that make
--- that true.
+-- A copy of `examples/first_contact.lua`'s five-rule reactive strategy,
+-- differing only in its DIRECTIONS tie-break order (east before north,
+-- rather than north before east). It exists purely to prove the shipped
+-- reference controller's success across the authored configuration matrix
+-- does not depend on which arbitrary tie-break order it happens to use --
+-- see `the_reference_controller_succeeds_under_either_tie_break_order` in
+-- `src/lua_controller.rs`.
 
 local known = {}
 local visited = {}
@@ -74,10 +42,11 @@ local function is_visited(x, y)
   return visited[tile_key(x, y)] == true
 end
 
--- The four neighbours of (x, y), in a fixed, arbitrary tie-break order.
+-- The four neighbours of (x, y), in a fixed, arbitrary tie-break order --
+-- the mirror image of `examples/first_contact.lua`'s order.
 local DIRECTIONS = {
-  { 0, 1, "north" },
   { 1, 0, "east" },
+  { 0, 1, "north" },
   { 0, -1, "south" },
   { -1, 0, "west" },
 }

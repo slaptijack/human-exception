@@ -2797,7 +2797,7 @@ mod tests {
             retry_events.extend(clear_and_type(ALWAYS_WAITS));
             retry_events.push(press(KeyCode::F(6)));
             retry_events.push(press(KeyCode::Char(' '))); // pause
-            retry_events.extend(std::iter::repeat_n(press(KeyCode::Enter), 15)); // exhaust the budget
+            retry_events.extend(std::iter::repeat_n(press(KeyCode::Enter), 16)); // exhaust the budget
             let (state, _) = render_from(
                 bootstrap_state(Some(&profile_path), Some(&intro_path)),
                 width,
@@ -2946,7 +2946,7 @@ mod tests {
     "#;
 
     /// Waits forever, exhausting the fixed First Contact scenario's
-    /// 15-point budget in exactly 15 ticks (`crate::simulation`'s
+    /// 16-point budget in exactly 16 ticks (`crate::simulation`'s
     /// `waiting_until_budget_exhausted_fails`).
     const ALWAYS_WAITS: &str = "function on_tick(observation) return \"wait\" end";
 
@@ -3005,7 +3005,7 @@ mod tests {
         events.extend(clear_and_type(ALWAYS_WAITS));
         events.push(press(KeyCode::F(6)));
         events.push(press(KeyCode::Char(' '))); // pause
-        events.extend(std::iter::repeat_n(press(KeyCode::Enter), 15)); // exhaust the budget
+        events.extend(std::iter::repeat_n(press(KeyCode::Enter), 16)); // exhaust the budget
         events.push(press(KeyCode::F(5))); // Review Run
         events.push(press(KeyCode::End));
 
@@ -3030,7 +3030,7 @@ mod tests {
                     panic!("expected the terminal point to be a completed tick, got {other:?}")
                 }
             }
-            assert!(buffer_contains(&terminal, "budget        0 / 15"));
+            assert!(buffer_contains(&terminal, "budget        0 / 16"));
             assert!(buffer_contains(
                 &terminal,
                 "OPERATION FAILED: budget exhausted"
@@ -3961,7 +3961,7 @@ mod tests {
         events.extend(clear_and_type(ALWAYS_WAITS));
         events.push(press(KeyCode::F(6)));
         events.push(press(KeyCode::Char(' ')));
-        events.extend(std::iter::repeat_n(press(KeyCode::Enter), 15));
+        events.extend(std::iter::repeat_n(press(KeyCode::Enter), 16));
         events.push(press(KeyCode::F(5)));
 
         assert_navigation_never_mutates_the_run(120, 40, &events);

@@ -4615,7 +4615,7 @@ end
         state.apply(super::super::state::Msg::RequestDeploy);
 
         // The starter controller scans once, then waits forever, so it
-        // always ends in budget exhaustion on the fixed 15-budget scenario.
+        // always ends in budget exhaustion on the fixed 16-budget scenario.
         for _ in 0..20 {
             if state.operation().is_some_and(|op| op.finished) {
                 break;

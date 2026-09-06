@@ -2741,7 +2741,7 @@ mod tests {
             Scenario::first_contact(),
         )
         .expect("valid controller");
-        assert_eq!(op.starting_budget(), 15);
+        assert_eq!(op.starting_budget(), 16);
     }
 
     #[test]
@@ -2783,22 +2783,42 @@ mod tests {
     /// one, not just the single fixed scenario `--developer-mode` and the
     /// rest of this module's inline stand-in scripts exercise elsewhere.
     fn run_example_against(run_id: u32) -> TickOutcome {
-        let script_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("examples")
-            .join("first_contact.lua");
-        run(&script_path, Scenario::select_first_contact(run_id), |_| {})
+        run_script_against(
+            &Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("examples")
+                .join("first_contact.lua"),
+            run_id,
+        )
+    }
+
+    /// The same reference controller, but with its `DIRECTIONS` tie-break
+    /// order reversed (east before north, rather than north before east) --
+    /// see `tests/fixtures/first_contact_reference_east_first.lua`. Used to
+    /// prove the reference controller's full-matrix success doesn't depend
+    /// on which arbitrary tie-break order it happens to use.
+    fn run_east_first_fixture_against(run_id: u32) -> TickOutcome {
+        run_script_against(
+            &Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests")
+                .join("fixtures")
+                .join("first_contact_reference_east_first.lua"),
+            run_id,
+        )
+    }
+
+    fn run_script_against(script_path: &Path, run_id: u32) -> TickOutcome {
+        run(script_path, Scenario::select_first_contact(run_id), |_| {})
             .expect("the reference controller runs to completion without error")
     }
 
-    /// `run_id`s 1 and 3 both select a scenario whose uplink sits at
-    /// `(4, 4)` (see `Scenario::first_contact` and
-    /// `Scenario::first_contact_row1_hazard`), reachable by the same
-    /// hazard-free route the reference controller's fixed direction
-    /// preference finds directly; `--developer-mode` always deploys
-    /// `run_id` 1's scenario, so this also keeps that path solved.
+    /// The per-configuration budgets tuned by issue #199/#200 let the
+    /// reference controller solve every authored configuration regardless
+    /// of which of the two generic tie-break orders it uses to break its
+    /// first fork -- see `Scenario::first_contact_configurations`'s doc
+    /// comment for the tuning rationale.
     #[test]
-    fn the_reference_controller_succeeds_against_the_uplink_at_4_4_configurations() {
-        for run_id in [1, 3] {
+    fn the_reference_controller_succeeds_against_every_authored_configuration() {
+        for run_id in 1..=3 {
             assert_eq!(
                 run_example_against(run_id),
                 TickOutcome::Succeeded,
@@ -2807,23 +2827,15 @@ mod tests {
         }
     }
 
-    /// `run_id` 2 (`Scenario::first_contact_south_uplink`) is a known,
-    /// deterministic gap: kept deliberately, not disabled or weakened, so
-    /// this test fails loudly (rather than silently regresses further) if
-    /// the reference controller's behavior on this configuration ever
-    /// changes. issue #199 records why a small, honest reactive strategy
-    /// with no knowledge of the authored configuration matrix baked into
-    /// its logic cannot also solve this configuration within the current
-    /// budget, and asks whether that budget/geometry is too tight for the
-    /// programming lesson First Contact, as the very first operation, is
-    /// meant to teach -- see that issue before changing this test.
     #[test]
-    fn the_reference_controller_runs_out_of_budget_on_the_south_uplink_configuration() {
-        assert_eq!(
-            run_example_against(2),
-            TickOutcome::Failed(FailureReason::BudgetExhausted),
-            "if this changed, see issue #199 before updating the assertion"
-        );
+    fn the_reference_controller_succeeds_under_either_tie_break_order() {
+        for run_id in 1..=3 {
+            assert_eq!(
+                run_east_first_fixture_against(run_id),
+                TickOutcome::Succeeded,
+                "expected the east-first tie-break order to also reach the uplink for run_id {run_id}"
+            );
+        }
     }
 
     #[test]
@@ -2834,6 +2846,13 @@ mod tests {
             assert_eq!(
                 first, second,
                 "expected identical outcomes on repeated runs for run_id {run_id}"
+            );
+
+            let east_first = run_east_first_fixture_against(run_id);
+            let east_second = run_east_first_fixture_against(run_id);
+            assert_eq!(
+                east_first, east_second,
+                "expected identical outcomes on repeated east-first runs for run_id {run_id}"
             );
         }
     }
