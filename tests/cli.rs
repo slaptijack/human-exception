@@ -162,12 +162,12 @@ fn each_tick_reports_position_action_and_remaining_time() {
         .expect("binary should run");
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    assert!(stdout.contains("tick  1 | drone (0, 0) | action: scan | budget remaining: 13"));
-    assert!(stdout.contains("tick  2 | drone (0, 1) | action: north | budget remaining: 12"));
+    assert!(stdout.contains("tick  1 | drone (0, 1) | action: north | budget remaining: 14"));
+    assert!(stdout.contains("tick  2 | drone (0, 2) | action: north | budget remaining: 13"));
 }
 
 #[test]
-fn the_example_script_scans_before_navigating() {
+fn the_example_script_does_not_scan_when_a_direct_safe_route_is_available() {
     let output = bin()
         .arg("--developer-mode")
         .arg(example_path("first_contact.lua"))
@@ -175,9 +175,13 @@ fn the_example_script_scans_before_navigating() {
         .expect("binary should run");
     let stdout = String::from_utf8_lossy(&output.stdout);
 
+    // The fixed developer-mode scenario's hazard-free route never leaves
+    // the reference controller without a fresh safe tile to move to, so
+    // its scan-when-stuck rule never fires here: scan is a fallback, not
+    // a ritual performed regardless of whether it's useful.
     assert!(
-        stdout.contains("action: scan"),
-        "expected the reference controller to scan as part of its successful run, got: {stdout}"
+        !stdout.contains("action: scan"),
+        "expected no scan on the direct route this scenario admits, got: {stdout}"
     );
 }
 
@@ -218,9 +222,9 @@ fn each_tick_is_preceded_by_a_satellite_view_of_discovered_terrain() {
         stdout
             .contains("legend: D drone   U uplink   . floor   # wall   ~ hazard   ? undiscovered")
     );
-    // The first frame reflects tick 1's completed opening scan, which
-    // reveals a 5x5 area around the drone's starting tile (0, 0).
-    assert!(stdout.contains("y=0 |   D   #   .   ?   ?"));
+    // The first frame reflects tick 1's completed move, which passively
+    // reveals the drone's new tile (0, 1) and its cardinal neighbours.
+    assert!(stdout.contains("y=0 |   .   #   ?   ?   ?"));
 }
 
 #[test]
