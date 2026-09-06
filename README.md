@@ -111,7 +111,7 @@ Paste your controller into the console's Controller editor and deploy it with `F
 cargo run -- --developer-mode path/to/your_script.lua
 ```
 
-See [`examples/first_contact.lua`](examples/first_contact.lua) for a reference reconnaissance controller against the "First Contact" scenario. It's a small, five-rule strategy that reacts only to what it discovers and to its own memory of where it's been: remember every tile seen and every tile visited; once the uplink is discovered, move toward it using only confirmed-safe ground; otherwise, prefer a safe tile not yet visited (an arbitrary but consistent direction order breaks ties); scan once if there's no such tile; and if a scan doesn't help either, cross a known hazard or step back onto covered ground rather than stall. Deployed through the console, where `F6` selects among a small set of authored configurations with a different active uplink and hazard tile each time, this strategy reliably solves every one of them, regardless of which of the two generic tie-break orders it uses to break its first fork.
+See [`examples/first_contact.lua`](examples/first_contact.lua) for a reference reconnaissance controller against the "First Contact" scenario. It's a small, five-rule strategy that reacts only to what it discovers and to its own memory of where it's been: remember every tile seen and every tile visited; once the uplink is discovered, move toward it using only confirmed-safe ground; otherwise, prefer a safe tile not yet visited (an arbitrary but consistent direction order breaks ties); scan once if there's no such tile; and if a scan doesn't help either, cross a known hazard or step back onto covered ground rather than stall. Deployed through the console, where `F6` selects among a small set of authored configurations whose active uplink and/or hazard tile can differ from one deployment to the next, this strategy reliably solves every one of them, regardless of which of the two generic tie-break orders it uses to break its first fork.
 
 ### Exit codes
 
@@ -124,7 +124,7 @@ See [`examples/first_contact.lua`](examples/first_contact.lua) for a reference r
 
 ### Reference controller and the fixed test scenario
 
-`--developer-mode` and the test suite run one fixed map, independent of the small set of authored configurations a console deployment selects via `F6` (see `docs/TUI_DESIGN.md`'s "First Contact configuration model"). This section documents that fixed map — a 5x5 facility and an 18-budget operation, the same budget shared uniformly across every authored configuration — for contributors extending or testing controllers; it is not a walkthrough for players, and studying it is not how the game is meant to be won.
+`--developer-mode` always runs one fixed map, independent of the small set of authored configurations a console deployment selects via `F6` (see `docs/TUI_DESIGN.md`'s "First Contact configuration model"). This section documents that fixed map — a 5x5 facility and an 18-budget operation, the same budget shared uniformly across every authored configuration — for contributors extending or testing controllers; it is not a walkthrough for players, and studying it is not how the game is meant to be won. Tests that specifically target this fixed scenario use it directly; others in the suite exercise the other authored configurations as well.
 
 ```
        x=0  x=1  x=2  x=3  x=4
@@ -138,7 +138,7 @@ S = drone start   U = uplink objective
 . = floor   # = wall (impassable)   ~ = hazard (traversable; entering it costs extra budget)
 ```
 
-None of this layout is exposed directly through the API — a controller must still discover it through observation. `(2, 0)` is a one-tile dead end off the shared corridor at `(2, 1)`; it never leads anywhere, and passive discovery reveals it as soon as the drone reaches `(2, 1)`, so a controller never needs to step into it to rule it out. Two equal-length routes also lead from the start to the uplink on this particular map: one along column `x=0` and row `y=4` that never touches the hazard, and one along row `y=1` and column `x=4` that passes through it — neither is privileged by the game, and a different authored configuration will place its uplink and hazard elsewhere.
+None of this layout is exposed directly through the API — a controller must still discover it through observation. `(2, 0)` is a one-tile dead end off the shared corridor at `(2, 1)`; it never leads anywhere, and passive discovery reveals it as soon as the drone reaches `(2, 1)`, so a controller never needs to step into it to rule it out. Two equal-length routes also lead from the start to the uplink on this particular map: one along column `x=0` and row `y=4` that never touches the hazard, and one along row `y=1` and column `x=4` that passes through it — neither is privileged by the game, and other authored configurations move the uplink and/or the hazard elsewhere.
 
 ## Contributing
 
