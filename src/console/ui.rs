@@ -593,8 +593,8 @@ fn controller_banner(state: &AppState) -> Option<Vec<Line<'static>>> {
 
 /// A short, representative subset of the Lua contract shown as a cheat
 /// sheet next to the editor. See `help_lines`'s "Lua contract" section for
-/// the complete reference; the two are checked for consistency in tests so
-/// they can't silently drift.
+/// the complete reference; the two are kept in sync by hand, so update both
+/// if you change one.
 fn lua_field_reference_lines() -> Vec<Line<'static>> {
     vec![
         Line::from(Span::styled(
