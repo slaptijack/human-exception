@@ -713,7 +713,7 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::backend::TestBackend;
-    use state::View;
+    use state::{ConclusionKind, View};
 
     fn press(code: KeyCode) -> Event {
         Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
@@ -2804,6 +2804,8 @@ mod tests {
                 height,
                 &retry_events,
             );
+            // Issue #193: an unsuccessful First Contact run must never
+            // grant connectivity.
             assert!(!state.connected());
             assert!(!state.network_bootstrap_pending());
             assert_eq!(state.current_view(), View::AfterAction);
@@ -2840,6 +2842,11 @@ mod tests {
                 height,
                 &retry_events,
             );
+            // Issue #193: a genuine first success triggers Network
+            // Bootstrap exactly once — this is the only point in this
+            // whole lifecycle where `network_bootstrap_pending` ever
+            // becomes true (the earlier failed attempt in step 4 never set
+            // it), and step 7 drives it to completion exactly once below.
             assert!(
                 state.connected(),
                 "durable connectivity is recorded the instant success is determined"
@@ -2920,6 +2927,142 @@ mod tests {
 
             let _ = std::fs::remove_file(&profile_path);
             let _ = std::fs::remove_file(&intro_path);
+        }
+    }
+
+    /// Reads the checked-in reference controller (`examples/first_contact.lua`)
+    /// as source text, for deploying it through the Controller editor the
+    /// same way a Player pasting it in would (`clear_and_paste`).
+    fn reference_controller_source() -> String {
+        std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("examples")
+                .join("first_contact.lua"),
+        )
+        .expect("the checked-in reference controller should be readable")
+    }
+
+    /// Like [`clear_and_paste`], but safe to use for redeploying over an
+    /// editor that may already hold `source` itself (from a prior deploy
+    /// in the same test), not just the starter controller.
+    /// `clear_and_paste`'s backspace count only clears `STARTER_CONTROLLER`'s
+    /// length, which would leave a leftover prefix of a longer
+    /// previously-pasted script in place; `F7`/`Enter` (reset controller,
+    /// confirmed) restores the actual starter controller first regardless
+    /// of the editor's current contents, one cheap event pair instead of
+    /// backspacing thousands of characters.
+    fn clear_and_paste_over_possibly_the_same_source(source: &str) -> Vec<Event> {
+        let mut events = vec![press(KeyCode::F(7)), press(KeyCode::Enter)];
+        events.extend(clear_and_paste(source));
+        events
+    }
+
+    /// Issue #193: the reference controller is already proven to solve
+    /// every authored configuration at the `lua_controller::run` layer
+    /// (`the_reference_controller_succeeds_against_every_authored_configuration`).
+    /// This proves the same thing through the actual console lifecycle —
+    /// deploy, watch it run, land on After Action — for all three
+    /// configurations `Scenario::select_first_contact` cycles through as a
+    /// session redeploys, rather than only through the lower-level
+    /// `LiveOperation`/`run` API.
+    #[test]
+    fn the_reference_controller_succeeds_against_every_authored_configuration_through_the_console()
+    {
+        let source = reference_controller_source();
+        let configuration_count =
+            crate::simulation::Scenario::first_contact_configurations().len() as u32;
+
+        for (width, height) in [(120, 40), (150, 50)] {
+            let mut state = connected_state();
+            for expected_run_id in 1..=configuration_count {
+                // The editor already holds `STARTER_CONTROLLER` on the
+                // first deploy (plain `clear_and_paste` suffices) but
+                // holds `source` itself on every redeploy after that.
+                let mut events = if expected_run_id == 1 {
+                    clear_and_paste(&source)
+                } else {
+                    clear_and_paste_over_possibly_the_same_source(&source)
+                };
+                events.push(press(KeyCode::F(6)));
+                events.push(press(KeyCode::Char(' '))); // pause
+                // The shared 18-point budget bounds every authored
+                // configuration's worst case at 18 ticks; a generous
+                // step count is a safe no-op past completion
+                // (`Msg::StepOperationTick` no-ops once finished).
+                events.extend(std::iter::repeat_n(press(KeyCode::Enter), 20));
+
+                let (next_state, _) = render_from(state, width, height, &events);
+                state = next_state;
+
+                let op = state.operation().expect("a deployment was just made");
+                assert_eq!(op.run_id, expected_run_id);
+                assert!(
+                    op.finished,
+                    "expected run_id {expected_run_id} to reach a terminal outcome"
+                );
+                assert_eq!(
+                    state.current_view(),
+                    View::AfterAction,
+                    "expected run_id {expected_run_id} to land on After Action"
+                );
+                let conclusion = op
+                    .conclusion
+                    .expect("a finished operation has a conclusion");
+                assert_eq!(
+                    conclusion.run_id, expected_run_id,
+                    "expected the recorded conclusion to match this deployment"
+                );
+                assert!(
+                    matches!(conclusion.kind, ConclusionKind::Success),
+                    "expected the unmodified reference controller to succeed \
+                     against run_id {expected_run_id}'s authored configuration"
+                );
+
+                if expected_run_id < configuration_count {
+                    let (back_to_controller, _) =
+                        render_from(state, width, height, &[press(KeyCode::F(4))]);
+                    state = back_to_controller;
+                    assert_eq!(state.current_view(), View::Controller);
+                }
+            }
+        }
+    }
+
+    /// Issue #193: at least two meaningfully different legitimate,
+    /// observation-driven strategies, distinct from both the shipped
+    /// reference controller and from blind scripted routes.
+    /// `tests/fixtures/success.lua` only scans as a fallback ("viable
+    /// no-scan"); `tests/fixtures/scan_then_navigate.lua` scans
+    /// unconditionally on tick 0 ("useful scan"). Both read `observation`
+    /// and neither hardcodes a route, unlike `ROUTE_TO_UPLINK`.
+    #[test]
+    fn two_legitimate_observation_driven_strategies_both_succeed_and_differ_from_the_reference() {
+        for fixture_name in ["success.lua", "scan_then_navigate.lua"] {
+            let source = std::fs::read_to_string(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests")
+                    .join("fixtures")
+                    .join(fixture_name),
+            )
+            .unwrap_or_else(|err| panic!("{fixture_name} should be readable: {err}"));
+
+            let mut events = clear_and_paste(&source);
+            events.push(press(KeyCode::F(6)));
+            events.push(press(KeyCode::Char(' '))); // pause
+            events.extend(std::iter::repeat_n(press(KeyCode::Enter), 20));
+
+            let (state, _) = render_from(connected_state(), 120, 40, &events);
+
+            assert_eq!(state.current_view(), View::AfterAction);
+            let op = state.operation().expect("a deployment was just made");
+            let conclusion = op
+                .conclusion
+                .expect("a finished operation has a conclusion");
+            assert!(
+                matches!(conclusion.kind, ConclusionKind::Success),
+                "expected {fixture_name} to succeed as a legitimate \
+                 observation-driven strategy"
+            );
         }
     }
 

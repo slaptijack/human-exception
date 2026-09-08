@@ -2856,4 +2856,32 @@ mod tests {
             );
         }
     }
+
+    /// `tests/fixtures/wasteful_rescan.lua` genuinely branches on
+    /// `observation` every tick (drone position, discovered tiles, tick
+    /// parity) to decide whether to scan or navigate — unlike a blind
+    /// scripted route, its action depends on what it observes — but it
+    /// always rescans on every even tick regardless of what's already
+    /// discovered, so redundant `SCAN_COST` spend exhausts the budget
+    /// before it reaches the uplink. Distinct from a degenerate
+    /// `wait`-forever controller, whose action never varies with
+    /// observation at all.
+    #[test]
+    fn wasteful_rescanning_exhausts_budget_before_reaching_the_uplink() {
+        for run_id in 1..=Scenario::first_contact_configurations().len() as u32 {
+            let outcome = run_script_against(
+                &Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests")
+                    .join("fixtures")
+                    .join("wasteful_rescan.lua"),
+                run_id,
+            );
+            assert_eq!(
+                outcome,
+                TickOutcome::Failed(FailureReason::BudgetExhausted),
+                "expected wasteful rescanning to fail on budget exhaustion \
+                 for run_id {run_id}, not some other outcome"
+            );
+        }
+    }
 }

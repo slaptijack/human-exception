@@ -447,7 +447,7 @@ impl Scenario {
     /// product-direction note on epic #185): it defended against a threat
     /// model not worth the tuning cost of preserving it this early in
     /// development.
-    fn first_contact_configurations() -> [Scenario; 3] {
+    pub(crate) fn first_contact_configurations() -> [Scenario; 3] {
         [
             Scenario::first_contact(),
             Scenario::first_contact_south_uplink(),
@@ -1160,6 +1160,29 @@ mod tests {
         assert_ne!(selections[0], selections[1]);
         assert_ne!(selections[1], selections[2]);
         assert_ne!(selections[0], selections[2]);
+    }
+
+    /// The uniform-budget rationale documented on [`FIRST_CONTACT_STARTING_BUDGET`]
+    /// and [`Scenario::first_contact_configurations`] as an explicit,
+    /// standalone assertion: a controller cannot infer which authored
+    /// configuration was selected from `observation.budget_remaining` on
+    /// tick 0, because every configuration reports the same starting
+    /// budget. This is a constant-equality check, not a behavioral
+    /// inference, precisely because the anti-leak property holds by
+    /// construction rather than by chance.
+    #[test]
+    fn first_contact_configurations_share_identical_starting_budget() {
+        let configurations = Scenario::first_contact_configurations();
+        let budgets: Vec<u32> = configurations
+            .iter()
+            .map(Scenario::starting_budget)
+            .collect();
+        assert!(
+            budgets.iter().all(|&budget| budget == budgets[0]),
+            "expected every authored configuration to share one starting \
+             budget so configuration identity cannot be inferred from \
+             observation.budget_remaining before legitimate discovery: {budgets:?}"
+        );
     }
 
     #[test]
