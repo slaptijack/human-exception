@@ -445,6 +445,8 @@ A hazard should read as a meaningful choice between routes or exploration strate
 
 **The reference controller solves every authored configuration.** `examples/first_contact.lua` is a small, five-rule reactive strategy with no privileged knowledge of the authored configuration set. With the per-configuration budgets above, it succeeds against every authored configuration, regardless of which of the two generic tie-break orders it uses to break its first fork.
 
+**More than one legitimate observation-driven strategy is viable.** The reference controller is one example, not the only sensible shape a controller can take — a controller that scans unconditionally as soon as it can afford to, and one that scans only as a fallback once it runs out of confirmed safe moves, are both legitimate observation-driven strategies (useful scan and viable no-scan, respectively). Blind scripted movement (a controller that never reads `observation` at all) is a separate category, kept for contrast rather than counted as one of these: it may happen to succeed against a configuration it wasn't authored for, but that is incidental, not evidence that any one blind route is a canonical or universal solution (see "No guarantee against a memorized blind route" above).
+
 **Network Bootstrap boundary unchanged.** This contract does not alter the existing First Contact success routing established in Epic #160: authoritative success still routes through [Network Bootstrap](#network-bootstrap) into connected Signals; failure of any kind still lands on After Action (§5) with the Player free to revise and retry.
 
 ## 1. Signals

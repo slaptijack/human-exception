@@ -2856,4 +2856,30 @@ mod tests {
             );
         }
     }
+
+    /// `tests/fixtures/wasteful_rescan.lua` reads `observation` on every
+    /// tick (unlike a blind scripted route) but always rescans regardless
+    /// of what's already discovered, so it never moves toward the uplink.
+    /// Distinct from a degenerate `wait`-forever controller: this is a
+    /// legitimately observation-shaped strategy that still fails, for a
+    /// mechanically understandable reason (redundant `SCAN_COST` spend,
+    /// not a crash or an unexplainable outcome).
+    #[test]
+    fn wasteful_rescanning_exhausts_budget_before_reaching_the_uplink() {
+        for run_id in 1..=3 {
+            let outcome = run_script_against(
+                &Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests")
+                    .join("fixtures")
+                    .join("wasteful_rescan.lua"),
+                run_id,
+            );
+            assert_eq!(
+                outcome,
+                TickOutcome::Failed(FailureReason::BudgetExhausted),
+                "expected wasteful rescanning to fail on budget exhaustion \
+                 for run_id {run_id}, not some other outcome"
+            );
+        }
+    }
 }
