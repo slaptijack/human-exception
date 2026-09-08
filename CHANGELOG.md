@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/slaptijack/human-exception/compare/v0.4.3...v0.5.0) - 2026-09-08
+
+### Added
+
+- *(console)* surface First Contact evidence in After Action ([#203](https://github.com/slaptijack/human-exception/pull/203))
+- *(simulation)* close the reactive-controller budget gap for First Contact ([#201](https://github.com/slaptijack/human-exception/pull/201))
+- *(simulation)* tune First Contact scan, hazard, and budget pressure ([#197](https://github.com/slaptijack/human-exception/pull/197))
+- *(simulation)* add the authored First Contact configuration matrix ([#196](https://github.com/slaptijack/human-exception/pull/196))
+- *(simulation)* [**breaking**] give First Contact an explicit per-run configuration seam ([#195](https://github.com/slaptijack/human-exception/pull/195))
+
+### Other
+
+- *(first-contact)* prove adaptive behavior rewards end to end ([#204](https://github.com/slaptijack/human-exception/pull/204))
+- *(readme)* reframe the fixed First Contact map as contributor-only reference ([#202](https://github.com/slaptijack/human-exception/pull/202))
+- *(examples)* simplify the First Contact reference controller ([#198](https://github.com/slaptijack/human-exception/pull/198))
+- *(first-contact)* define the configuration-model programming-strategy contract ([#194](https://github.com/slaptijack/human-exception/pull/194))
+
 ## [0.4.3](https://github.com/slaptijack/human-exception/compare/v0.4.2...v0.4.3) - 2026-09-03
 
 ### Added
