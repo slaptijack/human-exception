@@ -6,8 +6,8 @@
 
 use super::intel::{Signal, TargetDossier, first_contact_dossier, visible_signals};
 use super::state::{
-    AppState, ConclusionKind, OperationSnapshot, OperationView, PaneId, ReviewPoint,
-    ReviewPointKind, RunInspectorMode, Validation, View, WorkingSet,
+    AppState, ConclusionKind, OperationConclusion, OperationSnapshot, OperationView, PaneId,
+    ReviewPoint, ReviewPointKind, RunInspectorMode, Validation, View, WorkingSet,
 };
 use crate::lua_controller::{ControllerError, TickRecord};
 use crate::render::render_satellite_view;
@@ -935,6 +935,35 @@ fn no_further_operation_failure_line(connected: bool) -> String {
     )
 }
 
+/// The small amount of factual First Contact-specific evidence
+/// `docs/TUI_DESIGN.md`'s "Evidence: After Action vs. Review Run" section
+/// allows alongside the core evidence block: scans performed, whether and
+/// roughly when the uplink was first legitimately observed, and ordinary
+/// action-budget spent versus budget lost to hazard penalties. Shared
+/// between the success and failure paths so both stay in sync; purely
+/// factual/mechanical, never a recommendation.
+fn first_contact_evidence_lines(conclusion: &OperationConclusion<'_>) -> Vec<Line<'static>> {
+    let uplink_discovered = match conclusion.uplink_first_discovered_tick {
+        Some(tick) => format!("tick {tick:02}"),
+        None => "not observed".to_string(),
+    };
+    vec![
+        Line::from(format!(
+            "scans performed    {:02}",
+            conclusion.scans_performed
+        )),
+        Line::from(format!("uplink discovered  {uplink_discovered}")),
+        Line::from(format!(
+            "action budget used {:02}",
+            conclusion.ordinary_budget_spent
+        )),
+        Line::from(format!(
+            "hazard budget lost {:02}",
+            conclusion.hazard_budget_spent
+        )),
+    ]
+}
+
 fn after_action_report_lines(op: &OperationView<'_>, connected: bool) -> Vec<Line<'static>> {
     if after_action_succeeded(op) {
         after_action_success_lines(op)
@@ -990,6 +1019,7 @@ fn after_action_success_lines(op: &OperationView<'_>) -> Vec<Line<'static>> {
         "deployed rev       run-{:02}",
         conclusion.run_id
     )));
+    lines.extend(first_contact_evidence_lines(&conclusion));
     lines.push(Line::from(""));
     lines.push(Line::from(NO_FURTHER_OPERATION));
 
@@ -1068,6 +1098,7 @@ fn after_action_failure_lines(op: &OperationView<'_>, connected: bool) -> Vec<Li
         "deployed rev       run-{:02}",
         conclusion.run_id
     )));
+    lines.extend(first_contact_evidence_lines(&conclusion));
     lines.push(Line::from(""));
     lines.push(Line::from(no_further_operation_failure_line(connected)));
 
@@ -4651,6 +4682,17 @@ end
         assert!(buffer_contains(&terminal, "hazards entered"));
         assert!(buffer_contains(&terminal, "remaining budget"));
         assert!(buffer_contains(&terminal, "deployed rev"));
+        // The starter controller scans exactly once and then only waits, so
+        // it never moves off its starting tile and never discovers the
+        // (distant) uplink — the new First Contact evidence should say so
+        // plainly.
+        assert!(buffer_contains(&terminal, "scans performed    01"));
+        assert!(buffer_contains(
+            &terminal,
+            "uplink discovered  not observed"
+        ));
+        assert!(buffer_contains(&terminal, "action budget used"));
+        assert!(buffer_contains(&terminal, "hazard budget lost 00"));
         assert!(buffer_contains(&terminal, "STATUS: FAILED"));
         assert!(buffer_contains(&terminal, "F6 Redeploy"));
         assert!(buffer_contains(&terminal, "F4  revise the controller"));
@@ -5387,6 +5429,12 @@ end
         assert!(buffer_contains(&terminal, "hazards entered"));
         assert!(buffer_contains(&terminal, "remaining budget"));
         assert!(buffer_contains(&terminal, "deployed rev"));
+        // `ROUTE_TO_UPLINK` is a blind route that never scans but does
+        // cross the first configuration's one hazard tile en route.
+        assert!(buffer_contains(&terminal, "scans performed    00"));
+        assert!(buffer_contains(&terminal, "uplink discovered  tick"));
+        assert!(buffer_contains(&terminal, "action budget used"));
+        assert!(buffer_contains(&terminal, "hazard budget lost 04"));
         assert!(buffer_contains(
             &terminal,
             "No further operation is available"

@@ -252,8 +252,11 @@ pub enum ConclusionKind<'a> {
 /// A structured, read-only account of how a finished deployment ended,
 /// with the evidence `docs/TUI_DESIGN.md` §5 requires on the initial
 /// After Action screen (final budget, ticks executed, tiles discovered,
-/// hazards entered, run identifier) precomputed so rendering doesn't
-/// recalculate gameplay rules.
+/// hazards entered, run identifier), plus the small amount of factual
+/// First Contact-specific evidence `docs/TUI_DESIGN.md`'s "Evidence: After
+/// Action vs. Review Run" section allows (scans performed, uplink
+/// discovery timing, ordinary vs. hazard budget spent), precomputed so
+/// rendering doesn't recalculate gameplay rules.
 #[derive(Debug, Clone, Copy)]
 pub struct OperationConclusion<'a> {
     pub kind: ConclusionKind<'a>,
@@ -262,6 +265,13 @@ pub struct OperationConclusion<'a> {
     pub hazards_entered: u32,
     pub final_budget: u32,
     pub run_id: u32,
+    pub scans_performed: u32,
+    /// The tick the uplink was first legitimately observed (`0` meaning
+    /// the pre-tick initial observation), or `None` if this run never
+    /// discovered it.
+    pub uplink_first_discovered_tick: Option<u32>,
+    pub ordinary_budget_spent: u32,
+    pub hazard_budget_spent: u32,
 }
 
 /// A satellite-feed-safe snapshot of a deployment's current state — only
@@ -344,6 +354,47 @@ fn discovered_since(
         .filter(|tile| !known.contains(&tile.position))
         .copied()
         .collect()
+}
+
+/// How many `scan` actions a run performed, from its recorded ticks.
+fn scans_performed(records: &[TickRecord]) -> u32 {
+    records
+        .iter()
+        .filter(|record| record.action == crate::simulation::Action::Scan)
+        .count() as u32
+}
+
+/// The tick at which the uplink tile was first legitimately observed
+/// (`0` meaning the pre-tick initial observation), or `None` if the run
+/// never discovered it. Mirrors `discovered_since`'s assumption that
+/// `discovered` sets are cumulative.
+fn uplink_first_discovered_tick(
+    initial: &Option<OperationSnapshot>,
+    records: &[TickRecord],
+) -> Option<u32> {
+    let initial = initial.as_ref()?;
+    if initial.discovered.iter().any(|tile| tile.is_uplink) {
+        return Some(initial.tick);
+    }
+    records
+        .iter()
+        .find(|record| record.discovered.iter().any(|tile| tile.is_uplink))
+        .map(|record| record.tick)
+}
+
+/// Ordinary action-budget spent vs. budget lost to hazard-entry penalties,
+/// summed from each recorded tick's `SimEvent` costs.
+fn budget_spent_breakdown(records: &[TickRecord]) -> (u32, u32) {
+    let mut ordinary = 0;
+    let mut hazard = 0;
+    for event in records.iter().flat_map(|record| &record.events) {
+        match event {
+            crate::simulation::SimEvent::ActionCost { amount, .. } => ordinary += amount,
+            crate::simulation::SimEvent::HazardEntered { amount, .. } => hazard += amount,
+            _ => {}
+        }
+    }
+    (ordinary, hazard)
 }
 
 /// Projects an operation's immutable facts into its ordered Review Run
@@ -938,6 +989,8 @@ impl AppState {
                         matches!(event, crate::simulation::SimEvent::HazardEntered { .. })
                     })
                     .count() as u32;
+                let (ordinary_budget_spent, hazard_budget_spent) =
+                    budget_spent_breakdown(&op.records);
                 OperationConclusion {
                     kind,
                     ticks_executed: op.records.len() as u32,
@@ -945,6 +998,13 @@ impl AppState {
                     hazards_entered,
                     final_budget: current.budget_remaining,
                     run_id: op.run_id,
+                    scans_performed: scans_performed(&op.records),
+                    uplink_first_discovered_tick: uplink_first_discovered_tick(
+                        &op.initial_snapshot,
+                        &op.records,
+                    ),
+                    ordinary_budget_spent,
+                    hazard_budget_spent,
                 }
             });
             let review_points = review_points(&op.initial_snapshot, &op.records, op.error.as_ref());
@@ -3706,6 +3766,24 @@ mod tests {
         );
         assert_eq!(conclusion.final_budget, op.current.budget_remaining);
         assert_eq!(conclusion.run_id, op.run_id);
+        // `ROUTE_TO_UPLINK` never scans, but (per
+        // `a_successful_run_projects_initial_and_every_completed_tick_with_no_failure_point`
+        // above) it does cross the first configuration's one hazard tile en
+        // route to the uplink, so the new evidence should reconcile with
+        // that rather than reporting a blind, hazard-free run.
+        assert_eq!(conclusion.scans_performed, 0);
+        assert_eq!(conclusion.hazards_entered, 1);
+        assert_eq!(
+            conclusion.hazard_budget_spent,
+            crate::simulation::HAZARD_ENTRY_COST
+        );
+        assert_eq!(
+            conclusion.ordinary_budget_spent + conclusion.hazard_budget_spent,
+            op.starting_budget - conclusion.final_budget
+        );
+        // The route walks onto the uplink tile itself to finish, so it's
+        // discovered no later than the final tick.
+        assert!(conclusion.uplink_first_discovered_tick.is_some());
     }
 
     const ALWAYS_WAITS: &str = "function on_tick(observation) return \"wait\" end";
@@ -3725,6 +3803,46 @@ mod tests {
         let conclusion = op.conclusion.expect("a finished run has a conclusion");
         assert!(matches!(conclusion.kind, ConclusionKind::BudgetExhausted));
         assert_eq!(conclusion.final_budget, 0);
+        // A controller that only waits, and never moves off the starting
+        // tile, never scans, never enters a hazard, and never legitimately
+        // observes the (distant) uplink — the evidence should say so
+        // factually rather than guessing or staying silent.
+        assert_eq!(conclusion.scans_performed, 0);
+        assert_eq!(conclusion.hazards_entered, 0);
+        assert_eq!(conclusion.hazard_budget_spent, 0);
+        assert_eq!(conclusion.ordinary_budget_spent, op.starting_budget);
+        assert_eq!(conclusion.uplink_first_discovered_tick, None);
+    }
+
+    #[test]
+    fn a_run_that_scans_once_reports_matching_evidence() {
+        let mut state = working_state();
+        // Scan on the first tick (revealing only the local 5x5 area around
+        // the starting tile, well short of the distant uplink), then wait
+        // out the remaining budget without ever moving.
+        state.controller = Some(ControllerDocument::new(
+            r#"
+            local step = 0
+            function on_tick(observation)
+                step = step + 1
+                if step == 1 then return "scan" end
+                return "wait"
+            end
+        "#,
+        ));
+        state.apply(Msg::RequestDeploy);
+
+        while state.advance_running_operation() {}
+
+        let op = state.operation().unwrap();
+        assert!(op.finished);
+        let conclusion = op.conclusion.expect("a finished run has a conclusion");
+        assert!(matches!(conclusion.kind, ConclusionKind::BudgetExhausted));
+        assert_eq!(conclusion.scans_performed, 1);
+        assert_eq!(conclusion.hazards_entered, 0);
+        assert_eq!(conclusion.hazard_budget_spent, 0);
+        assert_eq!(conclusion.ordinary_budget_spent, op.starting_budget);
+        assert_eq!(conclusion.uplink_first_discovered_tick, None);
     }
 
     #[test]
