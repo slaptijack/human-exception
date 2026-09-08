@@ -447,7 +447,7 @@ impl Scenario {
     /// product-direction note on epic #185): it defended against a threat
     /// model not worth the tuning cost of preserving it this early in
     /// development.
-    fn first_contact_configurations() -> [Scenario; 3] {
+    pub(crate) fn first_contact_configurations() -> [Scenario; 3] {
         [
             Scenario::first_contact(),
             Scenario::first_contact_south_uplink(),

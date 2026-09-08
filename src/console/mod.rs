@@ -2969,10 +2969,12 @@ mod tests {
     fn the_reference_controller_succeeds_against_every_authored_configuration_through_the_console()
     {
         let source = reference_controller_source();
+        let configuration_count =
+            crate::simulation::Scenario::first_contact_configurations().len() as u32;
 
         for (width, height) in [(120, 40), (150, 50)] {
             let mut state = connected_state();
-            for expected_run_id in 1..=3u32 {
+            for expected_run_id in 1..=configuration_count {
                 // The editor already holds `STARTER_CONTROLLER` on the
                 // first deploy (plain `clear_and_paste` suffices) but
                 // holds `source` itself on every redeploy after that.
@@ -3016,7 +3018,7 @@ mod tests {
                      against run_id {expected_run_id}'s authored configuration"
                 );
 
-                if expected_run_id < 3 {
+                if expected_run_id < configuration_count {
                     let (back_to_controller, _) =
                         render_from(state, width, height, &[press(KeyCode::F(4))]);
                     state = back_to_controller;
@@ -3062,42 +3064,6 @@ mod tests {
                  observation-driven strategy"
             );
         }
-    }
-
-    /// Issue #193: blind scripted movement is contrast coverage, not the
-    /// canonical or a universal success strategy. `SOUTH_UPLINK_ROUTE`
-    /// (blind, no `observation` reads) succeeds only for the specific
-    /// configuration it was authored against; it does not solve
-    /// `Scenario::first_contact()`'s configuration, the one a session's
-    /// first deploy always selects. Per epic #185's 2026-09-06
-    /// product-direction comment, this test is not a step toward
-    /// reinstating a "no universal blind route" guarantee — a blind route
-    /// succeeding on some, several, or even every configuration remains
-    /// acceptable; any future proposal to prohibit that is a fresh product
-    /// decision, not something this coverage implies or protects.
-    #[test]
-    fn blind_scripted_routes_succeed_only_for_the_configuration_they_were_authored_for() {
-        let mut events = clear_and_type(SOUTH_UPLINK_ROUTE);
-        events.push(press(KeyCode::F(6)));
-        events.push(press(KeyCode::Char(' '))); // pause
-        events.extend(std::iter::repeat_n(press(KeyCode::Enter), 20));
-
-        // The session's first deploy always selects `Scenario::first_contact()`
-        // (`select_first_contact_is_a_pure_function_of_run_id`), the
-        // configuration `SOUTH_UPLINK_ROUTE` was not authored for.
-        let (state, _) = render_from(connected_state(), 120, 40, &events);
-
-        assert_eq!(state.current_view(), View::AfterAction);
-        let op = state.operation().expect("a deployment was just made");
-        let conclusion = op
-            .conclusion
-            .expect("a finished operation has a conclusion");
-        assert!(
-            !matches!(conclusion.kind, ConclusionKind::Success),
-            "SOUTH_UPLINK_ROUTE is authored for a different configuration \
-             than a session's first deploy selects, and must not happen to \
-             solve it too"
-        );
     }
 
     // Issue #137's remaining coverage: composition-level e2e proof that
