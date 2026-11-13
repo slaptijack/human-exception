@@ -1444,7 +1444,7 @@ static VALIDATIONS_IN_PROGRESS: AtomicUsize = AtomicUsize::new(0);
 /// attempts against the same runaway script accumulate without limit.
 pub fn validate(source: &str) -> Result<(), ControllerError> {
     if VALIDATIONS_IN_PROGRESS
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
             (count < MAX_CONCURRENT_VALIDATIONS).then_some(count + 1)
         })
         .is_err()
