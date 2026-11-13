@@ -1720,14 +1720,28 @@ fn fit_to_width(text: &str, width: usize) -> String {
     fitted
 }
 
-/// One list row's header: selection cursor, time, a fixed-width category
+/// The header's two-column leading slot: the `> ` selection cursor, or
+/// `• ` for an entry not yet inspected this session (issue #216), or blank.
+/// The selected entry is by definition being inspected, so the two cues
+/// share one slot and can never compete for it.
+fn signal_list_lead(selected: bool, inspected: bool) -> &'static str {
+    if selected {
+        "> "
+    } else if !inspected {
+        "\u{2022} "
+    } else {
+        "  "
+    }
+}
+
+/// One list row's header: leading slot ([`signal_list_lead`]), time, a fixed-width category
 /// column, and the sender, with [`OPEN_MARKER`] right-aligned for an
 /// actionable entry. The sender is what gets cut when space is short; the
 /// marker's room is reserved first so it can never be clipped.
-fn signal_list_header(signal: &Signal, selected: bool, width: usize) -> String {
+fn signal_list_header(signal: &Signal, selected: bool, inspected: bool, width: usize) -> String {
     use unicode_width::UnicodeWidthStr;
 
-    let cursor = if selected { "> " } else { "  " };
+    let cursor = signal_list_lead(selected, inspected);
     let left = format!(
         "{cursor}{}  {:<SIGNAL_CATEGORY_COLUMN$}  {}",
         signal.time,
@@ -1779,7 +1793,7 @@ fn signal_list_lines(state: &AppState, visible_items: usize, width: usize) -> Ve
             Style::default()
         };
         lines.push(Line::from(Span::styled(
-            signal_list_header(signal, selected, width),
+            signal_list_header(signal, selected, state.signal_inspected(signal.id), width),
             header_style,
         )));
         lines.push(Line::from(fit_to_width(
@@ -2673,6 +2687,9 @@ fn help_lines(state: &AppState) -> Vec<Line<'static>> {
     lines.push(Line::from(
         "[OPEN]               this signal currently has a workable opportunity",
     ));
+    lines.push(Line::from(
+        "\u{2022}                    not yet inspected this session",
+    ));
     lines.push(Line::from(""));
 
     lines.push(Line::from(Span::styled(
@@ -3069,11 +3086,10 @@ mod tests {
                 .collect();
             for (index, signal) in visible_signals(connected).iter().enumerate() {
                 let row = &lines[index * SIGNAL_ROWS_PER_ITEM..][..SIGNAL_ROWS_PER_ITEM];
-                let cursor = if index == state.selected_signal() {
-                    "> "
-                } else {
-                    "  "
-                };
+                let cursor = signal_list_lead(
+                    index == state.selected_signal(),
+                    state.signal_inspected(signal.id),
+                );
                 assert!(row[0].starts_with(&format!("{cursor}{}  ", signal.time)));
                 assert!(row[0].contains(signal.category.label()));
                 assert!(row[0].contains(signal.source));
@@ -3130,6 +3146,89 @@ mod tests {
         for signal in visible_signals(true) {
             assert!(buffer_contains(&terminal, signal.subject));
         }
+    }
+
+    /// The list pane's header row for the entry from `signal_source`, read
+    /// from the left (list) pane's columns only so the detail pane sharing
+    /// that terminal row can't match.
+    fn row_header(terminal: &Terminal<TestBackend>, signal_source: &str) -> String {
+        let buffer = terminal.backend().buffer();
+        let (list_width, _) = signals_list_inner_dimensions(buffer.area.width, buffer.area.height);
+        let list_columns = list_width + 2; // the list pane's own borders
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..list_columns)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .find(|row| row.contains(signal_source))
+            .unwrap_or_else(|| panic!("no list header row for {signal_source}"))
+    }
+
+    #[test]
+    fn fresh_signals_list_marks_every_unselected_entry_uninspected() {
+        let state = AppState::new();
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+        for (index, signal) in visible_signals(false).iter().enumerate() {
+            let header = row_header(&terminal, signal.source);
+            let lead = format!("\u{2502}{}", if index == 0 { "> " } else { "\u{2022} " });
+            assert!(header.starts_with(&lead), "{header:?}");
+        }
+    }
+
+    #[test]
+    fn moving_off_an_entry_clears_its_uninspected_marker() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::SelectNextSignal);
+        let local = visible_signals(false);
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+        assert!(row_header(&terminal, local[0].source).starts_with("\u{2502}  "));
+        assert!(row_header(&terminal, local[1].source).starts_with("\u{2502}> "));
+        assert!(row_header(&terminal, local[2].source).starts_with("\u{2502}\u{2022} "));
+    }
+
+    #[test]
+    fn connected_signals_marks_operator_traffic_never_seen_in_local_log() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::SelectLastSignal); // inspects every LOCAL LOG entry
+        state.set_connected(true);
+        // Connected, the selection index now lands on operator traffic
+        // (index 0), whose detail is on screen — so leaving it counts as
+        // inspecting it. Everything else from the operator network has
+        // never been shown.
+        state.apply(Msg::SelectFirstSignal);
+        state.apply(Msg::SelectLastSignal);
+        let connected = visible_signals(true);
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+        for (index, signal) in connected.iter().enumerate() {
+            let header = row_header(&terminal, signal.source);
+            let never_shown = !signal.local_available && index != 0;
+            let marked = header.starts_with("\u{2502}\u{2022} ");
+            assert_eq!(marked, never_shown, "{header:?}");
+        }
+        assert!(
+            connected
+                .iter()
+                .enumerate()
+                .any(|(index, s)| !s.local_available && index != 0),
+            "at least one operator entry must start uninspected for this test to mean anything"
+        );
+        assert!(
+            !buffer_contains(&terminal, "UNREAD") && !buffer_contains(&terminal, "NEW:"),
+            "no inbox-style counts"
+        );
+    }
+
+    #[test]
+    fn signal_list_lead_never_shows_the_marker_on_the_selected_row() {
+        assert_eq!(signal_list_lead(true, false), "> ");
+        assert_eq!(signal_list_lead(true, true), "> ");
+        assert_eq!(signal_list_lead(false, false), "\u{2022} ");
+        assert_eq!(signal_list_lead(false, true), "  ");
     }
 
     #[test]
@@ -3439,6 +3538,7 @@ mod tests {
     /// A synthetic actionable entry long enough to overflow the detail pane
     /// at minimum geometry, since no authored entry does today.
     const LONG_SIGNAL: Signal = Signal {
+        id: "test-long-signal",
         time: "09:00",
         source: "test source",
         category: super::super::intel::SignalCategory::MachineIntercept,
@@ -3920,13 +4020,15 @@ mod tests {
 
         // Tall enough that the full two-level help content (view controls,
         // global controls, Lua contract, terminology, symbol legend) fits
-        // without needing to scroll.
+        // without needing to scroll. (86 since the `•` inspected-marker
+        // glossary line, issue #216.)
         let mut state = AppState::new();
         state.apply(Msg::OpenHelp);
-        let terminal = render(120, 85, &state);
+        let terminal = render(120, 86, &state);
 
         assert!(buffer_contains(&terminal, "Terminology"));
         assert!(buffer_contains(&terminal, "MACHINE INTERCEPT"));
+        assert!(buffer_contains(&terminal, "not yet inspected this session"));
         assert!(buffer_contains(&terminal, "Satellite symbols"));
         assert!(buffer_contains(&terminal, "D drone"));
     }
