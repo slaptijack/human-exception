@@ -116,7 +116,7 @@ From After Action, the player may return to **Controller** to iterate or **Signa
 
 Global navigation:
 
-- `F1` Help
+- `F1` Help (also `?` outside text entry — see below)
 - `F2` Signals
 - `F3` Target
 - `F4` Controller
@@ -125,6 +125,8 @@ Global navigation:
 - `Ctrl+Q` Quit
 
 Function keys are intentional because they remain available while editing Lua and do not steal ordinary source-text keystrokes.
+
+`?` is a contextual Help shortcut: it is an alias for `F1` (opening Help, or dismissing it when Help is already open) wherever keyboard text entry is not active. Because it is a printable character rather than a function key, it yields to text entry: while the Controller source pane owns input, `?` inserts a literal `?` into the Lua source, and the footer advertises `F1 Help` rather than `F1/? Help` there. Everywhere else, including Controller's Lua field reference pane, it opens Help, and the footer advertises `F1/? Help`. Like `F1`, it never bypasses a confirmation dialog, the bootstrap introduction, or Network Bootstrap (§ [Input priority](#input-priority)).
 
 `F3`, `F4`, `F5`, and `F6` may be unavailable until their prerequisite state exists. Unavailable actions should be visibly disabled rather than silently ignored.
 
@@ -215,7 +217,10 @@ Input is resolved in this order:
 1. **Global safety/modal controls** — quit confirmation, controller-reset
    confirmation, deployment-replace confirmation.
 2. **Global and view-level commands** — `F1`–`F7`, and view-level bindings such
-   as Target's `Enter`/`Esc` or Operation's `Space`/`Enter`.
+   as Target's `Enter`/`Esc` or Operation's `Space`/`Enter`. The `?` Help
+   alias belongs to this tier too, except that it yields to the Controller
+   source's text entry (tier 4) instead of preempting it, since `?` is
+   ordinary Lua source text there.
 3. **Focus movement** — `F8`.
 4. **Focused-pane input** — input that only the currently focused pane
    interprets.
@@ -312,6 +317,19 @@ A few rules apply across every surface kind:
 `F8` is unrelated to this contract: it remains pane-*focus* movement (§ [F8
 — next pane](#f8--next-pane)), not navigation within a pane.
 
+#### List-local aliases
+
+The Signals list additionally accepts Gmail-style single-letter aliases while
+it has focus: `j` (same as `Down`), `k` (same as `Up`), and `o` (same as
+`Enter`, with identical activation eligibility). These are list-local
+aliases, not part of the console-wide vocabulary above: no other surface
+(Help, After Action's Report, Review Run) gains them, they are inert whenever
+the Signals list does not have focus, and in the Controller source they
+remain ordinary text. They are distinct from `?`, which is a console-level
+contextual Help shortcut (§ [Overall navigation](#overall-navigation)), not a
+list key. There is no mode toggle and no broader Vim/Gmail vocabulary
+(`h`/`l`, `gg`, `G`, …).
+
 ### Read-only panes and unsupported input
 
 A pane with no pane-local input today (Target's two panes, Operation's
@@ -326,7 +344,7 @@ that every pane has something to do.
 | View | Pane-local input | View-level input |
 | --- | --- | --- |
 | Help | Up/Down/PageUp/PageDown/Home/End scroll (its one pane) | — |
-| Signals | Up/Down/PageUp/PageDown/Home/End select, Enter activate (Signals list); none (Selected signal) | — |
+| Signals | Up/Down/PageUp/PageDown/Home/End select, Enter activate, plus list-local `j`/`k` select and `o` activate (Signals list); none (Selected signal) | — |
 | Target | none | Enter (work opportunity), Esc (back) |
 | Controller | Full editor contract — see [The editor contract](#the-editor-contract) — including Up/Down/PageUp/PageDown/Home/End (Controller source); PageUp/PageDown are a fixed 10-line jump, not viewport-sized — see the [Console-wide navigation](#console-wide-navigation) exception; none (Lua field reference) | Ctrl+V validate, F6 deploy, F7 reset |
 | Operation | none (either pane); once a deployment has finished, Operation telemetry becomes the Review Run inspector with the full chronology/SOURCE contract — see [Review Run](#review-run) | Space (pause/resume), Enter (step) |
@@ -354,7 +372,7 @@ Bootstrap, before selecting a target:
 │                                            ACTIVE WORKSPACE                                                      │
 │                                                                                                                  │
 ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│ F1 Help   F2 Local Log   F3 Target   F4 Controller   F5 Operation   F6 Deploy                          Ctrl+Q Quit│
+│ F1/? Help   F2 Local Log   F3 Target   F4 Controller   F5 Operation   F6 Deploy                        Ctrl+Q Quit│
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -368,7 +386,7 @@ Connected, before selecting a target:
 │                                            ACTIVE WORKSPACE                                                      │
 │                                                                                                                  │
 ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│ F1 Help   F2 Signals   F3 Target   F4 Controller   F5 Operation   F6 Deploy                           Ctrl+Q Quit│
+│ F1/? Help   F2 Signals   F3 Target   F4 Controller   F5 Operation   F6 Deploy                         Ctrl+Q Quit│
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -382,7 +400,7 @@ After the player chooses an opportunity (First Contact is worked in bootstrap, s
 │                                            ACTIVE WORKSPACE                                                      │
 │                                                                                                                  │
 ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│ F1 Help   F2 Local Log   F3 Target   F4 Controller   F5 Operation   F6 Deploy                          Ctrl+Q Quit│
+│ F1/? Help   F2 Local Log   F3 Target   F4 Controller   F5 Operation   F6 Deploy                        Ctrl+Q Quit│
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -477,7 +495,7 @@ Representative 120×40 layout before connectivity:
 │                                                               │ Enter  inspect opportunity                     │
 │                                                               │                                                │
 ├────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│ ↑↓ Select   Enter Inspect   F1 Help   F2 Local Log   F8 Switch Pane                          Ctrl+Q Quit       │
+│ ↑↓ Select   Enter Inspect   F1/? Help   F2 Local Log   F8 Switch Pane                        Ctrl+Q Quit       │
 └────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -507,7 +525,7 @@ Representative 120×40 layout after First Contact succeeds:
 │   10:57  PASSIVE SENSOR // ANOMALY                            │                                                │
 │   Burst traffic from an offline municipal control cluster.    │                                                │
 ├────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│ ↑↓ Select   F1 Help   F2 Signals   F8 Switch Pane                                            Ctrl+Q Quit       │
+│ ↑↓ Select   F1/? Help   F2 Signals   F8 Switch Pane                                          Ctrl+Q Quit       │
 └────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -531,7 +549,7 @@ For the first playable slice:
 
 The actionable marker should be restrained. `[OPEN]` or an equivalent status is preferable to a bright “NEW QUEST” affordance.
 
-Selecting an actionable entry and pressing `Enter` opens **Target**. It does not automatically commit the player to acting.
+Selecting an actionable entry and pressing `Enter` (or its list-local alias `o`) opens **Target**. It does not automatically commit the player to acting. `j`/`k` move the selection exactly like `Down`/`Up` (§ [List-local aliases](#list-local-aliases)).
 
 If the player already has First Contact as the current working set, selecting it again must preserve the current controller source. Re-entering Target never reloads or replaces source by itself.
 
@@ -570,7 +588,7 @@ Representative layout:
 │                                                               │                                            │
 │ Enter  work this opportunity                                  │ Esc  back to local log                     │
 ├────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│ F1 Help   F2 Local Log   Enter Work Opportunity                                                  Ctrl+Q Quit│
+│ F1/? Help   F2 Local Log   Enter Work Opportunity                                                Ctrl+Q Quit│
 └────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -932,7 +950,7 @@ The compromised satellite feed is visually dominant. Telemetry exists to explain
 │ ? unknown   · floor   # wall   ~ hazard   U uplink                   │ Space pause                                │
 │                                                                      │ Enter step (paused)                        │
 ├───────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│ F1 Help   F2 Local Log   F3 Target   F4 Controller   F5 Operation   F6 Redeploy   Space Pause           Ctrl+Q Quit│
+│ F1/? Help   F2 Local Log   F3 Target   F4 Controller   F5 Operation   F6 Redeploy   Space Pause         Ctrl+Q Quit│
 └───────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1178,7 +1196,7 @@ The durable fact this sequence dramatizes — operator-network connectivity — 
 
 ## 6. Help
 
-`F1` opens contextual help as an overlay or dedicated view. It preserves the underlying state and returns to that state when dismissed.
+`F1` opens contextual help as an overlay or dedicated view. It preserves the underlying state and returns to that state when dismissed. `?` does the same wherever keyboard text entry is not active (§ [Overall navigation](#overall-navigation)); the current-view controls Help shows first list each view's applicable bindings, including the Signals list's `j`/`k`/`o` aliases.
 
 Help has two levels:
 

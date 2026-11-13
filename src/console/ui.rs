@@ -2299,7 +2299,9 @@ fn help_lines(state: &AppState) -> Vec<Line<'static>> {
         "Global controls",
         Style::default().add_modifier(Modifier::BOLD),
     )));
-    lines.push(Line::from("F1 Help          toggle this overlay"));
+    lines.push(Line::from(
+        "F1/? Help        toggle this overlay (? types normally in Controller source)",
+    ));
     lines.push(Line::from(if state.presentation_connected() {
         "F2 Signals       the intelligence stream"
     } else {
@@ -2492,9 +2494,11 @@ fn view_specific_help(state: &AppState, view: View) -> Vec<Line<'static>> {
     match view {
         View::Signals => vec![
             Line::from("Up/Down      select the previous/next signal"),
+            Line::from("j/k          same as Down/Up"),
             Line::from("PageUp/Down  move by one visible list page"),
             Line::from("Home/End     jump to the first/last signal"),
             Line::from("Enter        open Target (only signals marked [OPEN] respond)"),
+            Line::from("o            same as Enter"),
             Line::from("Its detail shows alongside the list automatically;"),
             Line::from("F8 moves focus there"),
         ],
@@ -2612,8 +2616,20 @@ fn footer_hint_items(state: &AppState, show_f8: bool) -> Vec<(&'static str, &'st
     } else {
         ("F2 Local Log", "F2 Log", true)
     };
+    // `?` opens Help everywhere keyboard text entry isn't active, and types
+    // a literal `?` where it is; `event::text_entry_active` is the same
+    // predicate `event::map` routes `?` by, so the hint never advertises
+    // `?` while it would be inserted as source text instead.
+    let help_item = if super::event::text_entry_active(
+        state.current_view(),
+        state.focused_pane(state.current_view()),
+    ) {
+        ("F1 Help", "F1 Help", true)
+    } else {
+        ("F1/? Help", "F1/? Hlp", true)
+    };
     let mut items = vec![
-        ("F1 Help", "F1 Help", true),
+        help_item,
         f2_item,
         ("F3 Target", "F3 Tgt", state.view_available(View::Target)),
         (
@@ -3147,6 +3163,65 @@ mod tests {
     }
 
     #[test]
+    fn footer_advertises_the_question_mark_help_alias_outside_text_entry() {
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &AppState::new());
+        assert!(buffer_contains(&terminal, "F1/? Help"));
+    }
+
+    #[test]
+    fn footer_drops_the_question_mark_alias_while_the_controller_source_owns_input() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        assert_eq!(
+            state.focused_pane(View::Controller),
+            PaneId::ControllerSource
+        );
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+        assert!(buffer_contains(&terminal, "F1 Help"));
+        assert!(
+            !buffer_contains(&terminal, "F1/?"),
+            "`?` types into the source here, so the footer must not advertise it"
+        );
+    }
+
+    #[test]
+    fn footer_advertises_the_question_mark_alias_from_the_lua_reference_pane_at_minimum_width() {
+        use super::super::state::Msg;
+
+        // The widest footer: Controller's extra F7/Ctrl+V hints plus F8 and
+        // the longer `F1/?` label, since the reference pane isn't text entry.
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.apply(Msg::FocusNextPane);
+        assert_eq!(
+            state.focused_pane(View::Controller),
+            PaneId::LuaFieldReference
+        );
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+        assert!(buffer_contains(&terminal, "F1/?"));
+        assert!(buffer_contains(&terminal, "Ctrl+Q Quit"));
+    }
+
+    #[test]
+    fn signals_help_lists_the_letter_aliases_and_the_question_mark_alias() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::OpenHelp);
+        let terminal = render(120, 60, &state);
+        assert!(buffer_contains(&terminal, "j/k          same as Down/Up"));
+        assert!(buffer_contains(&terminal, "o            same as Enter"));
+        assert!(buffer_contains(
+            &terminal,
+            "F1/? Help        toggle this overlay (? types normally in Controller source)"
+        ));
+    }
+
+    #[test]
     fn controller_footer_and_help_advertise_ctrl_v_not_ctrl_enter() {
         use super::super::state::Msg;
 
@@ -3205,7 +3280,7 @@ mod tests {
 
         let mut state = AppState::new();
         state.apply(Msg::OpenHelp);
-        let terminal = render(120, 60, &state);
+        let terminal = render(120, 62, &state);
 
         assert!(buffer_contains(
             &terminal,
@@ -3225,7 +3300,7 @@ mod tests {
 
         let mut state = AppState::new();
         state.apply(Msg::OpenHelp);
-        let terminal = render(120, 71, &state);
+        let terminal = render(120, 73, &state);
 
         assert!(buffer_contains(&terminal, "scan does not move the drone"));
         assert!(buffer_contains(&terminal, "regardless of walls in the way"));
@@ -3370,7 +3445,7 @@ mod tests {
         // without needing to scroll.
         let mut state = AppState::new();
         state.apply(Msg::OpenHelp);
-        let terminal = render(120, 83, &state);
+        let terminal = render(120, 85, &state);
 
         assert!(buffer_contains(&terminal, "Terminology"));
         assert!(buffer_contains(&terminal, "MACHINE INTERCEPT"));
