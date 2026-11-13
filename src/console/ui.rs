@@ -3190,6 +3190,31 @@ mod tests {
         assert!(row_header(&terminal, local[2].source).starts_with("\u{2502}\u{2022} "));
     }
 
+    /// The `> ` cursor masks the inspected cue on the selected row, so the
+    /// rendering alone can't show whether the startup entry already counts.
+    /// Assert the internal state directly, before any input, and only then
+    /// check the row once the cursor leaves it (issue #227).
+    #[test]
+    fn the_cursor_masks_but_does_not_define_the_startup_entrys_inspected_state() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        let local = visible_signals(false);
+        assert!(
+            state.signal_inspected(local[0].id),
+            "internal, before input"
+        );
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+        assert!(row_header(&terminal, local[0].source).starts_with("\u{2502}> "));
+
+        state.apply(Msg::SelectNextSignal);
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+        assert!(
+            row_header(&terminal, local[0].source).starts_with("\u{2502}  "),
+            "unmasked, the startup entry reads as inspected"
+        );
+    }
+
     #[test]
     fn connected_signals_marks_operator_traffic_never_seen_in_local_log() {
         use super::super::state::Msg;
