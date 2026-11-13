@@ -321,7 +321,8 @@ A few rules apply across every surface kind:
 
 The Signals list additionally accepts Gmail-style single-letter aliases while
 it has focus: `j` (same as `Down`), `k` (same as `Up`), and `o` (same as
-`Enter`, with identical activation eligibility). These are list-local
+`Enter`, with identical activation eligibility). `Enter` itself is not
+list-local: it also activates from the Signals detail pane. These are list-local
 aliases, not part of the console-wide vocabulary above: no other surface
 (Help, After Action's Report, Review Run) gains them, they are inert whenever
 the Signals list does not have focus, and in the Controller source they
@@ -344,7 +345,7 @@ that every pane has something to do.
 | View | Pane-local input | View-level input |
 | --- | --- | --- |
 | Help | Up/Down/PageUp/PageDown/Home/End scroll (its one pane) | — |
-| Signals | Up/Down/PageUp/PageDown/Home/End select, Enter activate, plus list-local `j`/`k` select and `o` activate (Signals list); Up/Down/PageUp/PageDown/Home/End scroll the body below its fixed header (Selected signal) | — |
+| Signals | Up/Down/PageUp/PageDown/Home/End select, Enter activate, plus list-local `j`/`k` select and `o` activate (Signals list); Up/Down/PageUp/PageDown/Home/End scroll the body below its fixed header, Enter activate (Selected signal) | — |
 | Target | none | Enter (work opportunity), Esc (back) |
 | Controller | Full editor contract — see [The editor contract](#the-editor-contract) — including Up/Down/PageUp/PageDown/Home/End (Controller source); PageUp/PageDown are a fixed 10-line jump, not viewport-sized — see the [Console-wide navigation](#console-wide-navigation) exception; none (Lua field reference) | Ctrl+V validate, F6 deploy, F7 reset |
 | Operation | none (either pane); once a deployment has finished, Operation telemetry becomes the Review Run inspector with the full chronology/SOURCE contract — see [Review Run](#review-run) | Space (pause/resume), Enter (step) |
@@ -567,7 +568,7 @@ The mockups above are cut short at the bottom. At full height, the list shows ev
 
 All of this content is hand-written and hedged to what the console could plausibly know at its current connectivity. It never reveals hidden scenario state.
 
-The status line sits near the top so long content can never push it off-screen. Origin, time and confidence, and the status line form a fixed header. Only the sections below it (`SOURCE` onward) scroll, and only while the detail pane has focus (`F8`). There the console-wide `Up`/`Down`/`PageUp`/`PageDown`/`Home`/`End` scroll the body, while `j`/`k`/`o` stay list-only. Changing the selection resets the detail to its top. Like Help and the After Action report, the pane shows no overflow indicator. Every authored entry currently fits at 120×40, so these keys accept input but have nothing to move until longer intelligence arrives. The pinned `Enter  inspect opportunity` row appears only for an actionable entry. The status line, the list's `[OPEN]` marker, that pinned row, and whether `Enter`/`o` respond all come from the same availability rule, so they cannot disagree. A non-actionable entry states in words that it has no opportunity; it never shows a disabled or fake action.
+The status line sits near the top so long content can never push it off-screen. Origin, time and confidence, and the status line form a fixed header. Only the sections below it (`SOURCE` onward) scroll, and only while the detail pane has focus (`F8`). There the console-wide `Up`/`Down`/`PageUp`/`PageDown`/`Home`/`End` scroll the body. `Enter` still inspects an actionable entry, exactly as from the list, because the detail pane presents the same selected entry. `j`/`k`/`o` stay list-only. Changing the selection resets the detail to its top. Like Help and the After Action report, the pane shows no overflow indicator. Every authored entry currently fits at 120×40, so these keys accept input but have nothing to move until longer intelligence arrives. The pinned `Enter  inspect opportunity` row appears only for an actionable entry. The status line, the list's `[OPEN]` marker, that pinned row, and whether `Enter`/`o` respond all come from the same availability rule, so they cannot disagree. A non-actionable entry states in words that it has no opportunity; it never shows a disabled or fake action.
 
 For the first playable slice:
 
@@ -579,11 +580,11 @@ For the first playable slice:
 
 The actionable marker should be restrained. `[OPEN]` or an equivalent status is preferable to a bright “NEW QUEST” affordance.
 
-Selecting an actionable entry and pressing `Enter` (or its list-local alias `o`) opens **Target**. It does not automatically commit the player to acting. `j`/`k` move the selection exactly like `Down`/`Up` (§ [List-local aliases](#list-local-aliases)).
+Selecting an actionable entry and pressing `Enter` (from either the list or the focused detail pane) or its list-local alias `o` opens **Target**. It does not automatically commit the player to acting. `j`/`k` move the selection exactly like `Down`/`Up` (§ [List-local aliases](#list-local-aliases)).
 
 If the player already has First Contact as the current working set, selecting it again must preserve the current controller source. Re-entering Target never reloads or replaces source by itself.
 
-The `> ` before a pane title in the mockups above (`> LOCAL LOG`, `> SIGNALS`) is the non-color focus cue (§ [Non-color focus cue](#non-color-focus-cue)). The same glyph marks the selected row inside the list. The two cues stay distinct by position: the focus cue sits in a pane's border title, and the selection cursor sits at the start of a list row. `F8` moves the focus cue to `> SELECTED ENTRY` / `> SELECTED SIGNAL` without moving the selected row. Like every view, the footer shows the F-key vocabulary rather than per-key list hints. Help (`F1`/`?`) lists the Signals list's `↑↓`, `j`/`k`, `Enter`/`o`, and paging keys.
+The `> ` before a pane title in the mockups above (`> LOCAL LOG`, `> SIGNALS`) is the non-color focus cue (§ [Non-color focus cue](#non-color-focus-cue)). The same glyph marks the selected row inside the list. The two cues stay distinct by position: the focus cue sits in a pane's border title, and the selection cursor sits at the start of a list row. `F8` moves the focus cue to `> SELECTED ENTRY` / `> SELECTED SIGNAL` without moving the selected row. Like every view, the footer shows the F-key vocabulary rather than per-key list hints. Help (`F1`/`?`) lists the Signals list's `↑↓`, `j`/`k`, `Enter`/`o`, and paging keys, and notes that `Enter` also works from the focused detail pane.
 
 ## 2. Target
 
