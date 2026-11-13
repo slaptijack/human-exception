@@ -513,11 +513,23 @@ fn should_redraw(
             state.current_view(),
             state.focused_pane(state.current_view()),
         ) == Some(navigation::NavSurface::ReviewRun);
+    // `?` (the Help alias) and `o` (the Signals list's `Enter` alias) are
+    // transitions exactly like `F1`/`Enter` whenever text entry isn't
+    // active, so a held key must not toggle Help back and forth or cascade
+    // activations; inside the Controller source they're ordinary typing and
+    // keep repeating. `event::text_entry_active` is the same predicate
+    // `event::map` uses to decide which meaning they carry.
+    let letter_alias_is_transition = matches!(key.code, KeyCode::Char('?') | KeyCode::Char('o'))
+        && !event::text_entry_active(
+            state.current_view(),
+            state.focused_pane(state.current_view()),
+        );
     let kind_allowed = match key.kind {
         KeyEventKind::Press => true,
         KeyEventKind::Repeat => {
             !is_ctrl_v
                 && !tab_is_run_inspector_toggle
+                && !letter_alias_is_transition
                 && !matches!(key.code, KeyCode::Enter | KeyCode::Esc | KeyCode::F(_))
         }
         KeyEventKind::Release => false,
@@ -4142,5 +4154,251 @@ mod tests {
         events.push(press(KeyCode::F(5)));
 
         assert_navigation_never_mutates_the_run(120, 40, &events);
+    }
+
+    // --- Issue #209: Gmail-style Signals aliases and the `?` Help alias ---
+
+    /// A fresh, already-connected session sitting on connected SIGNALS
+    /// (no working set, no Network Bootstrap pending), the state a
+    /// relaunched connected Player starts in.
+    fn connected_signals_state() -> AppState {
+        let mut state = AppState::new();
+        state.set_connected(true);
+        assert!(state.presentation_connected());
+        state
+    }
+
+    /// Drives `events` through `should_redraw` from `state` and returns
+    /// the resulting `selected_signal()` after each event.
+    fn selection_trace(mut state: AppState, events: &[Event]) -> Vec<usize> {
+        let mut debounce: TransitionKeyDebounce = None;
+        events
+            .iter()
+            .map(|event| {
+                should_redraw(&mut state, event.clone(), (120, 40), &mut debounce);
+                state.selected_signal()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn j_and_k_move_signal_selection_identically_to_down_and_up_in_both_presentations() {
+        type StartState = fn() -> AppState;
+        let presentations: [(&str, StartState); 2] = [
+            ("LOCAL LOG", AppState::new),
+            ("SIGNALS", connected_signals_state),
+        ];
+        for (label, start) in presentations {
+            let count = intel::visible_signals(start().presentation_connected()).len();
+            assert!(count > 1, "{label} needs more than one signal to test");
+            // Past both ends, so clamping is exercised in each direction.
+            let mut arrows = vec![press(KeyCode::Up)];
+            arrows.extend((0..count + 1).map(|_| press(KeyCode::Down)));
+            arrows.extend((0..count + 1).map(|_| press(KeyCode::Up)));
+            let letters: Vec<Event> = arrows
+                .iter()
+                .map(|event| match event {
+                    Event::Key(k) if k.code == KeyCode::Down => press(KeyCode::Char('j')),
+                    Event::Key(k) if k.code == KeyCode::Up => press(KeyCode::Char('k')),
+                    other => other.clone(),
+                })
+                .collect();
+
+            let arrow_trace = selection_trace(start(), &arrows);
+            let letter_trace = selection_trace(start(), &letters);
+            assert_eq!(letter_trace, arrow_trace, "{label}");
+            assert_eq!(arrow_trace[0], 0, "{label}: k/Up clamps at the top");
+            assert!(
+                arrow_trace.contains(&(count - 1)),
+                "{label}: j/Down reaches the last signal"
+            );
+            assert_eq!(*arrow_trace.last().unwrap(), 0, "{label}");
+        }
+    }
+
+    #[test]
+    fn j_moves_the_selected_signal_detail_along_with_the_selection() {
+        let (via_letter, letter_terminal) = render(120, 40, &[press(KeyCode::Char('j'))]);
+        let (via_arrow, arrow_terminal) = render(120, 40, &[press(KeyCode::Down)]);
+        assert_eq!(via_letter.selected_signal(), 1);
+        assert_eq!(
+            letter_terminal.backend().buffer(),
+            arrow_terminal.backend().buffer(),
+            "j must render exactly what Down renders, list and detail alike"
+        );
+        assert_eq!(via_letter.selected_signal(), via_arrow.selected_signal());
+    }
+
+    #[test]
+    fn o_opens_target_on_the_open_signal_exactly_like_enter() {
+        let (via_o, _) = render(120, 40, &[press(KeyCode::Char('o'))]);
+        let (via_enter, _) = render(120, 40, &[press(KeyCode::Enter)]);
+        assert_eq!(via_enter.current_view(), View::Target);
+        assert_eq!(via_o.current_view(), View::Target);
+    }
+
+    #[test]
+    fn o_leaves_a_non_actionable_signal_inert_exactly_like_enter() {
+        let signals = intel::visible_signals(false);
+        let inert = signals
+            .iter()
+            .position(|signal| !signal.is_actionable())
+            .expect("LOCAL LOG has at least one non-actionable signal");
+        let mut events: Vec<Event> = (0..inert).map(|_| press(KeyCode::Char('j'))).collect();
+        events.push(press(KeyCode::Char('o')));
+        let (state, _) = render(120, 40, &events);
+        assert_eq!(state.selected_signal(), inert);
+        assert_eq!(state.current_view(), View::Signals);
+    }
+
+    #[test]
+    fn o_activates_nothing_in_connected_signals_where_nothing_is_actionable() {
+        let count = intel::visible_signals(true).len();
+        for index in 0..count {
+            let mut events: Vec<Event> = (0..index).map(|_| press(KeyCode::Char('j'))).collect();
+            events.push(press(KeyCode::Char('o')));
+            let (via_o, _) = render_from(connected_signals_state(), 120, 40, &events);
+            *events.last_mut().unwrap() = press(KeyCode::Enter);
+            let (via_enter, _) = render_from(connected_signals_state(), 120, 40, &events);
+            assert_eq!(via_o.current_view(), via_enter.current_view(), "{index}");
+            assert_eq!(via_o.current_view(), View::Signals, "{index}");
+        }
+    }
+
+    #[test]
+    fn signals_letter_aliases_are_inert_once_focus_leaves_the_list() {
+        let (state, _) = render(
+            120,
+            40,
+            &[
+                press(KeyCode::F(8)), // focus the selected-signal detail pane
+                press(KeyCode::Char('j')),
+                press(KeyCode::Char('k')),
+                press(KeyCode::Char('o')),
+            ],
+        );
+        assert_eq!(state.current_view(), View::Signals);
+        assert_eq!(state.selected_signal(), 0);
+    }
+
+    #[test]
+    fn question_mark_opens_contextual_help_and_question_mark_or_esc_dismisses_it() {
+        let (state, terminal) =
+            render(120, 40, &[press(KeyCode::Enter), press(KeyCode::Char('?'))]);
+        assert_eq!(state.current_view(), View::Help);
+        assert_eq!(state.help_return_view(), Some(View::Target));
+        assert!(buffer_contains(&terminal, "Enter  work this opportunity"));
+
+        for dismiss in [press(KeyCode::Char('?')), press(KeyCode::Esc)] {
+            let (state, _) = render(
+                120,
+                40,
+                &[press(KeyCode::Enter), press(KeyCode::Char('?')), dismiss],
+            );
+            assert_eq!(state.current_view(), View::Target);
+        }
+    }
+
+    #[test]
+    fn question_mark_help_from_signals_presents_the_signals_shortcuts() {
+        let (state, terminal) = render(120, 40, &[press(KeyCode::Char('?'))]);
+        assert_eq!(state.current_view(), View::Help);
+        assert!(buffer_contains(&terminal, "j/k          same as Down/Up"));
+        assert!(buffer_contains(&terminal, "o            same as Enter"));
+        assert!(buffer_contains(&terminal, "F1/? Help"));
+    }
+
+    #[test]
+    fn question_mark_types_into_the_controller_source_instead_of_opening_help() {
+        let (state, _) = render(
+            120,
+            40,
+            &[
+                press(KeyCode::Enter),
+                press(KeyCode::Enter),
+                press(KeyCode::Char('?')),
+                press(KeyCode::Char('j')),
+                press(KeyCode::Char('k')),
+                press(KeyCode::Char('o')),
+            ],
+        );
+        assert_eq!(state.current_view(), View::Controller);
+        assert!(
+            state
+                .controller_source()
+                .expect("Controller has a working set")
+                .contains("?jko"),
+            "all four keys must land in the source as literal text"
+        );
+    }
+
+    #[test]
+    fn question_mark_never_opens_help_through_a_confirmation_dialog() {
+        let (state, _) = render(
+            120,
+            40,
+            &[
+                press(KeyCode::Enter),
+                press(KeyCode::Enter),
+                press(KeyCode::Char('x')), // modify the controller
+                press_ctrl(KeyCode::Char('q')),
+                press(KeyCode::Char('?')),
+            ],
+        );
+        assert!(state.quit_confirmation_pending());
+        assert_eq!(state.current_view(), View::Controller);
+    }
+
+    #[test]
+    fn question_mark_never_opens_help_through_the_bootstrap_intro() {
+        let mut start = AppState::new();
+        start.set_bootstrap_intro_visible(true);
+        let (state, _) = render_from(start, 120, 40, &[press(KeyCode::Char('?'))]);
+        assert!(state.bootstrap_intro_visible());
+        assert_eq!(state.current_view(), View::Signals);
+    }
+
+    #[test]
+    fn a_held_question_mark_or_o_outside_the_editor_does_not_repeat_its_transition() {
+        let (state, _) = render(
+            120,
+            40,
+            &[press(KeyCode::Char('?')), repeat(KeyCode::Char('?'))],
+        );
+        assert_eq!(state.current_view(), View::Help, "repeat must not dismiss");
+
+        let (state, _) = render(
+            120,
+            40,
+            &[
+                press(KeyCode::Char('o')),
+                // In Target a non-repeated `o` is inert anyway; the point is
+                // that the held repeat is dropped before reaching `map`.
+                repeat(KeyCode::Char('o')),
+            ],
+        );
+        assert_eq!(state.current_view(), View::Target);
+    }
+
+    #[test]
+    fn held_j_repeats_like_a_held_arrow_and_held_question_mark_repeats_in_the_editor() {
+        let (state, _) = render(
+            120,
+            40,
+            &[press(KeyCode::Char('j')), repeat(KeyCode::Char('j'))],
+        );
+        assert_eq!(state.selected_signal(), 2);
+
+        let (state, _) = render(
+            120,
+            40,
+            &[
+                press(KeyCode::Enter),
+                press(KeyCode::Enter),
+                press(KeyCode::Char('?')),
+                repeat(KeyCode::Char('?')),
+            ],
+        );
+        assert!(state.controller_source().unwrap().contains("??"));
     }
 }

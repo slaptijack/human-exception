@@ -13,7 +13,9 @@
 //! given intent. It intentionally does not become a general command
 //! framework: the Controller editor's own movement/selection model
 //! (`super::editor::EditOp`) and Operation's `Space`/`Enter` pacing
-//! controls are untouched and out of scope here.
+//! controls are untouched and out of scope here. The Signals list's
+//! Gmail-style `j`/`k` letter aliases ([`alias_intent_for_key`]) are
+//! list-local, not part of the console-wide vocabulary.
 
 use crossterm::event::KeyCode;
 
@@ -76,6 +78,21 @@ pub(crate) fn intent_for_key(code: KeyCode) -> Option<NavIntent> {
         KeyCode::PageDown => Some(NavIntent::PageForward(0)),
         KeyCode::Home => Some(NavIntent::First),
         KeyCode::End => Some(NavIntent::Last),
+        _ => None,
+    }
+}
+
+/// List-local letter aliases for a surface's navigation intents, or `None`
+/// if `surface` defines none for `code`. Only the Signals list has any
+/// today — Gmail-style `j`/`k` for next/previous (issue #209) — and they
+/// are deliberately not part of the console-wide vocabulary above:
+/// Help, After Action's Report, and Review Run don't gain them, and the
+/// Controller editor never sees this function at all (it isn't a
+/// [`NavSurface`]), so `j`/`k` stay ordinary source text there.
+pub(crate) fn alias_intent_for_key(surface: NavSurface, code: KeyCode) -> Option<NavIntent> {
+    match (surface, code) {
+        (NavSurface::SignalsList, KeyCode::Char('j')) => Some(NavIntent::Next),
+        (NavSurface::SignalsList, KeyCode::Char('k')) => Some(NavIntent::Previous),
         _ => None,
     }
 }
@@ -220,6 +237,31 @@ mod tests {
         assert_eq!(intent_for_key(KeyCode::Home), Some(NavIntent::First));
         assert_eq!(intent_for_key(KeyCode::End), Some(NavIntent::Last));
         assert_eq!(intent_for_key(KeyCode::Char('a')), None);
+    }
+
+    #[test]
+    fn letter_aliases_exist_only_for_the_signals_list() {
+        assert_eq!(
+            alias_intent_for_key(NavSurface::SignalsList, KeyCode::Char('j')),
+            Some(NavIntent::Next)
+        );
+        assert_eq!(
+            alias_intent_for_key(NavSurface::SignalsList, KeyCode::Char('k')),
+            Some(NavIntent::Previous)
+        );
+        assert_eq!(
+            alias_intent_for_key(NavSurface::SignalsList, KeyCode::Char('o')),
+            None
+        );
+        for surface in [NavSurface::Scroll, NavSurface::ReviewRun] {
+            for c in ['j', 'k'] {
+                assert_eq!(
+                    alias_intent_for_key(surface, KeyCode::Char(c)),
+                    None,
+                    "{surface:?} must not gain the {c:?} alias"
+                );
+            }
+        }
     }
 
     #[test]

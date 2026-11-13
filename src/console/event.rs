@@ -10,6 +10,17 @@ use super::editor::EditOp;
 use super::navigation;
 use super::state::{Msg, PaneId, View};
 
+/// Whether keyboard text entry currently owns printable input: the
+/// Controller source pane is the only text-entry surface in the console.
+/// Shared by [`map`]'s editor arm, its `?` Help alias (which must stay
+/// literal source text while editing), `console::mod`'s key-repeat gate,
+/// and the footer's `F1/? Help` hint, so the advertised `?` alias, the key
+/// that acts on it, and its repeat handling can't disagree about whether
+/// `?` currently means Help (`docs/TUI_DESIGN.md`, "Overall navigation").
+pub(crate) fn text_entry_active(view: View, focused_pane: PaneId) -> bool {
+    view == View::Controller && focused_pane == PaneId::ControllerSource
+}
+
 /// Maps a key event to a player intent, given the view currently showing
 /// (several keys are context-sensitive: `F1`/`Esc` need to know whether
 /// Help is open, `Esc`/arrows/`Enter` behave differently in Signals, Target,
@@ -113,9 +124,25 @@ pub fn map(
     let help_is_open = current_view == View::Help;
     let controller_is_open = current_view == View::Controller;
     let operation_is_open = current_view == View::Operation;
+    let editing = text_entry_active(current_view, focused_pane);
+    let signals_list_focused = current_view == View::Signals && focused_pane == PaneId::SignalsList;
+    // Many terminals report `?` as `Char('?')` with SHIFT held (it's a
+    // shifted key on most layouts), so SHIFT alone must not disqualify it;
+    // any Ctrl/Alt chord does.
+    let unmodified_or_shift = (key.modifiers - KeyModifiers::SHIFT).is_empty();
 
     match key.code {
         KeyCode::F(1) => Some(if help_is_open {
+            Msg::DismissHelp
+        } else {
+            Msg::OpenHelp
+        }),
+        // `?` is a Console-level alias for `F1` everywhere keyboard text
+        // entry isn't active (issue #209). Reached only after every modal
+        // and bootstrap gate above, so it can never open Help through a
+        // dialog; while the Controller source owns input it falls through
+        // to the editor arm below and inserts a literal `?`.
+        KeyCode::Char('?') if unmodified_or_shift && !editing => Some(if help_is_open {
             Msg::DismissHelp
         } else {
             Msg::OpenHelp
@@ -153,13 +180,14 @@ pub fn map(
         KeyCode::Enter | KeyCode::Char('v') if ctrl && controller_is_open => {
             Some(Msg::ValidateController)
         }
-        KeyCode::Enter
-            if !ctrl
-                && (current_view == View::Target
-                    || (current_view == View::Signals && focused_pane == PaneId::SignalsList)) =>
-        {
+        KeyCode::Enter if !ctrl && (current_view == View::Target || signals_list_focused) => {
             Some(Msg::Activate)
         }
+        // `o` is a Signals-list-only alias for `Enter` (issue #209); it
+        // produces the same `Msg::Activate`, so `AppState::apply` applies
+        // the identical eligibility check (non-actionable signals stay
+        // inert). Deliberately not bound in Target.
+        KeyCode::Char('o') if unmodified && signals_list_focused => Some(Msg::Activate),
         // `Enter`/`Space` while Operation is showing: pacing controls, not
         // navigation (`docs/TUI_DESIGN.md`, "Pacing controls").
         // `Msg::StepOperationTick` is itself a no-op unless the run is
@@ -193,6 +221,23 @@ pub fn map(
                 .expect("key.code is one of the arm's patterns");
             navigation::route(surface, intent)
         }
+        // List-local `j`/`k` aliases for `Down`/`Up` (issue #209). Only the
+        // Signals list defines them (`navigation::alias_intent_for_key`),
+        // so on every other surface — including the Controller source,
+        // where they fall through to the editor arm as ordinary text —
+        // this arm doesn't match.
+        KeyCode::Char('j' | 'k')
+            if unmodified
+                && navigation::focused_nav_surface(current_view, focused_pane)
+                    .and_then(|surface| navigation::alias_intent_for_key(surface, key.code))
+                    .is_some() =>
+        {
+            let surface = navigation::focused_nav_surface(current_view, focused_pane)
+                .expect("guard just checked this is Some");
+            let intent = navigation::alias_intent_for_key(surface, key.code)
+                .expect("guard just checked this is Some");
+            navigation::route(surface, intent)
+        }
         // Toggles the Run Inspector between TIMELINE and SOURCE
         // (`docs/TUI_DESIGN.md`, "Review Run"). Always produces the same
         // `Msg` regardless of which mode is currently active — the mode
@@ -211,7 +256,7 @@ pub fn map(
         // Ordinary editing keys must not silently mutate the source unless
         // it's the pane actually focused — i.e. the reference pane, not the
         // source, is focused (which `F8` can move to).
-        _ if controller_is_open && focused_pane == PaneId::ControllerSource => {
+        _ if editing => {
             // AltGr (used on many non-US keyboard layouts to type
             // punctuation like `{`, `}`, `[`, `]`, `\`, `@`) is reported by
             // some terminals — notably on Windows — as `CONTROL | ALT`
@@ -1812,6 +1857,220 @@ mod tests {
             map_in(key(KeyCode::End), View::AfterAction),
             Some(Msg::JumpScrollEnd)
         );
+    }
+
+    /// `map` with no dialog/bootstrap gate open and an explicit focused
+    /// pane — the shape most of the issue #209 alias tests below need.
+    fn map_focused(key: KeyEvent, view: View, focused_pane: PaneId) -> Option<Msg> {
+        map(
+            key,
+            view,
+            false,
+            false,
+            false,
+            false,
+            false,
+            focused_pane,
+            view != View::Help,
+        )
+    }
+
+    #[test]
+    fn j_and_k_move_signal_selection_exactly_like_down_and_up() {
+        assert_eq!(
+            map_in(key(KeyCode::Char('j')), View::Signals),
+            map_in(key(KeyCode::Down), View::Signals)
+        );
+        assert_eq!(
+            map_in(key(KeyCode::Char('j')), View::Signals),
+            Some(Msg::SelectNextSignal)
+        );
+        assert_eq!(
+            map_in(key(KeyCode::Char('k')), View::Signals),
+            map_in(key(KeyCode::Up), View::Signals)
+        );
+        assert_eq!(
+            map_in(key(KeyCode::Char('k')), View::Signals),
+            Some(Msg::SelectPreviousSignal)
+        );
+    }
+
+    #[test]
+    fn o_activates_exactly_like_enter_with_the_signals_list_focused() {
+        assert_eq!(
+            map_in(key(KeyCode::Char('o')), View::Signals),
+            Some(Msg::Activate)
+        );
+    }
+
+    #[test]
+    fn signals_letter_aliases_are_inert_while_the_selected_signal_pane_is_focused() {
+        for c in ['j', 'k', 'o'] {
+            assert_eq!(
+                map_focused(key(KeyCode::Char(c)), View::Signals, PaneId::SelectedSignal),
+                None,
+                "{c:?} must not act on the Signals list without list focus"
+            );
+        }
+    }
+
+    #[test]
+    fn signals_letter_aliases_do_not_leak_onto_other_surfaces() {
+        let elsewhere = [
+            (View::Target, PaneId::TargetIntelligence),
+            (View::Target, PaneId::Provenance),
+            (View::Help, PaneId::Help),
+            (View::AfterAction, PaneId::Report),
+            (View::AfterAction, PaneId::FinalFrame),
+            (View::Operation, PaneId::OperationTelemetry),
+            (View::Operation, PaneId::Satellite),
+            (View::Controller, PaneId::LuaFieldReference),
+        ];
+        for (view, pane) in elsewhere {
+            for c in ['j', 'k', 'o'] {
+                assert_eq!(
+                    map_focused(key(KeyCode::Char(c)), view, pane),
+                    None,
+                    "{c:?} must be inert in {view:?}/{pane:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn modified_signals_letter_aliases_are_inert() {
+        for k in [
+            key(KeyCode::Char('J')),
+            key_with_modifiers(KeyCode::Char('J'), KeyModifiers::SHIFT),
+            key_with_modifiers(KeyCode::Char('j'), KeyModifiers::CONTROL),
+            key_with_modifiers(KeyCode::Char('k'), KeyModifiers::ALT),
+            key_with_modifiers(KeyCode::Char('o'), KeyModifiers::ALT),
+            key_with_modifiers(KeyCode::Char('o'), KeyModifiers::CONTROL),
+        ] {
+            assert_eq!(map_in(k, View::Signals), None, "{k:?}");
+        }
+    }
+
+    #[test]
+    fn question_mark_opens_help_wherever_text_entry_is_not_active() {
+        let surfaces = [
+            (View::Signals, PaneId::SignalsList),
+            (View::Signals, PaneId::SelectedSignal),
+            (View::Target, PaneId::TargetIntelligence),
+            (View::Operation, PaneId::Satellite),
+            (View::Operation, PaneId::OperationTelemetry),
+            (View::AfterAction, PaneId::Report),
+            (View::Controller, PaneId::LuaFieldReference),
+        ];
+        for (view, pane) in surfaces {
+            for k in [
+                key(KeyCode::Char('?')),
+                key_with_modifiers(KeyCode::Char('?'), KeyModifiers::SHIFT),
+            ] {
+                assert_eq!(
+                    map_focused(k, view, pane),
+                    map_focused(key(KeyCode::F(1)), view, pane),
+                    "{k:?} must match F1 in {view:?}/{pane:?}"
+                );
+                assert_eq!(map_focused(k, view, pane), Some(Msg::OpenHelp));
+            }
+        }
+    }
+
+    #[test]
+    fn question_mark_dismisses_help_like_f1_while_help_is_open() {
+        assert_eq!(
+            map_in(key(KeyCode::Char('?')), View::Help),
+            Some(Msg::DismissHelp)
+        );
+        assert_eq!(
+            map_in(
+                key_with_modifiers(KeyCode::Char('?'), KeyModifiers::SHIFT),
+                View::Help
+            ),
+            Some(Msg::DismissHelp)
+        );
+    }
+
+    #[test]
+    fn ctrl_or_alt_question_mark_does_not_open_help() {
+        for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+            assert_eq!(
+                map_in(
+                    key_with_modifiers(KeyCode::Char('?'), modifiers),
+                    View::Signals
+                ),
+                None,
+                "{modifiers:?}+?"
+            );
+        }
+    }
+
+    #[test]
+    fn question_mark_and_signals_letters_stay_literal_text_in_the_controller_source() {
+        for c in ['?', 'j', 'k', 'o'] {
+            assert_eq!(
+                map_in(key(KeyCode::Char(c)), View::Controller),
+                Some(Msg::EditController(EditOp::Insert(c))),
+                "{c:?} must insert into the Controller source"
+            );
+        }
+        assert_eq!(
+            map_in(
+                key_with_modifiers(KeyCode::Char('?'), KeyModifiers::SHIFT),
+                View::Controller
+            ),
+            Some(Msg::EditController(EditOp::Insert('?')))
+        );
+    }
+
+    #[test]
+    fn question_mark_and_signals_letters_never_pass_a_modal_or_bootstrap_gate() {
+        // (network_bootstrap, intro, reset, quit, redeploy)
+        let gates = [
+            (true, false, false, false, false),
+            (false, true, false, false, false),
+            (false, false, true, false, false),
+            (false, false, false, true, false),
+            (false, false, false, false, true),
+        ];
+        for (bootstrap, intro, reset, quit, redeploy) in gates {
+            for c in ['?', 'j', 'k', 'o'] {
+                for view in [View::Signals, View::Controller, View::Help] {
+                    assert_eq!(
+                        map(
+                            key(KeyCode::Char(c)),
+                            view,
+                            bootstrap,
+                            intro,
+                            reset,
+                            quit,
+                            redeploy,
+                            view.default_pane(),
+                            false
+                        ),
+                        None,
+                        "{c:?} in {view:?} must be swallowed by gate \
+                         {:?}",
+                        (bootstrap, intro, reset, quit, redeploy)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn text_entry_is_active_only_in_the_controller_source_pane() {
+        assert!(text_entry_active(
+            View::Controller,
+            PaneId::ControllerSource
+        ));
+        assert!(!text_entry_active(
+            View::Controller,
+            PaneId::LuaFieldReference
+        ));
+        assert!(!text_entry_active(View::Signals, PaneId::SignalsList));
+        assert!(!text_entry_active(View::Help, PaneId::Help));
     }
 
     #[test]
