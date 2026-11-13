@@ -180,7 +180,16 @@ pub fn map(
         KeyCode::Enter | KeyCode::Char('v') if ctrl && controller_is_open => {
             Some(Msg::ValidateController)
         }
-        KeyCode::Enter if !ctrl && (current_view == View::Target || signals_list_focused) => {
+        // In Signals, `Enter` activates from either pane (issue #224): the
+        // Selected Signal detail is another presentation of the same
+        // selected entry, and it shows the pinned `Enter  inspect
+        // opportunity` hint. Both panes produce the same `Msg::Activate`,
+        // so `AppState::activate`'s single `Signal::is_actionable()` check
+        // decides eligibility for the hint and the key alike. `o` (below)
+        // deliberately stays list-local.
+        KeyCode::Enter
+            if !ctrl && (current_view == View::Target || current_view == View::Signals) =>
+        {
             Some(Msg::Activate)
         }
         // `o` is a Signals-list-only alias for `Enter` (issue #209); it
@@ -831,7 +840,7 @@ mod tests {
     fn arrows_scroll_the_selected_signal_detail_instead_of_moving_the_selection() {
         // Issue #222: with the detail pane focused, the console-wide
         // navigation keys scroll it; they never select another signal.
-        // `Enter` stays inert here, unchanged by this issue.
+        // `Enter` activates here exactly as from the list (issue #224).
         let selected_signal_focused = PaneId::SelectedSignal;
         assert_eq!(
             map(
@@ -873,7 +882,7 @@ mod tests {
                 selected_signal_focused,
                 true
             ),
-            None
+            Some(Msg::Activate)
         );
         for (k, expected) in [
             (KeyCode::PageUp, Msg::ScrollPageBackward(0)),
@@ -1904,6 +1913,60 @@ mod tests {
             map_in(key(KeyCode::Char('o')), View::Signals),
             Some(Msg::Activate)
         );
+    }
+
+    #[test]
+    fn enter_activates_from_either_signals_pane() {
+        for pane in [PaneId::SignalsList, PaneId::SelectedSignal] {
+            assert_eq!(
+                map_focused(key(KeyCode::Enter), View::Signals, pane),
+                Some(Msg::Activate),
+                "{pane:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn enter_from_the_selected_signal_pane_never_bypasses_an_overlay() {
+        // (network_bootstrap_pending, bootstrap_intro_visible,
+        //  reset_pending, quit_pending, redeploy_pending, expected)
+        let gates = [
+            (true, false, false, false, false, None),
+            (
+                false,
+                true,
+                false,
+                false,
+                false,
+                Some(Msg::AcknowledgeBootstrapIntro),
+            ),
+            (
+                false,
+                false,
+                true,
+                false,
+                false,
+                Some(Msg::ConfirmResetController),
+            ),
+            (false, false, false, true, false, Some(Msg::ConfirmQuit)),
+            (false, false, false, false, true, Some(Msg::ConfirmDeploy)),
+        ];
+        for (bootstrap, intro, reset, quit, redeploy, expected) in gates {
+            assert_eq!(
+                map(
+                    key(KeyCode::Enter),
+                    View::Signals,
+                    bootstrap,
+                    intro,
+                    reset,
+                    quit,
+                    redeploy,
+                    PaneId::SelectedSignal,
+                    true,
+                ),
+                expected
+            );
+        }
     }
 
     #[test]

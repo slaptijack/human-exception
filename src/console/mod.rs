@@ -1134,7 +1134,10 @@ mod tests {
     }
 
     #[test]
-    fn signals_selection_and_activation_are_inert_while_the_detail_pane_is_focused() {
+    fn signals_selection_is_inert_while_the_detail_pane_is_focused() {
+        // `Enter` is deliberately absent: it activates from the detail pane
+        // too (issue #224), covered by the `enter_from_the_focused_signal_
+        // detail_*` tests.
         let (state, _) = render(
             120,
             40,
@@ -1142,7 +1145,6 @@ mod tests {
                 press(KeyCode::F(8)), // move focus to the selected-signal detail pane
                 press(KeyCode::Down),
                 press(KeyCode::Up),
-                press(KeyCode::Enter),
             ],
         );
 
@@ -4319,6 +4321,69 @@ mod tests {
         );
         assert_eq!(state.current_view(), View::Signals);
         assert_eq!(state.selected_signal(), 0);
+    }
+
+    /// Selects `index`, then focuses the detail pane with `F8`, then presses `Enter`.
+    fn enter_from_signal_detail(index: usize) -> Vec<Event> {
+        let mut events: Vec<Event> = (0..index).map(|_| press(KeyCode::Down)).collect();
+        events.push(press(KeyCode::F(8)));
+        events.push(press(KeyCode::Enter));
+        events
+    }
+
+    #[test]
+    fn enter_from_the_focused_signal_detail_opens_target_on_the_actionable_entry() {
+        use state::PaneId;
+
+        let actionable = intel::visible_signals(false)
+            .iter()
+            .position(|signal| signal.is_actionable())
+            .expect("LOCAL LOG has an actionable signal");
+        let (via_detail, _) = render(120, 40, &enter_from_signal_detail(actionable));
+        assert_eq!(via_detail.current_view(), View::Target);
+        assert_eq!(
+            via_detail.focused_pane(View::Signals),
+            PaneId::SelectedSignal
+        );
+
+        let mut via_list: Vec<Event> = (0..actionable).map(|_| press(KeyCode::Down)).collect();
+        via_list.push(press(KeyCode::Enter));
+        let (via_list, _) = render(120, 40, &via_list);
+        assert_eq!(via_list.current_view(), View::Target);
+        assert_eq!(via_detail.working_set(), via_list.working_set());
+        assert_eq!(via_detail.controller_source(), via_list.controller_source());
+    }
+
+    #[test]
+    fn enter_from_the_focused_signal_detail_leaves_a_non_actionable_entry_inert() {
+        use state::PaneId;
+
+        let inert = intel::visible_signals(false)
+            .iter()
+            .position(|signal| !signal.is_actionable())
+            .expect("LOCAL LOG has at least one non-actionable signal");
+        let (state, _) = render(120, 40, &enter_from_signal_detail(inert));
+        assert_eq!(state.current_view(), View::Signals);
+        assert_eq!(state.selected_signal(), inert);
+        assert_eq!(state.focused_pane(View::Signals), PaneId::SelectedSignal);
+        // Target stays unreachable: Enter must not have marked it known.
+        let (state, _) = render_from(state, 120, 40, &[press(KeyCode::F(3))]);
+        assert_eq!(state.current_view(), View::Signals);
+    }
+
+    #[test]
+    fn enter_from_the_focused_signal_detail_activates_nothing_in_connected_signals() {
+        let count = intel::visible_signals(true).len();
+        for index in 0..count {
+            let (state, _) = render_from(
+                connected_signals_state(),
+                120,
+                40,
+                &enter_from_signal_detail(index),
+            );
+            assert_eq!(state.current_view(), View::Signals, "{index}");
+            assert_eq!(state.selected_signal(), index, "{index}");
+        }
     }
 
     #[test]

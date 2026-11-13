@@ -2710,9 +2710,10 @@ fn view_specific_help(state: &AppState, view: View) -> Vec<Line<'static>> {
             Line::from("PageUp/Down  move by one visible list page"),
             Line::from("Home/End     jump to the first/last signal"),
             Line::from("Enter        open Target (only signals marked [OPEN] respond)"),
-            Line::from("o            same as Enter"),
+            Line::from("o            same as Enter (list only)"),
             Line::from("Its detail shows alongside; F8 moves focus there,"),
             Line::from("where Up/Down/PageUp/PageDown/Home/End scroll it"),
+            Line::from("and Enter still opens Target for an [OPEN] signal"),
         ],
         View::Target => vec![
             Line::from("Enter  work this opportunity"),
@@ -3873,7 +3874,7 @@ mod tests {
 
         let mut state = AppState::new();
         state.apply(Msg::OpenHelp);
-        let terminal = render(120, 73, &state);
+        let terminal = render(120, 74, &state);
 
         assert!(buffer_contains(&terminal, "scan does not move the drone"));
         assert!(buffer_contains(&terminal, "regardless of walls in the way"));
@@ -3900,6 +3901,15 @@ mod tests {
         assert!(buffer_contains(
             &terminal,
             "where Up/Down/PageUp/PageDown/Home/End scroll it"
+        ));
+        // Issue #224: Enter works from the detail pane too; `o` does not.
+        assert!(buffer_contains(
+            &terminal,
+            "and Enter still opens Target for an [OPEN] signal"
+        ));
+        assert!(buffer_contains(
+            &terminal,
+            "o            same as Enter (list only)"
         ));
     }
 
@@ -4021,10 +4031,11 @@ mod tests {
         // Tall enough that the full two-level help content (view controls,
         // global controls, Lua contract, terminology, symbol legend) fits
         // without needing to scroll. (86 since the `•` inspected-marker
-        // glossary line, issue #216.)
+        // glossary line, issue #216; 87 since the detail-pane Enter line,
+        // issue #224.)
         let mut state = AppState::new();
         state.apply(Msg::OpenHelp);
-        let terminal = render(120, 86, &state);
+        let terminal = render(120, 87, &state);
 
         assert!(buffer_contains(&terminal, "Terminology"));
         assert!(buffer_contains(&terminal, "MACHINE INTERCEPT"));
