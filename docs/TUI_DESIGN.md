@@ -477,9 +477,9 @@ Representative 120×40 layout before connectivity:
 
 ```text
 ┌ HUMAN EXCEPTION // RESISTANCE CONSOLE ─────────────────────────────────────────────────────────────────────────┐
-│ MESH: NONE             SATLINK: COMPROMISED        LOCAL LOG: 03        WORKING SET: none                      │
+│ MESH: NONE   LOCAL LOG: 03   WORKING SET: none                                                                 │
 ├───────────────────────────────────────────────────────────────┬────────────────────────────────────────────────┤
-│ » LOCAL LOG                                                   │ SELECTED ENTRY                                 │
+│ > LOCAL LOG                                                   │ SELECTED ENTRY                                 │
 │                                                               │                                                │
 │ > 11:42  MACHINE INTERCEPT  fabricator node 31B        [OPEN] │ fabricator node 31B // MACHINE INTERCEPT       │
 │     Fabricator node 31B fell back to local control            │ 11:42   confidence: HIGH                       │
@@ -495,7 +495,7 @@ Representative 120×40 layout before connectivity:
 │                                                               │ controller key.                                │
 │                                                               │ Enter  inspect opportunity                     │
 ├────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│ ↑↓ Select   Enter Inspect   F1/? Help   F2 Local Log   F8 Switch Pane                        Ctrl+Q Quit       │
+│ F1/? Help   F2 Local Log   F3 Target   F4 Controller   F5 Operation   F6 Deploy   F8 Next Pane     Ctrl+Q Quit │
 └────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -507,9 +507,9 @@ Representative 120×40 layout after First Contact succeeds:
 
 ```text
 ┌ HUMAN EXCEPTION // RESISTANCE CONSOLE ─────────────────────────────────────────────────────────────────────────┐
-│ MESH: DEGRADED   WORKING SET: FIRST CONTACT   SATLINK: COMPROMISED   SIGNALS: 04                                │
+│ MESH: DEGRADED   SIGNALS: 04   CONTROLLER: starter   WORKING SET: FIRST CONTACT                                │
 ├───────────────────────────────────────────────────────────────┬────────────────────────────────────────────────┤
-│ » SIGNALS                                                     │ SELECTED SIGNAL                                │
+│ > SIGNALS                                                     │ SELECTED SIGNAL                                │
 │                                                               │                                                │
 │ > 11:35  SHARED INTEL       rook@pacific                      │ rook@pacific // SHARED INTEL                   │
 │     rook lost a relay mid-trace                               │ 11:35   confidence: MED                        │
@@ -525,11 +525,11 @@ Representative 120×40 layout after First Contact succeeds:
 │                                                               │ a scheduled sweep, not a fault."               │
 │   10:57  ANOMALY            PASSIVE SENSOR                    │                                                │
 ├────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│ ↑↓ Select   F1/? Help   F2 Signals   F8 Switch Pane                                          Ctrl+Q Quit       │
+│ F1/? Help   F2 Signals   F3 Target   F4 Controller   F5 Operation   F6 Deploy   F8 Next Pane       Ctrl+Q Quit │
 └────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-`WORKING SET: FIRST CONTACT` persists here because the state rules keep the current working set for the session regardless of view (§ [State and information rules](#state-and-information-rules)); it only reads `none` again after First Contact's working set is explicitly cleared or a fresh, connectivity-persisted relaunch begins before any working set has been chosen this session. `Enter` has no listed hint because nothing in this feed is currently actionable (below); selecting a row with `↑↓` alone already updates the detail pane.
+`WORKING SET: FIRST CONTACT` persists here because the state rules keep the current working set for the session regardless of view (§ [State and information rules](#state-and-information-rules)); it only reads `none` again after First Contact's working set is explicitly cleared or a fresh, connectivity-persisted relaunch begins before any working set has been chosen this session. `CONTROLLER: starter` appears beside it because a working set carries its controller status into every view's header. The Signals header never shows `SATLINK`, in either connectivity state; views such as Controller and Operation do. Nothing in this feed is currently actionable (below), so no entry shows `[OPEN]` or the pinned `Enter  inspect opportunity` row. Selecting a row with `↑↓` (or `j`/`k`) already updates the detail pane on its own.
 
 Once connected, the front door genuinely carries operator-network traffic — shared intel and cell requests from other independent hackers are now legitimate, because the resistance mesh is actually reachable. First Contact does not reappear here as an actionable item: it is already complete, and re-offering it as an undiscovered opportunity would be dishonest (§5, § [Network Bootstrap](#network-bootstrap)). For the first playable slice, no signal in the connected feed is actionable; they exist to make the wider network feel real, per § [Opportunity design principles beyond First Contact](#opportunity-design-principles-beyond-first-contact).
 
@@ -576,7 +576,7 @@ Selecting an actionable entry and pressing `Enter` (or its list-local alias `o`)
 
 If the player already has First Contact as the current working set, selecting it again must preserve the current controller source. Re-entering Target never reloads or replaces source by itself.
 
-The `»` before a pane title in the mockups above is the non-color focus cue (§ [Non-color focus cue](#non-color-focus-cue)) — deliberately a different glyph from the `>` that marks the selected row within the list pane, so the two choices (which pane has focus, which entry is selected) stay visually distinct.
+The `> ` before a pane title in the mockups above (`> LOCAL LOG`, `> SIGNALS`) is the non-color focus cue (§ [Non-color focus cue](#non-color-focus-cue)). The same glyph marks the selected row inside the list. The two cues stay distinct by position: the focus cue sits in a pane's border title, and the selection cursor sits at the start of a list row. `F8` moves the focus cue to `> SELECTED ENTRY` / `> SELECTED SIGNAL` without moving the selected row. Like every view, the footer shows the F-key vocabulary rather than per-key list hints. Help (`F1`/`?`) lists the Signals list's `↑↓`, `j`/`k`, `Enter`/`o`, and paging keys.
 
 ## 2. Target
 
