@@ -481,19 +481,19 @@ Representative 120×40 layout before connectivity:
 ├───────────────────────────────────────────────────────────────┬────────────────────────────────────────────────┤
 │ » LOCAL LOG                                                   │ SELECTED ENTRY                                 │
 │                                                               │                                                │
-│ > 11:42  MACHINE INTERCEPT                                    │ MACHINE INTERCEPT // sector 7                  │
-│   Fabricator node 31B resumed local control after mesh loss.  │ confidence: HIGH                               │
-│   auth state inconsistent.                              [OPEN]│                                                │
-│                                                               │ A maintenance unit inside an automated facility│
-│   11:18  BOOTSTRAP LOG // package verify                      │ appears to have fallen back to local control.  │
-│   console-core 0.3.1 signed by slaptijack@, install verified. │ Authentication traffic is incomplete.          │
+│ > 11:42  MACHINE INTERCEPT                                    │ fabricator node 31B // MACHINE INTERCEPT       │
+│   Fabricator node 31B resumed local control after mesh loss.  │ 11:42   confidence: HIGH                       │
+│   auth state inconsistent.                              [OPEN]│ STATUS  OPEN // FIRST CONTACT                  │
 │                                                               │                                                │
-│   10:57  PASSIVE SENSOR // ANOMALY                            │ Correlated fragments suggest a temporary access│
-│   Burst traffic from an offline municipal control cluster.    │ window through the captured maintenance drone. │
-│                                                               │                                                │
-│                                                               │ ACTIONABLE: FIRST CONTACT                      │
+│   11:18  BOOTSTRAP LOG // package verify                      │ SOURCE                                         │
+│   console-core 0.3.1 signed by slaptijack@, install verified. │ • local receiver, maintenance band             │
+│                                                               │ • handshake replay, partial                    │
+│   10:57  PASSIVE SENSOR // ANOMALY                            │                                                │
+│   Burst traffic from an offline municipal control cluster.    │ MESSAGE                                        │
+│                                                               │ AUTH/RETRY x14 — no mesh ack. FALLBACK: local. │
+│                                                               │ Maintenance channel 2 still answering a stale  │
+│                                                               │ controller key.                                │
 │                                                               │ Enter  inspect opportunity                     │
-│                                                               │                                                │
 ├────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │ ↑↓ Select   Enter Inspect   F1/? Help   F2 Local Log   F8 Switch Pane                        Ctrl+Q Quit       │
 └────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
@@ -511,18 +511,18 @@ Representative 120×40 layout after First Contact succeeds:
 ├───────────────────────────────────────────────────────────────┬────────────────────────────────────────────────┤
 │ » SIGNALS                                                     │ SELECTED SIGNAL                                │
 │                                                               │                                                │
-│ > 12:03  rook@pacific // SHARED INTEL                         │ SHARED INTEL // rook@pacific                   │
-│   Lost my relay before I could trace the uplink. Dumping      │ confidence: MED                                │
-│   what I saw in case somebody closer wants to follow up.      │                                                │
-│                                                               │ An independent operator's fragment, now visible│
-│   11:47  CELL/MARE-4 // REQUEST                               │ because the console can finally receive shared │
-│   Looking for anyone who can identify convoy routing          │ operator traffic instead of only local sensors.│
-│   changes near old I-5. No clean telemetry yet.               │                                                │
-│                                                               │ No deployable opportunity is attached to this  │
-│   11:18  BOOTSTRAP LOG // package verify                      │ signal in the current playable slice.          │
-│   console-core 0.3.1 signed by slaptijack@, install verified. │                                                │
+│ > 12:03  rook@pacific // SHARED INTEL                         │ rook@pacific // SHARED INTEL                   │
+│   Lost my relay before I could trace the uplink. Dumping      │ 11:35   confidence: MED                        │
+│   what I saw in case somebody closer wants to follow up.      │ STATUS  no open opportunity — information only │
 │                                                               │                                                │
-│   10:57  PASSIVE SENSOR // ANOMALY                            │                                                │
+│   11:47  CELL/MARE-4 // REQUEST                               │ SOURCE                                         │
+│   Looking for anyone who can identify convoy routing          │ • operator mesh, relayed twice                 │
+│   changes near old I-5. No clean telemetry yet.               │ • sender key seen before, not verified         │
+│                                                               │                                                │
+│   11:18  BOOTSTRAP LOG // package verify                      │ MESSAGE                                        │
+│   console-core 0.3.1 signed by slaptijack@, install verified. │ "Relay went dark mid-trace. Dumping what I saw │
+│                                                               │ in case somebody is closer. Timing looked like │
+│   10:57  PASSIVE SENSOR // ANOMALY                            │ a scheduled sweep, not a fault."               │
 │   Burst traffic from an offline municipal control cluster.    │                                                │
 ├────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │ ↑↓ Select   F1/? Help   F2 Signals   F8 Switch Pane                                          Ctrl+Q Quit       │
@@ -537,7 +537,21 @@ Once connected, the front door genuinely carries operator-network traffic — sh
 
 The left pane is chronological intelligence, not a task list. Items may be actionable, informational, unresolved, or merely atmospheric.
 
-The right pane shows the currently selected entry in more detail and may correlate related fragments.
+The right pane expands on the selected entry instead of repeating its list row. From top to bottom it shows:
+
+- **origin:** the sender and category;
+- **time and confidence:** `HIGH`, `MED`, `LOW`, or `UNVERIFIED`;
+- **status line:** either `STATUS  OPEN // <opportunity>` or `STATUS  no open opportunity — information only`;
+- **`SOURCE`:** how the entry reached this console;
+- **`MESSAGE`:** the full message, intercepted fragment, or telemetry;
+- **`CONTEXT`:** correlated background, when authored;
+- **`UNRESOLVED`:** open questions the entry raises, when authored.
+
+The mockups above are cut short at the bottom. At full height, `CONTEXT` and `UNRESOLVED` follow `MESSAGE`.
+
+All of this content is hand-written and hedged to what the console could plausibly know at its current connectivity. It never reveals hidden scenario state.
+
+The status line sits near the top so long content can never push it off-screen. The pinned `Enter  inspect opportunity` row appears only for an actionable entry. The status line, the list's `[OPEN]` marker, that pinned row, and whether `Enter`/`o` respond all come from the same availability rule, so they cannot disagree. A non-actionable entry states in words that it has no opportunity; it never shows a disabled or fake action.
 
 For the first playable slice:
 

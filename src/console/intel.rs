@@ -32,13 +32,31 @@ impl SignalCategory {
 }
 
 /// One item in the resistance-network intelligence stream.
+///
+/// `headline` is what the list row shows; everything else is what the
+/// selected-entry detail pane adds on top of it (`docs/TUI_DESIGN.md`,
+/// "1. Signals"). Every field is hand-authored fiction, hedged to what the
+/// console could plausibly know at its connectivity level, never an
+/// authoritative world fact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Signal {
     pub time: &'static str,
     pub source: &'static str,
     pub category: SignalCategory,
     pub headline: &'static str,
+    /// The full message, intercepted fragment, or telemetry. Deliberately
+    /// does not open by repeating `headline`, so selecting a row is worth
+    /// doing.
     pub body: &'static str,
+    /// How far this entry should be trusted: `HIGH`, `MED`, `LOW`, or
+    /// `UNVERIFIED`.
+    pub confidence: &'static str,
+    /// How the entry reached this console.
+    pub provenance: &'static [&'static str],
+    /// Authored correlation or background, hedged in-fiction.
+    pub context: &'static [&'static str],
+    /// Open questions the entry raises but does not answer.
+    pub unresolved: &'static [&'static str],
     /// The opportunity this signal opens onto, if any. Only one signal in
     /// the first playable slice carries an opportunity; the rest establish
     /// the wider world without offering fake choices.
@@ -68,9 +86,21 @@ pub fn authored_signals() -> &'static [Signal] {
             source: "fabricator node 31B",
             category: SignalCategory::MachineIntercept,
             headline: "Fabricator node 31B resumed local control after mesh loss.",
-            body: "Fabricator node 31B resumed local control after mesh loss. Auth state \
-                   inconsistent. Correlated fragments suggest a temporary access window \
-                   through a captured maintenance drone.",
+            body: "AUTH/RETRY x14 \u{2014} no mesh ack. FALLBACK: local. \
+                   Maintenance channel 2 still answering a stale controller key.",
+            confidence: "HIGH",
+            provenance: &[
+                "local receiver, maintenance band",
+                "handshake replay, partial",
+            ],
+            context: &[
+                "Correlated fragments suggest a temporary access window through a \
+                 captured maintenance drone.",
+            ],
+            unresolved: &[
+                "how long the stale key stays valid",
+                "what else on this node still listens",
+            ],
             opportunity: Some(WorkingSet::FirstContact),
             local_available: true,
         },
@@ -79,8 +109,18 @@ pub fn authored_signals() -> &'static [Signal] {
             source: "rook@pacific",
             category: SignalCategory::SharedIntel,
             headline: "\"Lost my relay before I could trace the uplink.\"",
-            body: "\"Lost my relay before I could trace the uplink. Dumping what I saw in \
-                   case somebody is closer.\"",
+            body: "\"Relay went dark mid-trace. Dumping what I saw in case somebody is \
+                   closer. Timing looked like a scheduled sweep, not a fault.\"",
+            confidence: "MED",
+            provenance: &[
+                "operator mesh, relayed twice",
+                "sender key seen before, not verified",
+            ],
+            context: &["An independent operator's fragment; nothing here is addressed to us."],
+            unresolved: &[
+                "which uplink rook was tracing",
+                "whether the sweep was aimed at rook",
+            ],
             opportunity: None,
             local_available: false,
         },
@@ -89,8 +129,12 @@ pub fn authored_signals() -> &'static [Signal] {
             source: "CELL/MARE-4",
             category: SignalCategory::Request,
             headline: "Looking for anyone who can identify convoy routing changes near old I-5.",
-            body: "Looking for anyone who can identify convoy routing changes near old I-5. \
-                   No clean telemetry yet.",
+            body: "\"Convoys stopped using the usual corridor three days ago. No clean \
+                   telemetry yet. Anyone with eyes on old I-5, share what you have.\"",
+            confidence: "LOW",
+            provenance: &["open cell broadcast, unsigned"],
+            context: &["A request to the wider network, not a task assigned to this console."],
+            unresolved: &["why the routing changed", "whether anyone has answered"],
             opportunity: None,
             local_available: false,
         },
@@ -99,8 +143,12 @@ pub fn authored_signals() -> &'static [Signal] {
             source: "BOOTSTRAP LOG",
             category: SignalCategory::BootstrapLog,
             headline: "console-core 0.3.1 signed by slaptijack@, install verified.",
-            body: "console-core 0.3.1 signed by slaptijack@, install verified. Bootstrap \
-                   software provenance only \u{2014} no resistance-network traffic.",
+            body: "verify: signature OK. manifest OK. 0 modified files. \
+                   Bootstrap software provenance only \u{2014} no resistance-network traffic.",
+            confidence: "HIGH",
+            provenance: &["local package verifier"],
+            context: &[],
+            unresolved: &[],
             opportunity: None,
             local_available: true,
         },
@@ -109,8 +157,15 @@ pub fn authored_signals() -> &'static [Signal] {
             source: "PASSIVE SENSOR",
             category: SignalCategory::Anomaly,
             headline: "Burst traffic from an offline municipal control cluster.",
-            body: "Burst traffic from an offline municipal control cluster. Source and intent \
-                   unconfirmed.",
+            body: "3 bursts, 40-90 ms each, on a band the cluster has not used since \
+                   the grid went down. Payload encrypted.",
+            confidence: "UNVERIFIED",
+            provenance: &["local passive sensor array"],
+            context: &[
+                "Could be a maintenance heartbeat, a relay, or noise. Source and intent \
+                 unconfirmed.",
+            ],
+            unresolved: &["who or what woke the cluster"],
             opportunity: None,
             local_available: true,
         },
@@ -268,6 +323,44 @@ mod tests {
             connected.iter().all(|signal| !signal.is_actionable()),
             "First Contact must not be offered again as an undiscovered opportunity"
         );
+    }
+
+    #[test]
+    fn every_signal_has_provenance_and_a_known_confidence_level() {
+        for signal in authored_signals() {
+            assert!(!signal.provenance.is_empty(), "{}", signal.source);
+            assert!(
+                ["HIGH", "MED", "LOW", "UNVERIFIED"].contains(&signal.confidence),
+                "{}: unexpected confidence {:?}",
+                signal.source,
+                signal.confidence
+            );
+        }
+    }
+
+    #[test]
+    fn signal_detail_body_does_not_repeat_the_list_headline() {
+        for signal in authored_signals() {
+            assert!(
+                !signal.body.starts_with(signal.headline),
+                "{}: the detail body must expand on the headline, not repeat it",
+                signal.source
+            );
+            assert_ne!(signal.body, signal.headline);
+        }
+    }
+
+    #[test]
+    fn signals_never_mention_the_hidden_uplink_coordinates() {
+        for signal in authored_signals() {
+            let mut haystack = vec![signal.headline, signal.body];
+            haystack.extend(signal.provenance);
+            haystack.extend(signal.context);
+            haystack.extend(signal.unresolved);
+            for line in haystack {
+                assert!(!line.contains("4, 4") && !line.contains("(4,4)"));
+            }
+        }
     }
 
     #[test]
