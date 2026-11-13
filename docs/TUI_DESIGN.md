@@ -481,17 +481,17 @@ Representative 120×40 layout before connectivity:
 ├───────────────────────────────────────────────────────────────┬────────────────────────────────────────────────┤
 │ » LOCAL LOG                                                   │ SELECTED ENTRY                                 │
 │                                                               │                                                │
-│ > 11:42  MACHINE INTERCEPT                                    │ fabricator node 31B // MACHINE INTERCEPT       │
-│   Fabricator node 31B resumed local control after mesh loss.  │ 11:42   confidence: HIGH                       │
-│   auth state inconsistent.                              [OPEN]│ STATUS  OPEN // FIRST CONTACT                  │
+│ > 11:42  MACHINE INTERCEPT  fabricator node 31B        [OPEN] │ fabricator node 31B // MACHINE INTERCEPT       │
+│     Fabricator node 31B fell back to local control            │ 11:42   confidence: HIGH                       │
+│     Auth state inconsistent; a maintenance channel is still … │ STATUS  OPEN // FIRST CONTACT                  │
 │                                                               │                                                │
-│   11:18  BOOTSTRAP LOG // package verify                      │ SOURCE                                         │
-│   console-core 0.3.1 signed by slaptijack@, install verified. │ • local receiver, maintenance band             │
-│                                                               │ • handshake replay, partial                    │
-│   10:57  PASSIVE SENSOR // ANOMALY                            │                                                │
-│   Burst traffic from an offline municipal control cluster.    │ MESSAGE                                        │
-│                                                               │ AUTH/RETRY x14 — no mesh ack. FALLBACK: local. │
-│                                                               │ Maintenance channel 2 still answering a stale  │
+│   11:05  PACKAGE VERIFY     BOOTSTRAP LOG                     │ SOURCE                                         │
+│     console-core 0.3.1 install verified                       │ • local receiver, maintenance band             │
+│     Signed by slaptijack@; bootstrap software provenance onl… │ • handshake replay, partial                    │
+│                                                               │                                                │
+│   10:57  ANOMALY            PASSIVE SENSOR                    │ MESSAGE                                        │
+│     Offline municipal cluster sent burst traffic              │ AUTH/RETRY x14 — no mesh ack. FALLBACK: local. │
+│     Three short bursts on a long-dead band; source unconfirm… │ Maintenance channel 2 still answering a stale  │
 │                                                               │ controller key.                                │
 │                                                               │ Enter  inspect opportunity                     │
 ├────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
@@ -511,19 +511,19 @@ Representative 120×40 layout after First Contact succeeds:
 ├───────────────────────────────────────────────────────────────┬────────────────────────────────────────────────┤
 │ » SIGNALS                                                     │ SELECTED SIGNAL                                │
 │                                                               │                                                │
-│ > 12:03  rook@pacific // SHARED INTEL                         │ rook@pacific // SHARED INTEL                   │
-│   Lost my relay before I could trace the uplink. Dumping      │ 11:35   confidence: MED                        │
-│   what I saw in case somebody closer wants to follow up.      │ STATUS  no open opportunity — information only │
+│ > 11:35  SHARED INTEL       rook@pacific                      │ rook@pacific // SHARED INTEL                   │
+│     rook lost a relay mid-trace                               │ 11:35   confidence: MED                        │
+│     "Dumping what I saw in case somebody is closer."          │ STATUS  no open opportunity — information only │
 │                                                               │                                                │
-│   11:47  CELL/MARE-4 // REQUEST                               │ SOURCE                                         │
-│   Looking for anyone who can identify convoy routing          │ • operator mesh, relayed twice                 │
-│   changes near old I-5. No clean telemetry yet.               │ • sender key seen before, not verified         │
+│   11:18  REQUEST            CELL/MARE-4                       │ SOURCE                                         │
+│     Convoy routing changed near old I-5                       │ • operator mesh, relayed twice                 │
+│     Asking anyone with eyes on the corridor to share telemet… │ • sender key seen before, not verified         │
 │                                                               │                                                │
-│   11:18  BOOTSTRAP LOG // package verify                      │ MESSAGE                                        │
-│   console-core 0.3.1 signed by slaptijack@, install verified. │ "Relay went dark mid-trace. Dumping what I saw │
-│                                                               │ in case somebody is closer. Timing looked like │
-│   10:57  PASSIVE SENSOR // ANOMALY                            │ a scheduled sweep, not a fault."               │
-│   Burst traffic from an offline municipal control cluster.    │                                                │
+│   11:05  PACKAGE VERIFY     BOOTSTRAP LOG                     │ MESSAGE                                        │
+│     console-core 0.3.1 install verified                       │ "Relay went dark mid-trace. Dumping what I saw │
+│     Signed by slaptijack@; bootstrap software provenance onl… │ in case somebody is closer. Timing looked like │
+│                                                               │ a scheduled sweep, not a fault."               │
+│   10:57  ANOMALY            PASSIVE SENSOR                    │                                                │
 ├────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │ ↑↓ Select   F1/? Help   F2 Signals   F8 Switch Pane                                          Ctrl+Q Quit       │
 └────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
@@ -537,6 +537,15 @@ Once connected, the front door genuinely carries operator-network traffic — sh
 
 The left pane is chronological intelligence, not a task list. Items may be actionable, informational, unresolved, or merely atmospheric.
 
+Every list entry has the same four-row shape:
+
+- **header:** the selection cursor, time, a fixed-width category column, and the sender, with `[OPEN]` right-aligned on an actionable entry;
+- **subject:** a short, distinct subject line;
+- **preview:** a one-line summary;
+- **separator:** a blank row.
+
+Rows longer than the pane are cut with a trailing `…`, as in the mockups above, instead of wrapping. Each entry therefore always takes exactly four rows, which keeps list windowing and `PageUp`/`PageDown` in step with what is on screen. The header reserves room for the cursor and `[OPEN]` before shortening the sender, so neither cue is ever clipped.
+
 The right pane expands on the selected entry instead of repeating its list row. From top to bottom it shows:
 
 - **origin:** the sender and category;
@@ -547,7 +556,7 @@ The right pane expands on the selected entry instead of repeating its list row. 
 - **`CONTEXT`:** correlated background, when authored;
 - **`UNRESOLVED`:** open questions the entry raises, when authored.
 
-The mockups above are cut short at the bottom. At full height, `CONTEXT` and `UNRESOLVED` follow `MESSAGE`.
+The mockups above are cut short at the bottom. At full height, the list shows every entry that fits, and `CONTEXT` and `UNRESOLVED` follow `MESSAGE` in the detail pane.
 
 All of this content is hand-written and hedged to what the console could plausibly know at its current connectivity. It never reveals hidden scenario state.
 
