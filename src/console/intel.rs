@@ -41,6 +41,10 @@ impl SignalCategory {
 /// authoritative world fact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Signal {
+    /// A stable identity for this authored entry, independent of its
+    /// position in [`visible_signals`] (which differs between LOCAL LOG and
+    /// SIGNALS). Session-only inspected state is keyed by it (issue #216).
+    pub id: &'static str,
     pub time: &'static str,
     pub source: &'static str,
     pub category: SignalCategory,
@@ -87,6 +91,7 @@ impl Signal {
 pub fn authored_signals() -> &'static [Signal] {
     &[
         Signal {
+            id: "fabricator-31b-fallback",
             time: "11:42",
             source: "fabricator node 31B",
             category: SignalCategory::MachineIntercept,
@@ -111,6 +116,7 @@ pub fn authored_signals() -> &'static [Signal] {
             local_available: true,
         },
         Signal {
+            id: "rook-relay-lost",
             time: "11:35",
             source: "rook@pacific",
             category: SignalCategory::SharedIntel,
@@ -132,6 +138,7 @@ pub fn authored_signals() -> &'static [Signal] {
             local_available: false,
         },
         Signal {
+            id: "mare4-convoy-request",
             time: "11:18",
             source: "CELL/MARE-4",
             category: SignalCategory::Request,
@@ -147,6 +154,7 @@ pub fn authored_signals() -> &'static [Signal] {
             local_available: false,
         },
         Signal {
+            id: "console-core-verify",
             time: "11:05",
             source: "BOOTSTRAP LOG",
             category: SignalCategory::BootstrapLog,
@@ -162,6 +170,7 @@ pub fn authored_signals() -> &'static [Signal] {
             local_available: true,
         },
         Signal {
+            id: "municipal-cluster-burst",
             time: "10:57",
             source: "PASSIVE SENSOR",
             category: SignalCategory::Anomaly,
@@ -359,6 +368,21 @@ mod tests {
                 );
             }
             assert_ne!(signal.subject, signal.preview, "{}", signal.source);
+        }
+    }
+
+    #[test]
+    fn signal_ids_are_unique_and_non_empty() {
+        let signals = authored_signals();
+        for (index, signal) in signals.iter().enumerate() {
+            assert!(!signal.id.is_empty());
+            assert!(
+                signals[index + 1..]
+                    .iter()
+                    .all(|other| other.id != signal.id),
+                "duplicate id {:?}",
+                signal.id
+            );
         }
     }
 

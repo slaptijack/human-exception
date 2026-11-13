@@ -4,7 +4,7 @@
 //! library so it can be tested without a real terminal and so later issues
 //! can grow the state model without coupling it to widget code.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::document::ControllerDocument;
 use super::editor::EditOp;
@@ -603,6 +603,12 @@ pub struct AppState {
     /// Index into [`visible_signals`], moved by `SelectPreviousSignal` /
     /// `SelectNextSignal`.
     selected_signal: usize,
+    /// Ids ([`super::intel::Signal::id`]) of every Signals entry the player
+    /// has selected this session. Deliberately in-memory only — never
+    /// persisted by `profile.rs` — and keyed by stable id rather than
+    /// `selected_signal`'s index, so an entry inspected in LOCAL LOG stays
+    /// inspected after connecting (issue #216).
+    inspected_signals: HashSet<&'static str>,
     /// True once the player has inspected the actionable signal, making
     /// Target reachable even before a working set is committed.
     target_known: bool,
@@ -711,6 +717,7 @@ impl Default for AppState {
             help_return_view: None,
             working_set: None,
             selected_signal: 0,
+            inspected_signals: HashSet::new(),
             target_known: false,
             controller: None,
             validation: Validation::Unchecked,
@@ -1092,6 +1099,24 @@ impl AppState {
         self.step_operation()
     }
 
+    /// Records the currently selected signal as inspected. Every Signals
+    /// selection change calls this both before and after moving, so the
+    /// entry being left (including the one selected at startup) and the
+    /// one being landed on are both recorded (issue #216).
+    fn note_selected_signal_inspected(&mut self) {
+        if let Some(signal) =
+            visible_signals(self.presentation_connected()).get(self.selected_signal)
+        {
+            self.inspected_signals.insert(signal.id);
+        }
+    }
+
+    /// Whether the Signals entry with this id has been selected at some
+    /// point this session.
+    pub fn signal_inspected(&self, id: &str) -> bool {
+        self.inspected_signals.contains(id)
+    }
+
     /// Each newly selected signal's detail starts at its top, rather than
     /// inheriting however far the previous entry's detail was scrolled
     /// (issue #222).
@@ -1258,29 +1283,41 @@ impl AppState {
             }
             Msg::SelectPreviousSignal => {
                 self.reset_signal_detail_scroll();
+                self.note_selected_signal_inspected();
                 self.selected_signal = self.selected_signal.saturating_sub(1);
+                self.note_selected_signal_inspected();
             }
             Msg::SelectNextSignal => {
                 self.reset_signal_detail_scroll();
+                self.note_selected_signal_inspected();
                 let last = visible_signals(self.connected).len().saturating_sub(1);
                 self.selected_signal = (self.selected_signal + 1).min(last);
+                self.note_selected_signal_inspected();
             }
             Msg::SelectFirstSignal => {
                 self.reset_signal_detail_scroll();
+                self.note_selected_signal_inspected();
                 self.selected_signal = 0;
+                self.note_selected_signal_inspected();
             }
             Msg::SelectLastSignal => {
                 self.reset_signal_detail_scroll();
+                self.note_selected_signal_inspected();
                 self.selected_signal = visible_signals(self.connected).len().saturating_sub(1);
+                self.note_selected_signal_inspected();
             }
             Msg::SelectSignalPageBackward(page) => {
                 self.reset_signal_detail_scroll();
+                self.note_selected_signal_inspected();
                 self.selected_signal = self.selected_signal.saturating_sub(page.max(1));
+                self.note_selected_signal_inspected();
             }
             Msg::SelectSignalPageForward(page) => {
                 self.reset_signal_detail_scroll();
+                self.note_selected_signal_inspected();
                 let last = visible_signals(self.connected).len().saturating_sub(1);
                 self.selected_signal = (self.selected_signal + page.max(1)).min(last);
+                self.note_selected_signal_inspected();
             }
             Msg::Activate => self.activate(),
             Msg::FocusNextPane => self.focus_next_pane(),
@@ -1746,6 +1783,95 @@ mod tests {
                 "{view:?} should not be reachable from a fresh session"
             );
         }
+    }
+
+    #[test]
+    fn a_fresh_session_has_inspected_nothing() {
+        let state = AppState::new();
+        for signal in super::super::intel::authored_signals() {
+            assert!(!state.signal_inspected(signal.id), "{}", signal.id);
+        }
+    }
+
+    #[test]
+    fn moving_the_selection_marks_both_the_left_and_landed_entries_inspected() {
+        let mut state = AppState::new();
+        let local = visible_signals(false);
+        state.apply(Msg::SelectNextSignal);
+        assert!(state.signal_inspected(local[0].id), "startup selection");
+        assert!(state.signal_inspected(local[1].id));
+        assert!(!state.signal_inspected(local[2].id));
+    }
+
+    #[test]
+    fn every_signal_selection_message_marks_its_target_inspected() {
+        let local = visible_signals(false);
+        let last = local.len() - 1;
+        for (msg, target) in [
+            (Msg::SelectLastSignal, last),
+            (Msg::SelectSignalPageForward(2), 2.min(last)),
+        ] {
+            let mut state = AppState::new();
+            state.apply(msg.clone());
+            assert!(state.signal_inspected(local[target].id), "{msg:?}");
+        }
+        let mut state = AppState::new();
+        state.apply(Msg::SelectLastSignal);
+        for msg in [
+            Msg::SelectPreviousSignal,
+            Msg::SelectFirstSignal,
+            Msg::SelectSignalPageBackward(1),
+        ] {
+            state.apply(msg.clone());
+            assert!(
+                state.signal_inspected(local[state.selected_signal()].id),
+                "{msg:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn inspected_entries_stay_inspected_after_connecting() {
+        let mut state = AppState::new();
+        state.apply(Msg::SelectLastSignal);
+        let bootstrap_entry = visible_signals(false)[visible_signals(false).len() - 1];
+        assert!(state.signal_inspected(bootstrap_entry.id));
+
+        state.set_connected(true);
+        assert!(
+            visible_signals(true)
+                .iter()
+                .any(|s| s.id == bootstrap_entry.id),
+            "the entry must still be visible once connected for this test to mean anything"
+        );
+        assert!(state.signal_inspected(bootstrap_entry.id));
+        assert!(
+            visible_signals(true)
+                .iter()
+                .filter(|s| !s.local_available)
+                .all(|s| !state.signal_inspected(s.id)),
+            "operator traffic never seen in LOCAL LOG starts uninspected"
+        );
+    }
+
+    #[test]
+    fn inspected_state_only_grows_from_signals_selection() {
+        let mut state = AppState::new();
+        for msg in [
+            Msg::FocusNextPane,
+            Msg::ScrollDown,
+            Msg::OpenHelp,
+            Msg::DismissHelp,
+            Msg::Navigate(View::Target),
+            Msg::Navigate(View::Signals),
+        ] {
+            state.apply(msg);
+        }
+        assert!(
+            super::super::intel::authored_signals()
+                .iter()
+                .all(|s| !state.signal_inspected(s.id))
+        );
     }
 
     #[test]
