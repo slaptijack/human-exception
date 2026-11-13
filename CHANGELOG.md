@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1](https://github.com/slaptijack/human-exception/compare/v0.5.0...v0.5.1) - 2026-11-13
+
+### Added
+
+- *(console)* session-only inspected marker for Signals entries ([#225](https://github.com/slaptijack/human-exception/pull/225))
+- *(console)* scroll the Signals detail pane when focused ([#223](https://github.com/slaptijack/human-exception/pull/223))
+- *(console)* scannable Signals list rows with subject, preview, and fixed row height ([#219](https://github.com/slaptijack/human-exception/pull/219))
+- *(console)* Signals detail pane adds authored provenance, context, and opportunity status ([#217](https://github.com/slaptijack/human-exception/pull/217))
+
+### Fixed
+
+- *(console)* count a Signal as inspected once it is presented ([#229](https://github.com/slaptijack/human-exception/pull/229))
+- *(console)* allow Enter to inspect an actionable Signal from the focused detail pane ([#228](https://github.com/slaptijack/human-exception/pull/228))
+
+### Other
+
+- *(console)* align Signals mockups with the shipped header, footer, and focus cue ([#220](https://github.com/slaptijack/human-exception/pull/220))
+
 ## [0.5.0](https://github.com/slaptijack/human-exception/compare/v0.4.3...v0.5.0) - 2026-11-13
 
 ### Added
