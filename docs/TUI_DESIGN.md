@@ -267,7 +267,7 @@ surface. Every pane-local surface in the console is one of four kinds:
   selection (for example, the Signals list).
 - **Read-only scroll surface** — a block of read-only text taller than its
   viewport, positioned by a scroll offset rather than a selection (for
-  example, Help, or After Action's Report pane).
+  example, Help, After Action's Report pane, or the Signals detail pane).
 - **Editor** — the Controller source pane, with its own cursor and
   selection. Its keyboard contract is defined in full in [The editor
   contract](#the-editor-contract) and is not redefined here — this section
@@ -344,7 +344,7 @@ that every pane has something to do.
 | View | Pane-local input | View-level input |
 | --- | --- | --- |
 | Help | Up/Down/PageUp/PageDown/Home/End scroll (its one pane) | — |
-| Signals | Up/Down/PageUp/PageDown/Home/End select, Enter activate, plus list-local `j`/`k` select and `o` activate (Signals list); none (Selected signal) | — |
+| Signals | Up/Down/PageUp/PageDown/Home/End select, Enter activate, plus list-local `j`/`k` select and `o` activate (Signals list); Up/Down/PageUp/PageDown/Home/End scroll the body below its fixed header (Selected signal) | — |
 | Target | none | Enter (work opportunity), Esc (back) |
 | Controller | Full editor contract — see [The editor contract](#the-editor-contract) — including Up/Down/PageUp/PageDown/Home/End (Controller source); PageUp/PageDown are a fixed 10-line jump, not viewport-sized — see the [Console-wide navigation](#console-wide-navigation) exception; none (Lua field reference) | Ctrl+V validate, F6 deploy, F7 reset |
 | Operation | none (either pane); once a deployment has finished, Operation telemetry becomes the Review Run inspector with the full chronology/SOURCE contract — see [Review Run](#review-run) | Space (pause/resume), Enter (step) |
@@ -353,8 +353,8 @@ that every pane has something to do.
 This table is a description of existing behavior, not a change to it. It exists
 so implementation issues know, for each key, whether focus should gate it.
 
-Every read-only scroll surface — Help, After Action's Report pane, and
-Review Run's `SOURCE` mode (§ [Review Run](#review-run)) — now implements
+Every read-only scroll surface — Help, After Action's Report pane, the
+Signals detail pane, and Review Run's `SOURCE` mode (§ [Review Run](#review-run)) — now implements
 the full console-wide vocabulary, matching Signals (a selectable list) and
 Review Run's `TIMELINE` chronology.
 
@@ -560,7 +560,7 @@ The mockups above are cut short at the bottom. At full height, the list shows ev
 
 All of this content is hand-written and hedged to what the console could plausibly know at its current connectivity. It never reveals hidden scenario state.
 
-The status line sits near the top so long content can never push it off-screen. The pinned `Enter  inspect opportunity` row appears only for an actionable entry. The status line, the list's `[OPEN]` marker, that pinned row, and whether `Enter`/`o` respond all come from the same availability rule, so they cannot disagree. A non-actionable entry states in words that it has no opportunity; it never shows a disabled or fake action.
+The status line sits near the top so long content can never push it off-screen. Origin, time and confidence, and the status line form a fixed header. Only the sections below it (`SOURCE` onward) scroll, and only while the detail pane has focus (`F8`). There the console-wide `Up`/`Down`/`PageUp`/`PageDown`/`Home`/`End` scroll the body, while `j`/`k`/`o` stay list-only. Changing the selection resets the detail to its top. Like Help and the After Action report, the pane shows no overflow indicator. Every authored entry currently fits at 120×40, so these keys accept input but have nothing to move until longer intelligence arrives. The pinned `Enter  inspect opportunity` row appears only for an actionable entry. The status line, the list's `[OPEN]` marker, that pinned row, and whether `Enter`/`o` respond all come from the same availability rule, so they cannot disagree. A non-actionable entry states in words that it has no opportunity; it never shows a disabled or fake action.
 
 For the first playable slice:
 

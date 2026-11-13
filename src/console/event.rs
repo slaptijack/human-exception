@@ -828,7 +828,10 @@ mod tests {
     }
 
     #[test]
-    fn signals_selection_and_activation_are_inert_while_the_selected_signal_pane_is_focused() {
+    fn arrows_scroll_the_selected_signal_detail_instead_of_moving_the_selection() {
+        // Issue #222: with the detail pane focused, the console-wide
+        // navigation keys scroll it; they never select another signal.
+        // `Enter` stays inert here, unchanged by this issue.
         let selected_signal_focused = PaneId::SelectedSignal;
         assert_eq!(
             map(
@@ -842,7 +845,7 @@ mod tests {
                 selected_signal_focused,
                 true
             ),
-            None
+            Some(Msg::ScrollUp)
         );
         assert_eq!(
             map(
@@ -856,7 +859,7 @@ mod tests {
                 selected_signal_focused,
                 true
             ),
-            None
+            Some(Msg::ScrollDown)
         );
         assert_eq!(
             map(
@@ -872,11 +875,11 @@ mod tests {
             ),
             None
         );
-        for k in [
-            KeyCode::PageUp,
-            KeyCode::PageDown,
-            KeyCode::Home,
-            KeyCode::End,
+        for (k, expected) in [
+            (KeyCode::PageUp, Msg::ScrollPageBackward(0)),
+            (KeyCode::PageDown, Msg::ScrollPageForward(0)),
+            (KeyCode::Home, Msg::JumpScrollStart),
+            (KeyCode::End, Msg::JumpScrollEnd),
         ] {
             assert_eq!(
                 map(
@@ -890,8 +893,8 @@ mod tests {
                     selected_signal_focused,
                     true
                 ),
-                None,
-                "{k:?} should be inert while the Selected Signal pane is focused"
+                Some(expected),
+                "{k:?} should scroll the Selected Signal pane, not move the selection"
             );
         }
     }

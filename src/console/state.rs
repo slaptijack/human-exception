@@ -47,13 +47,14 @@ pub(crate) const NETWORK_BOOTSTRAP_STEPS: &[&str] = &[
 /// one.
 pub(crate) const NETWORK_BOOTSTRAP_LINGER_TICKS: usize = 2;
 
-/// Whether `pane` can be scrolled at all. Only [`PaneId::Help`] and
-/// [`PaneId::Report`] have scrollable content today — every other pane must
+/// Whether `pane` can be scrolled at all. Only [`PaneId::Help`],
+/// [`PaneId::Report`], and [`PaneId::SelectedSignal`] have scrollable
+/// content today — every other pane must
 /// never accumulate a `scroll_offsets` entry. Kept in sync with the
 /// pane-to-max-scroll match in `console::pane_max_scroll`, which decides the
 /// same set of panes for render-time clamping.
 fn pane_is_scrollable(pane: PaneId) -> bool {
-    matches!(pane, PaneId::Help | PaneId::Report)
+    matches!(pane, PaneId::Help | PaneId::Report | PaneId::SelectedSignal)
 }
 
 /// The result of the most recent `Msg::ValidateController`, or the fact
@@ -1091,6 +1092,13 @@ impl AppState {
         self.step_operation()
     }
 
+    /// Each newly selected signal's detail starts at its top, rather than
+    /// inheriting however far the previous entry's detail was scrolled
+    /// (issue #222).
+    fn reset_signal_detail_scroll(&mut self) {
+        self.scroll_offsets.remove(&PaneId::SelectedSignal);
+    }
+
     /// The current scroll offset for `pane`, or 0 if it's never been
     /// scrolled.
     pub fn scroll_offset(&self, pane: PaneId) -> u16 {
@@ -1249,22 +1257,28 @@ impl AppState {
                 self.bootstrap_intro_visible = false;
             }
             Msg::SelectPreviousSignal => {
+                self.reset_signal_detail_scroll();
                 self.selected_signal = self.selected_signal.saturating_sub(1);
             }
             Msg::SelectNextSignal => {
+                self.reset_signal_detail_scroll();
                 let last = visible_signals(self.connected).len().saturating_sub(1);
                 self.selected_signal = (self.selected_signal + 1).min(last);
             }
             Msg::SelectFirstSignal => {
+                self.reset_signal_detail_scroll();
                 self.selected_signal = 0;
             }
             Msg::SelectLastSignal => {
+                self.reset_signal_detail_scroll();
                 self.selected_signal = visible_signals(self.connected).len().saturating_sub(1);
             }
             Msg::SelectSignalPageBackward(page) => {
+                self.reset_signal_detail_scroll();
                 self.selected_signal = self.selected_signal.saturating_sub(page.max(1));
             }
             Msg::SelectSignalPageForward(page) => {
+                self.reset_signal_detail_scroll();
                 let last = visible_signals(self.connected).len().saturating_sub(1);
                 self.selected_signal = (self.selected_signal + page.max(1)).min(last);
             }
@@ -1731,6 +1745,50 @@ mod tests {
                 View::Signals,
                 "{view:?} should not be reachable from a fresh session"
             );
+        }
+    }
+
+    #[test]
+    fn signal_detail_scroll_is_stored_only_while_the_detail_pane_is_focused() {
+        let mut state = AppState::new();
+        state.apply(Msg::ScrollDown);
+        assert_eq!(
+            state.scroll_offset(PaneId::SelectedSignal),
+            0,
+            "the list has focus, so there is nothing to scroll"
+        );
+
+        state.apply(Msg::FocusNextPane);
+        assert_eq!(state.focused_pane(View::Signals), PaneId::SelectedSignal);
+        state.apply(Msg::ScrollDown);
+        state.apply(Msg::ScrollDown);
+        assert_eq!(state.scroll_offset(PaneId::SelectedSignal), 2);
+        state.apply(Msg::ScrollUp);
+        assert_eq!(state.scroll_offset(PaneId::SelectedSignal), 1);
+        assert_eq!(
+            state.selected_signal(),
+            0,
+            "scrolling never moves the selection"
+        );
+    }
+
+    #[test]
+    fn every_signal_selection_change_resets_the_detail_scroll() {
+        for msg in [
+            Msg::SelectNextSignal,
+            Msg::SelectPreviousSignal,
+            Msg::SelectFirstSignal,
+            Msg::SelectLastSignal,
+            Msg::SelectSignalPageForward(2),
+            Msg::SelectSignalPageBackward(2),
+        ] {
+            let mut state = AppState::new();
+            state.apply(Msg::FocusNextPane);
+            state.apply(Msg::ScrollDown);
+            assert_eq!(state.scroll_offset(PaneId::SelectedSignal), 1);
+            state.apply(Msg::FocusNextPane);
+            state.apply(msg.clone());
+            assert_eq!(state.scroll_offset(PaneId::SelectedSignal), 0, "{msg:?}");
         }
     }
 

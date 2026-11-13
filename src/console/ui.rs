@@ -1534,7 +1534,7 @@ fn draw_pane_with_pinned_action(
 }
 
 fn draw_signals(frame: &mut Frame, area: Rect, state: &AppState) {
-    let signal = visible_signals(state.presentation_connected())[state.selected_signal()];
+    let signal = selected_signal(state);
     let focused = state.focused_pane(View::Signals);
 
     let [left, right] =
@@ -1557,35 +1557,126 @@ fn draw_signals(frame: &mut Frame, area: Rect, state: &AppState) {
         signal,
         focused == PaneId::SelectedSignal,
         state.presentation_connected(),
+        state.scroll_offset(PaneId::SelectedSignal),
     );
+}
+
+/// The pinned local action an actionable entry's detail pane always shows
+/// on its last row.
+const SIGNAL_DETAIL_ACTION: &str = "Enter  inspect opportunity";
+
+/// How the detail pane's inner area divides at a given inner size: rows
+/// for the fixed header ([`signal_detail_header_lines`]), then rows for
+/// the scrollable body ([`signal_detail_body_lines`]), with one more row
+/// reserved below for [`SIGNAL_DETAIL_ACTION`] when the entry is
+/// actionable. Shared by [`draw_signal_detail_pane`] and the dispatch-time
+/// helpers ([`signal_detail_max_scroll`], [`scroll_pane_visible_rows`]) so
+/// rendering and scroll clamping/paging can never disagree (issue #222).
+fn signal_detail_layout(signal: &Signal, width: u16, height: u16) -> (u16, u16, u16) {
+    let header_rows =
+        (wrapped_row_count(&signal_detail_header_lines(signal), width) as u16).min(height);
+    let action_rows = u16::from(signal.is_actionable()).min(height - header_rows);
+    let body_rows = height - header_rows - action_rows;
+    (header_rows, body_rows, action_rows)
+}
+
+/// How far `signal`'s detail body can scroll at this inner size before it
+/// would scroll past its last wrapped row. `0` whenever the body fits, or
+/// when there is no rendered geometry at all.
+fn signal_detail_max_scroll_for(signal: &Signal, width: u16, height: u16) -> u16 {
+    if width == 0 || height == 0 {
+        // No rendered geometry (an undersized terminal): nothing to scroll.
+        return 0;
+    }
+    let (_, body_rows, _) = signal_detail_layout(signal, width, height);
+    let content_rows = wrapped_row_count(&signal_detail_body_lines(signal), width);
+    content_rows.saturating_sub(body_rows as usize) as u16
+}
+
+/// The detail pane's inner (content) size at this frame size, matching the
+/// exact geometry [`draw_signals`] renders with — the same role
+/// [`signals_list_inner_dimensions`] plays for the list.
+fn signal_detail_inner_dimensions(frame_width: u16, frame_height: u16) -> (u16, u16) {
+    if frame_width < MIN_COLUMNS || frame_height < MIN_ROWS {
+        return (0, 0);
+    }
+    const HEADER_AND_FOOTER_HEIGHT: u16 = 6; // draw()'s two Length(3) rows
+    const BORDER_INSET: u16 = 2; // the detail pane's own Block::borders(ALL)
+    let body_height = frame_height.saturating_sub(HEADER_AND_FOOTER_HEIGHT);
+    let [_, right] = Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .areas(Rect::new(0, 0, frame_width, body_height));
+    (
+        right.width.saturating_sub(BORDER_INSET),
+        body_height.saturating_sub(BORDER_INSET),
+    )
+}
+
+/// The currently selected signal's detail-pane max scroll at this frame
+/// size, for `console::pane_max_scroll`.
+pub(crate) fn signal_detail_max_scroll(
+    state: &AppState,
+    frame_width: u16,
+    frame_height: u16,
+) -> u16 {
+    let (width, height) = signal_detail_inner_dimensions(frame_width, frame_height);
+    signal_detail_max_scroll_for(selected_signal(state), width, height)
+}
+
+fn selected_signal(state: &AppState) -> &'static Signal {
+    visible_signals(state.presentation_connected())[state.selected_signal()]
 }
 
 /// The detail pane's title follows the front door's own naming split
 /// (`docs/TUI_DESIGN.md`, "1. Signals"): `SELECTED ENTRY` for the bootstrap
 /// `LOCAL LOG`, `SELECTED SIGNAL` once connected to `SIGNALS`.
+///
+/// Only the body scrolls (issue #222). The header — origin, time and
+/// confidence, and the opportunity `STATUS` — stays fixed above it, and an
+/// actionable entry's [`SIGNAL_DETAIL_ACTION`] stays pinned below it, so no
+/// amount of authored content or scrolling can hide either.
 fn draw_signal_detail_pane(
     frame: &mut Frame,
     area: Rect,
     signal: &Signal,
     focused: bool,
     connected: bool,
+    scroll: u16,
 ) {
     let base_title = if connected {
         "SELECTED SIGNAL"
     } else {
         "SELECTED ENTRY"
     };
-    let title = pane_title(base_title, focused);
-    if signal.is_actionable() {
-        draw_pane_with_pinned_action(
-            frame,
-            area,
-            title,
-            signal_detail_lines(signal),
-            "Enter  inspect opportunity",
-        );
-    } else {
-        draw_pane(frame, area, title, signal_detail_lines(signal));
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(pane_title(base_title, focused));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let (header_rows, body_rows, action_rows) =
+        signal_detail_layout(signal, inner.width, inner.height);
+    let [header_area, body_area, action_area] = Layout::vertical([
+        Constraint::Length(header_rows),
+        Constraint::Length(body_rows),
+        Constraint::Length(action_rows),
+    ])
+    .areas(inner);
+    frame.render_widget(
+        Paragraph::new(signal_detail_header_lines(signal)).wrap(Wrap { trim: false }),
+        header_area,
+    );
+    // As in `draw_after_action_report_pane`: the event loop already clamps
+    // the stored offset via `signal_detail_max_scroll`; this is a
+    // render-time backstop against the exact rendered area.
+    let max_scroll = signal_detail_max_scroll_for(signal, inner.width, inner.height);
+    frame.render_widget(
+        Paragraph::new(signal_detail_body_lines(signal))
+            .wrap(Wrap { trim: false })
+            .scroll((scroll.min(max_scroll), 0)),
+        body_area,
+    );
+    if action_rows > 0 {
+        frame.render_widget(Paragraph::new(SIGNAL_DETAIL_ACTION), action_area);
     }
 }
 
@@ -1718,22 +1809,27 @@ fn signal_status(signal: &Signal) -> &'static str {
     }
 }
 
-/// Content for the selected-entry detail pane: everything the list row
-/// does not already show — confidence, provenance, the full message, and
-/// any authored context or unresolved questions (`docs/TUI_DESIGN.md`,
-/// "1. Signals"). Excludes the pinned action row, which
-/// [`draw_signal_detail_pane`] renders separately for actionable entries.
-fn signal_detail_lines(signal: &Signal) -> Vec<Line<'static>> {
+/// The detail pane's fixed header: origin, time and confidence, and the
+/// opportunity status. Rendered above the scrollable body so it never
+/// scrolls away (issue #222).
+fn signal_detail_header_lines(signal: &Signal) -> Vec<Line<'static>> {
     let bold = Style::default().add_modifier(Modifier::BOLD);
-    let mut lines = vec![
+    vec![
         Line::from(Span::styled(signal_origin(signal), bold)),
         Line::from(format!(
             "{}   confidence: {}",
             signal.time, signal.confidence
         )),
         Line::from(Span::styled(signal_status(signal), bold)),
-    ];
+    ]
+}
 
+/// The detail pane's scrollable body: everything the list row does not
+/// already show — provenance, the full message, and any authored context
+/// or unresolved questions (`docs/TUI_DESIGN.md`, "1. Signals").
+fn signal_detail_body_lines(signal: &Signal) -> Vec<Line<'static>> {
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let mut lines = Vec::new();
     let mut section = |heading: &'static str, items: Vec<String>| {
         if items.is_empty() {
             return;
@@ -1893,6 +1989,10 @@ pub(crate) fn scroll_pane_visible_rows(
                 .map(|op| u16::from(!after_action_succeeded(&op)))
                 .unwrap_or(0);
             content_height.saturating_sub(pinned_action_row) as usize
+        }
+        PaneId::SelectedSignal => {
+            let (width, height) = signal_detail_inner_dimensions(frame_width, frame_height);
+            signal_detail_layout(selected_signal(state), width, height).1 as usize
         }
         _ => 0,
     }
@@ -2594,8 +2694,8 @@ fn view_specific_help(state: &AppState, view: View) -> Vec<Line<'static>> {
             Line::from("Home/End     jump to the first/last signal"),
             Line::from("Enter        open Target (only signals marked [OPEN] respond)"),
             Line::from("o            same as Enter"),
-            Line::from("Its detail shows alongside the list automatically;"),
-            Line::from("F8 moves focus there"),
+            Line::from("Its detail shows alongside; F8 moves focus there,"),
+            Line::from("where Up/Down/PageUp/PageDown/Home/End scroll it"),
         ],
         View::Target => vec![
             Line::from("Enter  work this opportunity"),
@@ -3336,37 +3436,131 @@ mod tests {
         assert!(buffer_contains(&terminal, "inspect opportunity"));
     }
 
-    /// The detail pane's inner (content) size at this frame size, using the
-    /// same header/footer and 60/40 split [`draw_signals`] renders with.
-    fn signal_detail_inner_dimensions(frame_width: u16, frame_height: u16) -> (u16, u16) {
-        let body_height = frame_height - 6;
-        let [_, right] =
-            Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
-                .areas(Rect::new(0, 0, frame_width, body_height));
-        (right.width - 2, body_height - 2)
+    /// A synthetic actionable entry long enough to overflow the detail pane
+    /// at minimum geometry, since no authored entry does today.
+    const LONG_SIGNAL: Signal = Signal {
+        time: "09:00",
+        source: "test source",
+        category: super::super::intel::SignalCategory::MachineIntercept,
+        subject: "long subject",
+        preview: "long preview",
+        body: "FIRST-MESSAGE-ROW",
+        confidence: "LOW",
+        provenance: &["test provenance"],
+        context: &[],
+        unresolved: &[
+            "q01",
+            "q02",
+            "q03",
+            "q04",
+            "q05",
+            "q06",
+            "q07",
+            "q08",
+            "q09",
+            "q10",
+            "q11",
+            "q12",
+            "q13",
+            "q14",
+            "q15",
+            "q16",
+            "q17",
+            "q18",
+            "q19",
+            "q20",
+            "q21",
+            "q22",
+            "q23",
+            "q24",
+            "q25",
+            "q26",
+            "q27",
+            "q28",
+            "q29",
+            "LAST-UNRESOLVED-ROW",
+        ],
+        opportunity: Some(WorkingSet::FirstContact),
+        local_available: true,
+    };
+
+    /// Renders only the detail pane, at the size it gets inside a
+    /// minimum-geometry frame.
+    fn render_detail(signal: &Signal, scroll: u16) -> Terminal<TestBackend> {
+        let (width, height) = signal_detail_inner_dimensions(MIN_COLUMNS, MIN_ROWS);
+        let mut terminal = Terminal::new(TestBackend::new(width + 2, height + 2))
+            .expect("test backend should initialize");
+        terminal
+            .draw(|frame| draw_signal_detail_pane(frame, frame.area(), signal, true, false, scroll))
+            .expect("draw should succeed");
+        terminal
     }
 
     #[test]
-    fn every_visible_signal_detail_fits_the_pane_at_minimum_geometry() {
+    fn long_signal_detail_scrolls_its_body_but_keeps_status_and_action_fixed() {
+        let (width, height) = signal_detail_inner_dimensions(MIN_COLUMNS, MIN_ROWS);
+        let max = signal_detail_max_scroll_for(&LONG_SIGNAL, width, height);
+        assert!(max > 0, "the synthetic entry must overflow");
+
+        let top = render_detail(&LONG_SIGNAL, 0);
+        assert!(buffer_contains(&top, "FIRST-MESSAGE-ROW"));
+        assert!(!buffer_contains(&top, "LAST-UNRESOLVED-ROW"));
+
+        let bottom = render_detail(&LONG_SIGNAL, max);
+        assert!(!buffer_contains(&bottom, "FIRST-MESSAGE-ROW"));
+        assert!(buffer_contains(&bottom, "LAST-UNRESOLVED-ROW"));
+
+        for terminal in [&top, &bottom] {
+            assert!(buffer_contains(terminal, "STATUS  OPEN // FIRST CONTACT"));
+            assert!(buffer_contains(terminal, "confidence: LOW"));
+            assert!(buffer_contains(terminal, SIGNAL_DETAIL_ACTION));
+        }
+    }
+
+    #[test]
+    fn signal_detail_render_clamps_an_out_of_range_scroll_offset() {
+        let (width, height) = signal_detail_inner_dimensions(MIN_COLUMNS, MIN_ROWS);
+        let max = signal_detail_max_scroll_for(&LONG_SIGNAL, width, height);
+        let past_end = render_detail(&LONG_SIGNAL, max + 50);
+        assert!(buffer_contains(&past_end, "LAST-UNRESOLVED-ROW"));
+    }
+
+    #[test]
+    fn authored_signal_details_need_no_scrolling_at_minimum_geometry() {
+        // Not a limit on future content (issue #222 lifted that); it pins
+        // down why the dispatch-level "content fits" tests see an inert
+        // pane with today's authored entries.
         let (width, height) = signal_detail_inner_dimensions(MIN_COLUMNS, MIN_ROWS);
         for connected in [false, true] {
             for signal in visible_signals(connected) {
-                let pinned_rows = usize::from(signal.is_actionable());
-                let rows = wrapped_row_count(&signal_detail_lines(signal), width);
-                assert!(
-                    rows + pinned_rows <= height as usize,
-                    "{} (connected: {connected}) needs {rows}+{pinned_rows} rows; pane has {height}",
-                    signal.source
-                );
+                assert_eq!(signal_detail_max_scroll_for(signal, width, height), 0);
             }
         }
     }
 
     #[test]
+    fn signal_detail_page_size_is_the_visible_body_height() {
+        let state = AppState::new();
+        let (width, height) = signal_detail_inner_dimensions(MIN_COLUMNS, MIN_ROWS);
+        let (header, body, action) = signal_detail_layout(selected_signal(&state), width, height);
+        assert_eq!(header + body + action, height);
+        assert_eq!(
+            scroll_pane_visible_rows(PaneId::SelectedSignal, &state, MIN_COLUMNS, MIN_ROWS),
+            usize::from(body)
+        );
+        assert_eq!(
+            signal_detail_max_scroll(&state, 100, 30),
+            0,
+            "undersized frame"
+        );
+    }
+
+    #[test]
     fn signal_detail_adds_provenance_confidence_and_status_beyond_the_list_row() {
         for signal in authored_signals() {
-            let text: Vec<String> = signal_detail_lines(signal)
+            let text: Vec<String> = signal_detail_header_lines(signal)
                 .iter()
+                .chain(&signal_detail_body_lines(signal))
                 .map(|line| line.to_string())
                 .collect();
             assert!(text.iter().any(|line| line == "SOURCE"));
@@ -3602,6 +3796,11 @@ mod tests {
 
         assert!(!buffer_contains(&terminal, "follows automatically"));
         assert!(buffer_contains(&terminal, "F8 moves focus there"));
+        // Issue #222: the detail pane's scroll vocabulary is advertised.
+        assert!(buffer_contains(
+            &terminal,
+            "where Up/Down/PageUp/PageDown/Home/End scroll it"
+        ));
     }
 
     #[test]

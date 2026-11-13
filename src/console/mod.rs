@@ -716,6 +716,11 @@ fn pane_max_scroll(
             frame_width,
             frame_height,
         )),
+        PaneId::SelectedSignal => Some(ui::signal_detail_max_scroll(
+            state,
+            frame_width,
+            frame_height,
+        )),
         _ => None,
     }
 }
@@ -959,6 +964,41 @@ mod tests {
         state.apply(Msg::Activate); // Target -> Controller, seeds the working set
         state.set_connected(true);
         state
+    }
+
+    #[test]
+    fn signal_detail_scroll_keys_are_inert_while_authored_content_fits() {
+        // Issue #222: F8 into the detail pane. Every authored entry fits at
+        // 120x40, so the scroll vocabulary is accepted but clamps to 0, and
+        // the list selection never moves.
+        let (state, terminal) = render(
+            ui::MIN_COLUMNS,
+            ui::MIN_ROWS,
+            &[
+                press(KeyCode::F(8)),
+                press(KeyCode::Down),
+                press(KeyCode::PageDown),
+                press(KeyCode::End),
+                press(KeyCode::Char('j')),
+            ],
+        );
+        assert_eq!(state.focused_pane(View::Signals), PaneId::SelectedSignal);
+        assert_eq!(state.scroll_offset(PaneId::SelectedSignal), 0);
+        assert_eq!(state.selected_signal(), 0);
+        assert!(buffer_contains(&terminal, "STATUS  OPEN // FIRST CONTACT"));
+
+        // F8 back to the list: j/Down select again, exactly as before.
+        let (state, _) = render(
+            ui::MIN_COLUMNS,
+            ui::MIN_ROWS,
+            &[
+                press(KeyCode::F(8)),
+                press(KeyCode::F(8)),
+                press(KeyCode::Char('j')),
+            ],
+        );
+        assert_eq!(state.focused_pane(View::Signals), PaneId::SignalsList);
+        assert_eq!(state.selected_signal(), 1);
     }
 
     fn render(width: u16, height: u16, events: &[Event]) -> (AppState, Terminal<TestBackend>) {
