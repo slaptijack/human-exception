@@ -47,9 +47,10 @@ pub(crate) enum NavIntent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NavSurface {
     SignalsList,
-    /// A read-only scroll surface. Help and After Action's Report pane
-    /// share identical semantics today (`Up`/`Down` scroll by one row), so
-    /// one variant serves both rather than a helper apiece.
+    /// A read-only scroll surface. Help, After Action's Report pane, and
+    /// the Signals detail pane share identical semantics (`Up`/`Down`
+    /// scroll by one row), so one variant serves all three rather than a
+    /// helper apiece.
     Scroll,
     ReviewRun,
 }
@@ -61,6 +62,7 @@ pub(crate) enum NavSurface {
 pub(crate) fn focused_nav_surface(view: View, focused_pane: PaneId) -> Option<NavSurface> {
     match (view, focused_pane) {
         (View::Signals, PaneId::SignalsList) => Some(NavSurface::SignalsList),
+        (View::Signals, PaneId::SelectedSignal) => Some(NavSurface::Scroll),
         (View::Help, _) => Some(NavSurface::Scroll),
         (View::AfterAction, PaneId::Report) => Some(NavSurface::Scroll),
         (View::Operation, PaneId::OperationTelemetry) => Some(NavSurface::ReviewRun),
@@ -99,7 +101,8 @@ pub(crate) fn alias_intent_for_key(surface: NavSurface, code: KeyCode) -> Option
 
 /// Interprets `intent` for `surface`, returning the existing [`Msg`] that
 /// surface already used for that action. Signals, the read-only scroll
-/// surfaces (Help, After Action's Report pane), and Review Run's chronology
+/// surfaces (Help, After Action's Report pane, the Signals detail pane),
+/// and Review Run's chronology
 /// all support the full vocabulary.
 pub(crate) fn route(surface: NavSurface, intent: NavIntent) -> Option<Msg> {
     match (surface, intent) {
@@ -167,8 +170,14 @@ mod tests {
             focused_nav_surface(View::Signals, PaneId::SignalsList),
             Some(NavSurface::SignalsList)
         );
+        // The detail pane is a read-only scroll surface (issue #222), so the
+        // list's selection vocabulary and `j`/`k` aliases never reach it.
         assert_eq!(
             focused_nav_surface(View::Signals, PaneId::SelectedSignal),
+            Some(NavSurface::Scroll)
+        );
+        assert_eq!(
+            alias_intent_for_key(NavSurface::Scroll, KeyCode::Char('j')),
             None
         );
     }
