@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::document::ControllerDocument;
 use super::editor::EditOp;
-use super::intel::visible_signals;
+use super::intel::{Signal, visible_signals};
 use crate::lua_controller::{self, ControllerError, LiveOperation, TickRecord};
 
 /// An upper bound on how far any scrollable pane can scroll. This exists
@@ -603,11 +603,15 @@ pub struct AppState {
     /// Index into [`visible_signals`], moved by `SelectPreviousSignal` /
     /// `SelectNextSignal`.
     selected_signal: usize,
-    /// Ids ([`super::intel::Signal::id`]) of every Signals entry the player
-    /// has selected this session. Deliberately in-memory only — never
-    /// persisted by `profile.rs` — and keyed by stable id rather than
-    /// `selected_signal`'s index, so an entry inspected in LOCAL LOG stays
-    /// inspected after connecting (issue #216).
+    /// Ids ([`super::intel::Signal::id`]) of every Signals entry that has
+    /// been presented as the selected entry and then stopped being the one
+    /// on screen. The entry presented right now is not necessarily in here
+    /// yet: [`AppState::signal_inspected`] also counts
+    /// [`AppState::presented_signal`], and every post-draw mutation entry
+    /// point commits it first (issues #216, #227). Deliberately in-memory
+    /// only — never persisted by `profile.rs` — and keyed by stable id
+    /// rather than `selected_signal`'s index, so an entry inspected in LOCAL
+    /// LOG stays inspected after connecting.
     inspected_signals: HashSet<&'static str>,
     /// True once the player has inspected the actionable signal, making
     /// Target reachable even before a working set is committed.
@@ -825,6 +829,7 @@ impl AppState {
     /// [`network_bootstrap_steps_shown`]: AppState::network_bootstrap_steps_shown
     /// [`network_bootstrap_progress`]: AppState::network_bootstrap_progress
     pub fn advance_network_bootstrap(&mut self) -> bool {
+        self.commit_presented_signal();
         if !self.network_bootstrap_auto_advancing() {
             return false;
         }
@@ -1093,28 +1098,58 @@ impl AppState {
     ///
     /// [`operation_auto_advancing`]: AppState::operation_auto_advancing
     pub fn advance_running_operation(&mut self) -> bool {
+        self.commit_presented_signal();
         if !self.operation_auto_advancing() {
             return false;
         }
         self.step_operation()
     }
 
-    /// Records the currently selected signal as inspected. Every Signals
-    /// selection change calls this both before and after moving, so the
-    /// entry being left (including the one selected at startup) and the
-    /// one being landed on are both recorded (issue #216).
-    fn note_selected_signal_inspected(&mut self) {
-        if let Some(signal) =
-            visible_signals(self.presentation_connected()).get(self.selected_signal)
+    /// The Signals entry whose detail is on screen as the selected entry
+    /// right now, or `None` while something else owns the frame. Mirrors
+    /// `ui::draw`'s precedence: the quit confirmation, the bootstrap
+    /// introduction, and Network Bootstrap all cover Signals (the dimmed
+    /// LOCAL LOG under the Network Bootstrap modal doesn't count), and any
+    /// other current view — Help included — doesn't show it at all.
+    /// Terminal geometry isn't modeled, the same as every other `AppState`
+    /// predicate: an undersized terminal still counts its selected entry
+    /// (issue #227).
+    fn presented_signal(&self) -> Option<&'static Signal> {
+        if self.quit_confirmation_pending
+            || self.bootstrap_intro_visible
+            || self.network_bootstrap_pending
+            || self.current_view != View::Signals
         {
+            return None;
+        }
+        visible_signals(self.presentation_connected())
+            .get(self.selected_signal)
+            .copied()
+    }
+
+    /// Records the currently presented entry, if any, as inspected. Called
+    /// first by every mutation entry point that runs after a draw
+    /// ([`AppState::apply`], [`AppState::advance_network_bootstrap`],
+    /// [`AppState::advance_running_operation`]), so whatever was on screen
+    /// stays inspected once the mutation moves the selection, switches
+    /// lists, or covers it. Deliberately not called by the pre-draw seeding
+    /// setters (`set_connected`, `set_bootstrap_intro_visible`): nothing has
+    /// been presented yet when they run.
+    fn commit_presented_signal(&mut self) {
+        if let Some(signal) = self.presented_signal() {
             self.inspected_signals.insert(signal.id);
         }
     }
 
-    /// Whether the Signals entry with this id has been selected at some
-    /// point this session.
+    /// Whether the Signals entry with this id has been presented as the
+    /// selected entry at some point this session — including right now, so
+    /// the entry selected automatically when Signals first appears counts
+    /// before any input (issues #216, #227).
     pub fn signal_inspected(&self, id: &str) -> bool {
         self.inspected_signals.contains(id)
+            || self
+                .presented_signal()
+                .is_some_and(|signal| signal.id == id)
     }
 
     /// Each newly selected signal's detail starts at its top, rather than
@@ -1248,6 +1283,7 @@ impl AppState {
 
     /// Applies a single player intent, transitioning session state.
     pub fn apply(&mut self, msg: Msg) {
+        self.commit_presented_signal();
         match msg {
             Msg::Navigate(view) => {
                 if self.view_available(view) {
@@ -1283,41 +1319,29 @@ impl AppState {
             }
             Msg::SelectPreviousSignal => {
                 self.reset_signal_detail_scroll();
-                self.note_selected_signal_inspected();
                 self.selected_signal = self.selected_signal.saturating_sub(1);
-                self.note_selected_signal_inspected();
             }
             Msg::SelectNextSignal => {
                 self.reset_signal_detail_scroll();
-                self.note_selected_signal_inspected();
                 let last = visible_signals(self.connected).len().saturating_sub(1);
                 self.selected_signal = (self.selected_signal + 1).min(last);
-                self.note_selected_signal_inspected();
             }
             Msg::SelectFirstSignal => {
                 self.reset_signal_detail_scroll();
-                self.note_selected_signal_inspected();
                 self.selected_signal = 0;
-                self.note_selected_signal_inspected();
             }
             Msg::SelectLastSignal => {
                 self.reset_signal_detail_scroll();
-                self.note_selected_signal_inspected();
                 self.selected_signal = visible_signals(self.connected).len().saturating_sub(1);
-                self.note_selected_signal_inspected();
             }
             Msg::SelectSignalPageBackward(page) => {
                 self.reset_signal_detail_scroll();
-                self.note_selected_signal_inspected();
                 self.selected_signal = self.selected_signal.saturating_sub(page.max(1));
-                self.note_selected_signal_inspected();
             }
             Msg::SelectSignalPageForward(page) => {
                 self.reset_signal_detail_scroll();
-                self.note_selected_signal_inspected();
                 let last = visible_signals(self.connected).len().saturating_sub(1);
                 self.selected_signal = (self.selected_signal + page.max(1)).min(last);
-                self.note_selected_signal_inspected();
             }
             Msg::Activate => self.activate(),
             Msg::FocusNextPane => self.focus_next_pane(),
@@ -1786,11 +1810,65 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_session_has_inspected_nothing() {
+    fn a_fresh_session_counts_its_presented_entry_inspected() {
         let state = AppState::new();
+        let presented = visible_signals(false)[0];
+        assert_eq!(state.selected_signal(), 0);
+        assert!(
+            state.signal_inspected(presented.id),
+            "the automatically selected entry is presented before any input"
+        );
         for signal in super::super::intel::authored_signals() {
-            assert!(!state.signal_inspected(signal.id), "{}", signal.id);
+            if signal.id != presented.id {
+                assert!(!state.signal_inspected(signal.id), "{}", signal.id);
+            }
         }
+    }
+
+    #[test]
+    fn the_bootstrap_intro_defers_inspecting_the_startup_entry() {
+        let mut state = AppState::new();
+        state.set_bootstrap_intro_visible(true);
+        assert!(
+            super::super::intel::authored_signals()
+                .iter()
+                .all(|s| !state.signal_inspected(s.id)),
+            "the intro replaces the whole frame, so nothing is presented under it"
+        );
+
+        state.apply(Msg::AcknowledgeBootstrapIntro);
+        let local = visible_signals(false);
+        assert!(state.signal_inspected(local[0].id));
+        assert!(local[1..].iter().all(|s| !state.signal_inspected(s.id)));
+    }
+
+    #[test]
+    fn nothing_is_presented_under_help_or_the_quit_confirmation() {
+        let mut state = AppState::new();
+        assert!(state.presented_signal().is_some());
+
+        state.apply(Msg::OpenHelp);
+        assert_eq!(state.presented_signal(), None, "Help");
+        state.apply(Msg::DismissHelp);
+        assert!(state.presented_signal().is_some());
+
+        state.quit_confirmation_pending = true;
+        assert_eq!(state.presented_signal(), None, "quit confirmation");
+        state.quit_confirmation_pending = false;
+
+        state.apply(Msg::Activate);
+        assert_eq!(state.current_view(), View::Target);
+        assert_eq!(state.presented_signal(), None, "another view");
+    }
+
+    #[test]
+    fn leaving_signals_keeps_the_presented_entry_inspected() {
+        let mut state = AppState::new();
+        state.apply(Msg::SelectNextSignal);
+        let left_on_screen = visible_signals(false)[1];
+        state.apply(Msg::OpenHelp);
+        assert_eq!(state.presented_signal(), None);
+        assert!(state.signal_inspected(left_on_screen.id));
     }
 
     #[test]
@@ -1836,8 +1914,19 @@ mod tests {
         state.apply(Msg::SelectLastSignal);
         let bootstrap_entry = visible_signals(false)[visible_signals(false).len() - 1];
         assert!(state.signal_inspected(bootstrap_entry.id));
+        // Back to the actionable entry and through the real First Contact
+        // connect path, not a seeding shortcut.
+        state.apply(Msg::SelectFirstSignal);
+        state.apply(Msg::Activate);
+        state.apply(Msg::Activate);
+        state.controller = Some(ControllerDocument::new(ROUTE_TO_UPLINK));
+        state.apply(Msg::RequestDeploy);
+        for _ in 0..8 {
+            state.advance_running_operation();
+        }
+        while state.advance_network_bootstrap() {}
+        assert!(state.presentation_connected());
 
-        state.set_connected(true);
         assert!(
             visible_signals(true)
                 .iter()
@@ -1845,17 +1934,46 @@ mod tests {
             "the entry must still be visible once connected for this test to mean anything"
         );
         assert!(state.signal_inspected(bootstrap_entry.id));
-        assert!(
-            visible_signals(true)
-                .iter()
-                .filter(|s| !s.local_available)
-                .all(|s| !state.signal_inspected(s.id)),
-            "operator traffic never seen in LOCAL LOG starts uninspected"
-        );
     }
 
     #[test]
-    fn inspected_state_only_grows_from_signals_selection() {
+    fn network_bootstrap_reveal_inspects_only_the_entry_shown_at_the_retained_index() {
+        let mut state = connected_and_pending_network_bootstrap();
+        let index = state.selected_signal();
+        let local_under_modal = visible_signals(false)[index];
+        let revealed = visible_signals(true)[index];
+        assert_ne!(
+            local_under_modal.id, revealed.id,
+            "the retained index must name a different entry once connected for this \
+             test to mean anything"
+        );
+
+        while state.network_bootstrap_pending() {
+            assert!(
+                !state.signal_inspected(revealed.id),
+                "not presented until the modal closes"
+            );
+            state.advance_network_bootstrap();
+        }
+        assert!(
+            state.signal_inspected(revealed.id),
+            "presented by the reveal"
+        );
+
+        // Before any further input the reveal is query-time only; the next
+        // mutation commits it.
+        state.apply(Msg::SelectNextSignal);
+        assert!(state.signal_inspected(revealed.id));
+        let landed = visible_signals(true)[state.selected_signal()];
+        for signal in visible_signals(true) {
+            if signal.id != revealed.id && signal.id != landed.id && !signal.local_available {
+                assert!(!state.signal_inspected(signal.id), "{}", signal.id);
+            }
+        }
+    }
+
+    #[test]
+    fn inspected_state_only_grows_from_presented_signals() {
         let mut state = AppState::new();
         for msg in [
             Msg::FocusNextPane,
@@ -1867,9 +1985,12 @@ mod tests {
         ] {
             state.apply(msg);
         }
+        let presented = visible_signals(false)[0];
+        assert!(state.signal_inspected(presented.id));
         assert!(
             super::super::intel::authored_signals()
                 .iter()
+                .filter(|s| s.id != presented.id)
                 .all(|s| !state.signal_inspected(s.id))
         );
     }
