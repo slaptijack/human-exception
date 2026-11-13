@@ -33,8 +33,9 @@ impl SignalCategory {
 
 /// One item in the resistance-network intelligence stream.
 ///
-/// `headline` is what the list row shows; everything else is what the
-/// selected-entry detail pane adds on top of it (`docs/TUI_DESIGN.md`,
+/// `time`, `source`, `category`, `subject`, and `preview` are what the
+/// list row shows; everything else is what the selected-entry detail pane
+/// adds on top of it (`docs/TUI_DESIGN.md`,
 /// "1. Signals"). Every field is hand-authored fiction, hedged to what the
 /// console could plausibly know at its connectivity level, never an
 /// authoritative world fact.
@@ -43,9 +44,13 @@ pub struct Signal {
     pub time: &'static str,
     pub source: &'static str,
     pub category: SignalCategory,
-    pub headline: &'static str,
+    /// A short, distinct subject line for the list row.
+    pub subject: &'static str,
+    /// A one-line summary shown under the subject in the list row, cut to
+    /// fit the pane where space is short.
+    pub preview: &'static str,
     /// The full message, intercepted fragment, or telemetry. Deliberately
-    /// does not open by repeating `headline`, so selecting a row is worth
+    /// does not open by repeating `subject` or `preview`, so selecting a row is worth
     /// doing.
     pub body: &'static str,
     /// How far this entry should be trusted: `HIGH`, `MED`, `LOW`, or
@@ -85,7 +90,8 @@ pub fn authored_signals() -> &'static [Signal] {
             time: "11:42",
             source: "fabricator node 31B",
             category: SignalCategory::MachineIntercept,
-            headline: "Fabricator node 31B resumed local control after mesh loss.",
+            subject: "Fabricator node 31B fell back to local control",
+            preview: "Auth state inconsistent; a maintenance channel is still answering.",
             body: "AUTH/RETRY x14 \u{2014} no mesh ack. FALLBACK: local. \
                    Maintenance channel 2 still answering a stale controller key.",
             confidence: "HIGH",
@@ -108,7 +114,8 @@ pub fn authored_signals() -> &'static [Signal] {
             time: "11:35",
             source: "rook@pacific",
             category: SignalCategory::SharedIntel,
-            headline: "\"Lost my relay before I could trace the uplink.\"",
+            subject: "rook lost a relay mid-trace",
+            preview: "\"Dumping what I saw in case somebody is closer.\"",
             body: "\"Relay went dark mid-trace. Dumping what I saw in case somebody is \
                    closer. Timing looked like a scheduled sweep, not a fault.\"",
             confidence: "MED",
@@ -128,7 +135,8 @@ pub fn authored_signals() -> &'static [Signal] {
             time: "11:18",
             source: "CELL/MARE-4",
             category: SignalCategory::Request,
-            headline: "Looking for anyone who can identify convoy routing changes near old I-5.",
+            subject: "Convoy routing changed near old I-5",
+            preview: "Asking anyone with eyes on the corridor to share telemetry.",
             body: "\"Convoys stopped using the usual corridor three days ago. No clean \
                    telemetry yet. Anyone with eyes on old I-5, share what you have.\"",
             confidence: "LOW",
@@ -142,7 +150,8 @@ pub fn authored_signals() -> &'static [Signal] {
             time: "11:05",
             source: "BOOTSTRAP LOG",
             category: SignalCategory::BootstrapLog,
-            headline: "console-core 0.3.1 signed by slaptijack@, install verified.",
+            subject: "console-core 0.3.1 install verified",
+            preview: "Signed by slaptijack@; bootstrap software provenance only.",
             body: "verify: signature OK. manifest OK. 0 modified files. \
                    Bootstrap software provenance only \u{2014} no resistance-network traffic.",
             confidence: "HIGH",
@@ -156,7 +165,8 @@ pub fn authored_signals() -> &'static [Signal] {
             time: "10:57",
             source: "PASSIVE SENSOR",
             category: SignalCategory::Anomaly,
-            headline: "Burst traffic from an offline municipal control cluster.",
+            subject: "Offline municipal cluster sent burst traffic",
+            preview: "Three short bursts on a long-dead band; source unconfirmed.",
             body: "3 bursts, 40-90 ms each, on a band the cluster has not used since \
                    the grid went down. Payload encrypted.",
             confidence: "UNVERIFIED",
@@ -339,21 +349,37 @@ mod tests {
     }
 
     #[test]
-    fn signal_detail_body_does_not_repeat_the_list_headline() {
+    fn signal_detail_body_does_not_repeat_the_list_row() {
         for signal in authored_signals() {
+            for list_text in [signal.subject, signal.preview] {
+                assert!(
+                    !signal.body.starts_with(list_text),
+                    "{}: the detail body must expand on the list row, not repeat it",
+                    signal.source
+                );
+            }
+            assert_ne!(signal.subject, signal.preview, "{}", signal.source);
+        }
+    }
+
+    #[test]
+    fn signal_subjects_are_distinct() {
+        let signals = authored_signals();
+        for (index, signal) in signals.iter().enumerate() {
             assert!(
-                !signal.body.starts_with(signal.headline),
-                "{}: the detail body must expand on the headline, not repeat it",
-                signal.source
+                signals[index + 1..]
+                    .iter()
+                    .all(|other| other.subject != signal.subject),
+                "duplicate subject {:?}",
+                signal.subject
             );
-            assert_ne!(signal.body, signal.headline);
         }
     }
 
     #[test]
     fn signals_never_mention_the_hidden_uplink_coordinates() {
         for signal in authored_signals() {
-            let mut haystack = vec![signal.headline, signal.body];
+            let mut haystack = vec![signal.subject, signal.preview, signal.body];
             haystack.extend(signal.provenance);
             haystack.extend(signal.context);
             haystack.extend(signal.unresolved);

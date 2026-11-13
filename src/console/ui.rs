@@ -1541,6 +1541,7 @@ fn draw_signals(frame: &mut Frame, area: Rect, state: &AppState) {
         Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(area);
     let frame_size = frame.area();
     let visible_items = signals_list_visible_items(frame_size.width, frame_size.height);
+    let (list_width, _) = signals_list_inner_dimensions(frame_size.width, frame_size.height);
     draw_pane(
         frame,
         left,
@@ -1548,7 +1549,7 @@ fn draw_signals(frame: &mut Frame, area: Rect, state: &AppState) {
             front_door_label(state.presentation_connected()),
             focused == PaneId::SignalsList,
         ),
-        signal_list_lines(state, visible_items),
+        signal_list_lines(state, visible_items, usize::from(list_width)),
     );
     draw_signal_detail_pane(
         frame,
@@ -1593,8 +1594,66 @@ fn signal_origin(signal: &Signal) -> String {
 }
 
 /// The fixed number of rendered rows [`signal_list_lines`] gives each
-/// signal: header, headline, blank separator.
-const SIGNAL_ROWS_PER_ITEM: usize = 3;
+/// signal: header, subject, preview, blank separator.
+const SIGNAL_ROWS_PER_ITEM: usize = 4;
+
+/// The list's restrained actionability cue (`docs/TUI_DESIGN.md`,
+/// "1. Signals").
+const OPEN_MARKER: &str = "[OPEN]";
+
+/// The display width of the widest [`SignalCategory`] label, so every
+/// header's sender starts in the same column.
+const SIGNAL_CATEGORY_COLUMN: usize = 17;
+
+/// `text` cut to at most `width` display columns, ending in `…` whenever
+/// anything was cut. `width == 0` means "geometry unknown" and returns the
+/// text untouched, matching [`signal_list_lines`]'s unwindowed fallback.
+fn fit_to_width(text: &str, width: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+    if width == 0 || text.width() <= width {
+        return text.to_string();
+    }
+    let budget = width - 1; // room for the trailing `…`
+    let mut used = 0;
+    let mut fitted = String::new();
+    for c in text.chars() {
+        let w = c.width().unwrap_or(0);
+        if used + w > budget {
+            break;
+        }
+        used += w;
+        fitted.push(c);
+    }
+    fitted.push('…');
+    fitted
+}
+
+/// One list row's header: selection cursor, time, a fixed-width category
+/// column, and the sender, with [`OPEN_MARKER`] right-aligned for an
+/// actionable entry. The sender is what gets cut when space is short; the
+/// marker's room is reserved first so it can never be clipped.
+fn signal_list_header(signal: &Signal, selected: bool, width: usize) -> String {
+    use unicode_width::UnicodeWidthStr;
+
+    let cursor = if selected { "> " } else { "  " };
+    let left = format!(
+        "{cursor}{}  {:<SIGNAL_CATEGORY_COLUMN$}  {}",
+        signal.time,
+        signal.category.label(),
+        signal.source
+    );
+    if !signal.is_actionable() {
+        return fit_to_width(&left, width);
+    }
+    if width == 0 {
+        return format!("{left}  {OPEN_MARKER}");
+    }
+    const GAP: usize = 1;
+    let left = fit_to_width(&left, width.saturating_sub(OPEN_MARKER.len() + GAP).max(1));
+    let padding = width.saturating_sub(left.width() + OPEN_MARKER.len());
+    format!("{left}{}{OPEN_MARKER}", " ".repeat(padding.max(GAP)))
+}
 
 /// The Signals list: one entry per signal, windowed to `visible_items`
 /// around the selected signal ([`list_window_start`]) so the selection
@@ -1604,7 +1663,14 @@ const SIGNAL_ROWS_PER_ITEM: usize = 3;
 /// called outside render at frame size `(0, 0)`) falls back to rendering
 /// every signal unwindowed rather than nothing, since Signals has no
 /// separate fallback content the way Review Run does.
-fn signal_list_lines(state: &AppState, visible_items: usize) -> Vec<Line<'static>> {
+///
+/// Every row is cut to `width` ([`fit_to_width`]) so each signal occupies
+/// exactly [`SIGNAL_ROWS_PER_ITEM`] rendered rows however long its authored
+/// text is. Without that, a long line would wrap and push the windowing
+/// and PageUp/PageDown math ([`signals_list_visible_items`]) out of step
+/// with what is actually on screen. `width == 0` (geometry unknown) leaves
+/// rows uncut.
+fn signal_list_lines(state: &AppState, visible_items: usize, width: usize) -> Vec<Line<'static>> {
     let signals = visible_signals(state.presentation_connected());
     let (start, end) = if visible_items == 0 {
         (0, signals.len())
@@ -1615,27 +1681,24 @@ fn signal_list_lines(state: &AppState, visible_items: usize) -> Vec<Line<'static
 
     let mut lines = Vec::new();
     for (index, signal) in signals[start..end].iter().enumerate() {
-        let index = start + index;
-        let cursor = if index == state.selected_signal() {
-            "> "
-        } else {
-            "  "
-        };
-        let marker = if signal.is_actionable() {
-            "  [OPEN]"
-        } else {
-            ""
-        };
-        let header_style = if index == state.selected_signal() {
+        let selected = start + index == state.selected_signal();
+        let header_style = if selected {
             Style::default().add_modifier(Modifier::BOLD)
         } else {
             Style::default()
         };
         lines.push(Line::from(Span::styled(
-            format!("{cursor}{}  {}{marker}", signal.time, signal_origin(signal)),
+            signal_list_header(signal, selected, width),
             header_style,
         )));
-        lines.push(Line::from(format!("  {}", signal.headline)));
+        lines.push(Line::from(fit_to_width(
+            &format!("    {}", signal.subject),
+            width,
+        )));
+        lines.push(Line::from(fit_to_width(
+            &format!("    {}", signal.preview),
+            width,
+        )));
         lines.push(Line::from(""));
     }
     lines
@@ -2824,8 +2887,8 @@ mod tests {
 
     #[test]
     fn signals_list_visible_items_uses_real_geometry_not_a_hard_coded_count() {
-        assert_eq!(signals_list_visible_items(120, 40), 10);
-        assert_eq!(signals_list_visible_items(150, 50), 14);
+        assert_eq!(signals_list_visible_items(120, 40), 8);
+        assert_eq!(signals_list_visible_items(150, 50), 10);
         // Below the console's minimum terminal size, there is no rendered
         // geometry to page against.
         assert_eq!(signals_list_visible_items(100, 30), 0);
@@ -2840,7 +2903,7 @@ mod tests {
 
         // Only 2 signals fit on screen; the window must still contain the
         // selected (last) signal rather than always starting at the top.
-        let lines = signal_list_lines(&state, 2);
+        let lines = signal_list_lines(&state, 2, 70);
         let visible_items = visible_signals(false).len().min(2);
         assert_eq!(lines.len(), visible_items * SIGNAL_ROWS_PER_ITEM);
         assert!(
@@ -2860,11 +2923,113 @@ mod tests {
     #[test]
     fn signal_list_lines_renders_every_signal_when_geometry_is_unknown() {
         let state = AppState::new();
-        let lines = signal_list_lines(&state, 0);
+        let lines = signal_list_lines(&state, 0, 0);
         assert_eq!(
             lines.len(),
             visible_signals(false).len() * SIGNAL_ROWS_PER_ITEM
         );
+    }
+
+    #[test]
+    fn signal_category_column_fits_the_widest_label() {
+        use super::super::intel::SignalCategory;
+        let widest = [
+            SignalCategory::MachineIntercept,
+            SignalCategory::SharedIntel,
+            SignalCategory::Request,
+            SignalCategory::Anomaly,
+            SignalCategory::BootstrapLog,
+        ]
+        .iter()
+        .map(|category| category.label().len())
+        .max()
+        .unwrap();
+        assert_eq!(SIGNAL_CATEGORY_COLUMN, widest);
+    }
+
+    #[test]
+    fn fit_to_width_cuts_with_an_ellipsis_only_when_needed() {
+        assert_eq!(fit_to_width("short", 10), "short");
+        assert_eq!(fit_to_width("exactly10!", 10), "exactly10!");
+        assert_eq!(fit_to_width("eleven chars", 10), "eleven ch…");
+        assert_eq!(fit_to_width("geometry unknown", 0), "geometry unknown");
+    }
+
+    #[test]
+    fn signal_list_rows_show_time_category_sender_subject_and_preview() {
+        use super::super::state::Msg;
+
+        for connected in [false, true] {
+            let mut state = AppState::new();
+            state.set_connected(connected);
+            state.apply(Msg::SelectNextSignal);
+            let lines: Vec<String> = signal_list_lines(&state, 0, 0)
+                .iter()
+                .map(|line| line.to_string())
+                .collect();
+            for (index, signal) in visible_signals(connected).iter().enumerate() {
+                let row = &lines[index * SIGNAL_ROWS_PER_ITEM..][..SIGNAL_ROWS_PER_ITEM];
+                let cursor = if index == state.selected_signal() {
+                    "> "
+                } else {
+                    "  "
+                };
+                assert!(row[0].starts_with(&format!("{cursor}{}  ", signal.time)));
+                assert!(row[0].contains(signal.category.label()));
+                assert!(row[0].contains(signal.source));
+                assert_eq!(row[0].contains(OPEN_MARKER), signal.is_actionable());
+                assert_eq!(row[1], format!("    {}", signal.subject));
+                assert_eq!(row[2], format!("    {}", signal.preview));
+                assert_eq!(row[3], "");
+            }
+        }
+    }
+
+    #[test]
+    fn signal_list_rows_never_exceed_the_pane_width_or_clip_the_open_cue() {
+        use unicode_width::UnicodeWidthStr;
+
+        let state = AppState::new();
+        for width in [20, 30, 45, 70] {
+            let lines = signal_list_lines(&state, 0, width);
+            assert_eq!(
+                lines.len(),
+                visible_signals(false).len() * SIGNAL_ROWS_PER_ITEM
+            );
+            for line in &lines {
+                assert!(
+                    line.to_string().width() <= width,
+                    "{:?} is wider than {width}",
+                    line.to_string()
+                );
+            }
+            let first_header = lines[0].to_string();
+            assert!(
+                first_header.starts_with("> "),
+                "selection cue clipped at {width}"
+            );
+            assert!(
+                first_header.ends_with(OPEN_MARKER),
+                "[OPEN] clipped at {width}"
+            );
+        }
+    }
+
+    #[test]
+    fn connected_signal_list_fits_at_minimum_geometry_without_wrapping() {
+        // Before #215 the CELL/MARE-4 headline wrapped at 120x40, so a list
+        // item took more rows than SIGNAL_ROWS_PER_ITEM claimed.
+        let mut state = AppState::new();
+        state.set_connected(true);
+        let (width, _) = signals_list_inner_dimensions(MIN_COLUMNS, MIN_ROWS);
+        let lines = signal_list_lines(&state, 0, usize::from(width));
+        assert_eq!(wrapped_row_count(&lines, width), lines.len());
+
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+        assert!(!buffer_contains(&terminal, OPEN_MARKER));
+        for signal in visible_signals(true) {
+            assert!(buffer_contains(&terminal, signal.subject));
+        }
     }
 
     #[test]
@@ -3209,8 +3374,10 @@ mod tests {
             assert!(text.iter().any(|line| line.contains(signal.confidence)));
             assert!(text.iter().any(|line| line.starts_with("STATUS  ")));
             assert!(
-                !text.iter().any(|line| line == signal.headline),
-                "{}: the detail pane must not just repeat the list headline",
+                !text
+                    .iter()
+                    .any(|line| line == signal.subject || line == signal.preview),
+                "{}: the detail pane must not just repeat the list row",
                 signal.source
             );
         }
