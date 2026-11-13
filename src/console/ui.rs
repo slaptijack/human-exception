@@ -1641,22 +1641,54 @@ fn signal_list_lines(state: &AppState, visible_items: usize) -> Vec<Line<'static
     lines
 }
 
-fn signal_detail_lines(signal: &Signal) -> Vec<Line<'static>> {
-    let mut lines = vec![
-        Line::from(Span::styled(
-            signal_origin(signal),
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from(signal.body),
-    ];
-    if signal.is_actionable() {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "ACTIONABLE: FIRST CONTACT",
-            Style::default().add_modifier(Modifier::BOLD),
-        )));
+/// The selected entry's opportunity status, shown near the top of the
+/// detail pane so no amount of authored content below can push it
+/// off-screen. Derived from [`Signal::opportunity`] — the same rule
+/// ([`Signal::is_actionable`]) that decides the list's `[OPEN]` marker, the
+/// pinned `Enter  inspect opportunity` row, and whether `Enter`/`o` respond
+/// — so the four can never disagree. A non-actionable entry says so in
+/// words rather than showing a disabled or fake action.
+fn signal_status(signal: &Signal) -> &'static str {
+    match signal.opportunity {
+        Some(WorkingSet::FirstContact) => "STATUS  OPEN // FIRST CONTACT",
+        None => "STATUS  no open opportunity \u{2014} information only",
     }
+}
+
+/// Content for the selected-entry detail pane: everything the list row
+/// does not already show — confidence, provenance, the full message, and
+/// any authored context or unresolved questions (`docs/TUI_DESIGN.md`,
+/// "1. Signals"). Excludes the pinned action row, which
+/// [`draw_signal_detail_pane`] renders separately for actionable entries.
+fn signal_detail_lines(signal: &Signal) -> Vec<Line<'static>> {
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let mut lines = vec![
+        Line::from(Span::styled(signal_origin(signal), bold)),
+        Line::from(format!(
+            "{}   confidence: {}",
+            signal.time, signal.confidence
+        )),
+        Line::from(Span::styled(signal_status(signal), bold)),
+    ];
+
+    let mut section = |heading: &'static str, items: Vec<String>| {
+        if items.is_empty() {
+            return;
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(heading, bold)));
+        lines.extend(items.into_iter().map(Line::from));
+    };
+    let bullets = |items: &[&str]| {
+        items
+            .iter()
+            .map(|item| format!("\u{2022} {item}"))
+            .collect()
+    };
+    section("SOURCE", bullets(signal.provenance));
+    section("MESSAGE", vec![signal.body.to_string()]);
+    section("CONTEXT", bullets(signal.context));
+    section("UNRESOLVED", bullets(signal.unresolved));
     lines
 }
 
@@ -3137,6 +3169,86 @@ mod tests {
         let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
 
         assert!(buffer_contains(&terminal, "inspect opportunity"));
+    }
+
+    /// The detail pane's inner (content) size at this frame size, using the
+    /// same header/footer and 60/40 split [`draw_signals`] renders with.
+    fn signal_detail_inner_dimensions(frame_width: u16, frame_height: u16) -> (u16, u16) {
+        let body_height = frame_height - 6;
+        let [_, right] =
+            Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
+                .areas(Rect::new(0, 0, frame_width, body_height));
+        (right.width - 2, body_height - 2)
+    }
+
+    #[test]
+    fn every_visible_signal_detail_fits_the_pane_at_minimum_geometry() {
+        let (width, height) = signal_detail_inner_dimensions(MIN_COLUMNS, MIN_ROWS);
+        for connected in [false, true] {
+            for signal in visible_signals(connected) {
+                let pinned_rows = usize::from(signal.is_actionable());
+                let rows = wrapped_row_count(&signal_detail_lines(signal), width);
+                assert!(
+                    rows + pinned_rows <= height as usize,
+                    "{} (connected: {connected}) needs {rows}+{pinned_rows} rows; pane has {height}",
+                    signal.source
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn signal_detail_adds_provenance_confidence_and_status_beyond_the_list_row() {
+        for signal in authored_signals() {
+            let text: Vec<String> = signal_detail_lines(signal)
+                .iter()
+                .map(|line| line.to_string())
+                .collect();
+            assert!(text.iter().any(|line| line == "SOURCE"));
+            assert!(text.iter().any(|line| line == "MESSAGE"));
+            assert!(text.iter().any(|line| line.contains(signal.confidence)));
+            assert!(text.iter().any(|line| line.starts_with("STATUS  ")));
+            assert!(
+                !text.iter().any(|line| line == signal.headline),
+                "{}: the detail pane must not just repeat the list headline",
+                signal.source
+            );
+        }
+    }
+
+    #[test]
+    fn local_log_detail_marks_first_contact_open_and_others_informational() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+        assert!(buffer_contains(&terminal, "STATUS  OPEN // FIRST CONTACT"));
+        assert!(buffer_contains(&terminal, "Enter  inspect opportunity"));
+
+        state.apply(Msg::SelectNextSignal);
+        assert!(!visible_signals(false)[state.selected_signal()].is_actionable());
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+        assert!(buffer_contains(&terminal, "STATUS  no open opportunity"));
+        assert!(!buffer_contains(&terminal, "OPEN // FIRST CONTACT"));
+        assert!(
+            !buffer_contains(&terminal, "inspect opportunity"),
+            "a non-actionable entry must not show a fake action"
+        );
+    }
+
+    #[test]
+    fn connected_signals_detail_never_shows_an_open_status() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.set_connected(true);
+        for _ in 0..visible_signals(true).len() {
+            let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+            assert!(buffer_contains(&terminal, "STATUS  no open opportunity"));
+            assert!(!buffer_contains(&terminal, "OPEN // FIRST CONTACT"));
+            assert!(!buffer_contains(&terminal, "inspect opportunity"));
+            state.apply(Msg::SelectNextSignal);
+        }
     }
 
     #[test]
