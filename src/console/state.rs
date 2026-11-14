@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::document::ControllerDocument;
 use super::editor::EditOp;
-use super::intel::{Signal, SignalId, visible_signals};
+use super::intel::{Signal, SignalId, Thread, visible_threads};
 use crate::lua_controller::{self, ControllerError, LiveOperation, TickRecord};
 
 /// An upper bound on how far any scrollable pane can scroll. This exists
@@ -600,9 +600,17 @@ pub struct AppState {
     current_view: View,
     help_return_view: Option<View>,
     working_set: Option<WorkingSet>,
-    /// Index into [`visible_signals`], moved by `SelectPreviousSignal` /
-    /// `SelectNextSignal`.
-    selected_signal: usize,
+    /// Index into [`visible_threads`], moved by `SelectPreviousSignal` /
+    /// `SelectNextSignal`. The list selects threads; a single-report thread
+    /// is indistinguishable from a flat Signals entry (issue #235).
+    selected_thread: usize,
+    /// The report pinned as expanded in the selected thread, once it has
+    /// been presented. Set by [`AppState::commit_presented_signal`] and
+    /// cleared only when the selected thread actually changes, so F8, Help,
+    /// overlays and scrolling never re-pick it. `None`, or a pin that is not
+    /// a visible member of the selected thread (after the connect reveal),
+    /// falls back to the selection rule in [`AppState::expanded_report`].
+    expanded_report: Option<SignalId>,
     /// Ids ([`super::intel::Signal::id`]) of every Signals entry that has
     /// been presented as the selected entry and then stopped being the one
     /// on screen. The entry presented right now is not necessarily in here
@@ -610,7 +618,7 @@ pub struct AppState {
     /// [`AppState::presented_signal`], and every post-draw mutation entry
     /// point commits it first (issues #216, #227). Deliberately in-memory
     /// only — never persisted by `profile.rs` — and keyed by stable id
-    /// rather than `selected_signal`'s index, so an entry inspected in LOCAL
+    /// rather than `selected_thread`'s index, so an entry inspected in LOCAL
     /// LOG stays inspected after connecting.
     inspected_signals: HashSet<SignalId>,
     /// True once the player has inspected the actionable signal, making
@@ -720,7 +728,8 @@ impl Default for AppState {
             current_view: View::Signals,
             help_return_view: None,
             working_set: None,
-            selected_signal: 0,
+            selected_thread: 0,
+            expanded_report: None,
             inspected_signals: HashSet::new(),
             target_known: false,
             controller: None,
@@ -891,8 +900,8 @@ impl AppState {
         self.working_set
     }
 
-    pub fn selected_signal(&self) -> usize {
-        self.selected_signal
+    pub fn selected_thread(&self) -> usize {
+        self.selected_thread
     }
 
     pub fn controller_source(&self) -> Option<String> {
@@ -1122,9 +1131,60 @@ impl AppState {
         {
             return None;
         }
-        visible_signals(self.presentation_connected())
-            .get(self.selected_signal)
+        self.expanded_report()
+    }
+
+    /// The thread currently selected in the Signals list, at the
+    /// connectivity the list is presented with.
+    pub fn selected_thread_ref(&self) -> Option<&'static Thread> {
+        visible_threads(self.presentation_connected())
+            .get(self.selected_thread)
             .copied()
+    }
+
+    /// The one report expanded in the selected thread: the single rule the
+    /// detail pane, presentation/inspection, and activation all share. A
+    /// single-report thread always expands its only report. Otherwise this
+    /// is the pinned report ([`AppState::expanded_report`]'s field) if it
+    /// is still a visible member, else the oldest visible member not yet
+    /// inspected, else the newest (issue #233's selection rule). The
+    /// fallback reads only the *committed* inspected set, so presenting a
+    /// report never moves the expansion on its own: the next commit pins it.
+    pub fn expanded_report(&self) -> Option<&'static Signal> {
+        let reports = self
+            .selected_thread_ref()?
+            .visible_reports(self.presentation_connected());
+        if let Some(pinned) = self.expanded_report
+            && let Some(signal) = reports.iter().find(|signal| signal.id == pinned)
+        {
+            return Some(signal);
+        }
+        reports
+            .iter()
+            .find(|signal| !self.inspected_signals.contains(&signal.id))
+            .or(reports.last())
+            .copied()
+    }
+
+    /// Whether every visible report in `thread` has been inspected: the
+    /// list's `•` is shown while any one of them has not. Derived, never
+    /// stored, and never clears a report's own inspection history.
+    pub fn thread_inspected(&self, thread: &Thread) -> bool {
+        thread
+            .visible_reports(self.presentation_connected())
+            .iter()
+            .all(|signal| self.signal_inspected(signal.id))
+    }
+
+    /// Moves the Signals selection to `index`. Only an actual change of
+    /// thread clears the expanded-report pin, so an inert boundary key
+    /// (`k` on the first thread) can't re-pick the expanded report.
+    fn select_thread(&mut self, index: usize) {
+        self.reset_signal_detail_scroll();
+        if index != self.selected_thread {
+            self.selected_thread = index;
+            self.expanded_report = None;
+        }
     }
 
     /// Records the currently presented entry, if any, as inspected. Called
@@ -1138,6 +1198,7 @@ impl AppState {
     fn commit_presented_signal(&mut self) {
         if let Some(signal) = self.presented_signal() {
             self.inspected_signals.insert(signal.id);
+            self.expanded_report = Some(signal.id);
         }
     }
 
@@ -1318,30 +1379,22 @@ impl AppState {
                 self.bootstrap_intro_visible = false;
             }
             Msg::SelectPreviousSignal => {
-                self.reset_signal_detail_scroll();
-                self.selected_signal = self.selected_signal.saturating_sub(1);
+                self.select_thread(self.selected_thread.saturating_sub(1));
             }
             Msg::SelectNextSignal => {
-                self.reset_signal_detail_scroll();
-                let last = visible_signals(self.connected).len().saturating_sub(1);
-                self.selected_signal = (self.selected_signal + 1).min(last);
+                let last = visible_threads(self.connected).len().saturating_sub(1);
+                self.select_thread((self.selected_thread + 1).min(last));
             }
-            Msg::SelectFirstSignal => {
-                self.reset_signal_detail_scroll();
-                self.selected_signal = 0;
-            }
+            Msg::SelectFirstSignal => self.select_thread(0),
             Msg::SelectLastSignal => {
-                self.reset_signal_detail_scroll();
-                self.selected_signal = visible_signals(self.connected).len().saturating_sub(1);
+                self.select_thread(visible_threads(self.connected).len().saturating_sub(1));
             }
             Msg::SelectSignalPageBackward(page) => {
-                self.reset_signal_detail_scroll();
-                self.selected_signal = self.selected_signal.saturating_sub(page.max(1));
+                self.select_thread(self.selected_thread.saturating_sub(page.max(1)));
             }
             Msg::SelectSignalPageForward(page) => {
-                self.reset_signal_detail_scroll();
-                let last = visible_signals(self.connected).len().saturating_sub(1);
-                self.selected_signal = (self.selected_signal + page.max(1)).min(last);
+                let last = visible_threads(self.connected).len().saturating_sub(1);
+                self.select_thread((self.selected_thread + page.max(1)).min(last));
             }
             Msg::Activate => self.activate(),
             Msg::FocusNextPane => self.focus_next_pane(),
@@ -1753,10 +1806,12 @@ impl AppState {
     fn activate(&mut self) {
         match self.current_view {
             View::Signals => {
-                let selected = visible_signals(self.presentation_connected())
-                    .get(self.selected_signal)
-                    .copied();
-                if selected.is_some_and(|signal| signal.is_actionable()) {
+                // Only the expanded report's opportunity, never a
+                // thread-level action (issue #235).
+                if self
+                    .expanded_report()
+                    .is_some_and(|signal| signal.is_actionable())
+                {
                     self.target_known = true;
                     self.current_view = View::Target;
                 }
@@ -1777,6 +1832,19 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The LOCAL LOG's entries in list order. Every disconnected thread
+    /// holds exactly one report, so each row is that report.
+    fn local_entries() -> Vec<&'static Signal> {
+        visible_threads(false)
+            .into_iter()
+            .map(|thread| {
+                let reports = thread.visible_reports(false);
+                assert_eq!(reports.len(), 1, "{:?}", thread.id);
+                reports[0]
+            })
+            .collect()
+    }
 
     #[test]
     fn starts_on_signals_with_no_working_set() {
@@ -1809,11 +1877,104 @@ mod tests {
         }
     }
 
+    /// The connected list's first thread, the authored three-report one,
+    /// with its member ids in receipt order.
+    fn connected_multi_report_thread() -> (AppState, [SignalId; 3]) {
+        let mut state = AppState::new();
+        state.set_connected(true);
+        let thread = visible_threads(true)[0];
+        let ids: Vec<SignalId> = thread.visible_reports(true).iter().map(|s| s.id).collect();
+        let ids: [SignalId; 3] = ids
+            .try_into()
+            .expect("the first connected thread holds three");
+        (state, ids)
+    }
+
+    fn expanded_id(state: &AppState) -> SignalId {
+        state.expanded_report().expect("Signals has a selection").id
+    }
+
+    #[test]
+    fn selecting_a_multi_report_thread_presents_only_its_oldest_report() {
+        let (state, [oldest, middle, newest]) = connected_multi_report_thread();
+        assert_eq!(state.selected_thread(), 0);
+        assert_eq!(expanded_id(&state), oldest);
+        assert!(state.signal_inspected(oldest));
+        assert!(
+            !state.signal_inspected(middle),
+            "a headline is not presentation"
+        );
+        assert!(
+            !state.signal_inspected(newest),
+            "a headline is not presentation"
+        );
+        assert!(!state.thread_inspected(visible_threads(true)[0]));
+    }
+
+    #[test]
+    fn the_expanded_report_stays_pinned_while_the_thread_stays_selected() {
+        let (mut state, [oldest, ..]) = connected_multi_report_thread();
+        for msg in [
+            Msg::FocusNextPane,
+            Msg::ScrollDown,
+            Msg::OpenHelp,
+            Msg::DismissHelp,
+            Msg::FocusNextPane,
+            Msg::SelectPreviousSignal, // inert: already the first thread
+            Msg::SelectFirstSignal,    // inert: already the first thread
+            Msg::SelectSignalPageBackward(3),
+            Msg::Navigate(View::Signals),
+        ] {
+            state.apply(msg.clone());
+            assert_eq!(state.selected_thread(), 0, "{msg:?}");
+            assert_eq!(expanded_id(&state), oldest, "{msg:?} must not re-pick");
+        }
+    }
+
+    #[test]
+    fn returning_to_a_thread_expands_its_oldest_uninspected_report_then_its_newest() {
+        let (mut state, [oldest, middle, newest]) = connected_multi_report_thread();
+        let thread = visible_threads(true)[0];
+        for expected in [middle, newest, newest] {
+            state.apply(Msg::SelectNextSignal);
+            state.apply(Msg::SelectPreviousSignal);
+            assert_eq!(expanded_id(&state), expected);
+        }
+        // Moving on never cleared any report's own inspection.
+        for id in [oldest, middle, newest] {
+            assert!(state.signal_inspected(id), "{id:?}");
+        }
+        assert!(state.thread_inspected(thread));
+    }
+
+    #[test]
+    fn the_thread_marker_derives_from_every_visible_member() {
+        let (mut state, _) = connected_multi_report_thread();
+        let thread = visible_threads(true)[0];
+        for _ in 0..2 {
+            assert!(!state.thread_inspected(thread));
+            state.apply(Msg::SelectNextSignal);
+            state.apply(Msg::SelectPreviousSignal);
+        }
+        assert!(state.thread_inspected(thread));
+    }
+
+    #[test]
+    fn nothing_in_a_multi_report_thread_is_presented_under_help() {
+        let (mut state, [oldest, middle, newest]) = connected_multi_report_thread();
+        state.apply(Msg::OpenHelp);
+        state.apply(Msg::SelectNextSignal);
+        assert_eq!(state.presented_signal(), None);
+        assert!(state.signal_inspected(oldest), "shown before Help opened");
+        assert!(!state.signal_inspected(middle));
+        assert!(!state.signal_inspected(newest));
+    }
+
     #[test]
     fn a_fresh_session_counts_its_presented_entry_inspected() {
         let state = AppState::new();
-        let presented = visible_signals(false)[0];
-        assert_eq!(state.selected_signal(), 0);
+        let presented = local_entries()[0];
+        assert_eq!(state.selected_thread(), 0);
         assert!(
             state.signal_inspected(presented.id),
             "the automatically selected entry is presented before any input"
@@ -1837,7 +1998,7 @@ mod tests {
         );
 
         state.apply(Msg::AcknowledgeBootstrapIntro);
-        let local = visible_signals(false);
+        let local = local_entries();
         assert!(state.signal_inspected(local[0].id));
         assert!(local[1..].iter().all(|s| !state.signal_inspected(s.id)));
     }
@@ -1865,7 +2026,7 @@ mod tests {
     fn leaving_signals_keeps_the_presented_entry_inspected() {
         let mut state = AppState::new();
         state.apply(Msg::SelectNextSignal);
-        let left_on_screen = visible_signals(false)[1];
+        let left_on_screen = local_entries()[1];
         state.apply(Msg::OpenHelp);
         assert_eq!(state.presented_signal(), None);
         assert!(state.signal_inspected(left_on_screen.id));
@@ -1874,7 +2035,7 @@ mod tests {
     #[test]
     fn moving_the_selection_marks_both_the_left_and_landed_entries_inspected() {
         let mut state = AppState::new();
-        let local = visible_signals(false);
+        let local = local_entries();
         state.apply(Msg::SelectNextSignal);
         assert!(state.signal_inspected(local[0].id), "startup selection");
         assert!(state.signal_inspected(local[1].id));
@@ -1883,7 +2044,7 @@ mod tests {
 
     #[test]
     fn every_signal_selection_message_marks_its_target_inspected() {
-        let local = visible_signals(false);
+        let local = local_entries();
         let last = local.len() - 1;
         for (msg, target) in [
             (Msg::SelectLastSignal, last),
@@ -1902,7 +2063,7 @@ mod tests {
         ] {
             state.apply(msg.clone());
             assert!(
-                state.signal_inspected(local[state.selected_signal()].id),
+                state.signal_inspected(local[state.selected_thread()].id),
                 "{msg:?}"
             );
         }
@@ -1912,7 +2073,7 @@ mod tests {
     fn inspected_entries_stay_inspected_after_connecting() {
         let mut state = AppState::new();
         state.apply(Msg::SelectLastSignal);
-        let bootstrap_entry = visible_signals(false)[visible_signals(false).len() - 1];
+        let bootstrap_entry = local_entries()[local_entries().len() - 1];
         assert!(state.signal_inspected(bootstrap_entry.id));
         // Back to the actionable entry and through the real First Contact
         // connect path, not a seeding shortcut.
@@ -1928,9 +2089,9 @@ mod tests {
         assert!(state.presentation_connected());
 
         assert!(
-            visible_signals(true)
+            visible_threads(true)
                 .iter()
-                .any(|s| s.id == bootstrap_entry.id),
+                .any(|thread| thread.signals.contains(&bootstrap_entry.id)),
             "the entry must still be visible once connected for this test to mean anything"
         );
         assert!(state.signal_inspected(bootstrap_entry.id));
@@ -1939,9 +2100,11 @@ mod tests {
     #[test]
     fn network_bootstrap_reveal_inspects_only_the_entry_shown_at_the_retained_index() {
         let mut state = connected_and_pending_network_bootstrap();
-        let index = state.selected_signal();
-        let local_under_modal = visible_signals(false)[index];
-        let revealed = visible_signals(true)[index];
+        let index = state.selected_thread();
+        let local_under_modal = local_entries()[index];
+        // Nothing connected-only has been inspected, so the revealed thread
+        // expands its oldest report.
+        let revealed = visible_threads(true)[index].visible_reports(true)[0];
         assert_ne!(
             local_under_modal.id, revealed.id,
             "the retained index must name a different entry once connected for this \
@@ -1964,8 +2127,8 @@ mod tests {
         // mutation commits it.
         state.apply(Msg::SelectNextSignal);
         assert!(state.signal_inspected(revealed.id));
-        let landed = visible_signals(true)[state.selected_signal()];
-        for signal in visible_signals(true) {
+        let landed = state.expanded_report().unwrap();
+        for signal in super::super::intel::authored_signals() {
             if signal.id != revealed.id && signal.id != landed.id && !signal.local_available {
                 assert!(!state.signal_inspected(signal.id), "{:?}", signal.id);
             }
@@ -1985,7 +2148,7 @@ mod tests {
         ] {
             state.apply(msg);
         }
-        let presented = visible_signals(false)[0];
+        let presented = local_entries()[0];
         assert!(state.signal_inspected(presented.id));
         assert!(
             super::super::intel::authored_signals()
@@ -2013,7 +2176,7 @@ mod tests {
         state.apply(Msg::ScrollUp);
         assert_eq!(state.scroll_offset(PaneId::SelectedSignal), 1);
         assert_eq!(
-            state.selected_signal(),
+            state.selected_thread(),
             0,
             "scrolling never moves the selection"
         );
@@ -2182,46 +2345,46 @@ mod tests {
         let mut state = AppState::new();
 
         state.apply(Msg::SelectPreviousSignal);
-        assert_eq!(state.selected_signal(), 0);
+        assert_eq!(state.selected_thread(), 0);
 
-        for _ in 0..visible_signals(false).len() + 2 {
+        for _ in 0..local_entries().len() + 2 {
             state.apply(Msg::SelectNextSignal);
         }
-        assert_eq!(state.selected_signal(), visible_signals(false).len() - 1);
+        assert_eq!(state.selected_thread(), local_entries().len() - 1);
     }
 
     #[test]
     fn home_and_end_jump_signal_selection_to_the_first_and_last_signal() {
         let mut state = AppState::new();
-        let last = visible_signals(false).len() - 1;
+        let last = local_entries().len() - 1;
 
         state.apply(Msg::SelectLastSignal);
-        assert_eq!(state.selected_signal(), last);
+        assert_eq!(state.selected_thread(), last);
 
         state.apply(Msg::SelectFirstSignal);
-        assert_eq!(state.selected_signal(), 0);
+        assert_eq!(state.selected_thread(), 0);
 
         // Inert at the boundary they already sit at.
         state.apply(Msg::SelectFirstSignal);
-        assert_eq!(state.selected_signal(), 0);
+        assert_eq!(state.selected_thread(), 0);
     }
 
     #[test]
     fn signal_page_movement_clamps_at_the_ends_without_wrapping() {
         let mut state = AppState::new();
-        let last = visible_signals(false).len() - 1;
+        let last = local_entries().len() - 1;
 
         state.apply(Msg::SelectSignalPageForward(2));
-        assert_eq!(state.selected_signal(), 2.min(last));
+        assert_eq!(state.selected_thread(), 2.min(last));
 
         state.apply(Msg::SelectSignalPageForward(last + 10));
-        assert_eq!(state.selected_signal(), last);
+        assert_eq!(state.selected_thread(), last);
 
         state.apply(Msg::SelectSignalPageBackward(2));
-        assert_eq!(state.selected_signal(), last.saturating_sub(2));
+        assert_eq!(state.selected_thread(), last.saturating_sub(2));
 
         state.apply(Msg::SelectSignalPageBackward(last + 10));
-        assert_eq!(state.selected_signal(), 0);
+        assert_eq!(state.selected_thread(), 0);
     }
 
     #[test]
@@ -2229,38 +2392,35 @@ mod tests {
         let mut state = AppState::new();
 
         state.apply(Msg::SelectSignalPageForward(0));
-        assert_eq!(
-            state.selected_signal(),
-            1.min(visible_signals(false).len() - 1)
-        );
+        assert_eq!(state.selected_thread(), 1.min(local_entries().len() - 1));
 
         state.apply(Msg::SelectSignalPageBackward(0));
-        assert_eq!(state.selected_signal(), 0);
+        assert_eq!(state.selected_thread(), 0);
     }
 
     #[test]
     fn connected_signal_selection_clamps_against_the_full_authored_list() {
         let mut state = AppState::new();
         state.set_connected(true);
-        let last = visible_signals(true).len() - 1;
+        let last = visible_threads(true).len() - 1;
         assert!(
-            last > visible_signals(false).len() - 1,
+            last > visible_threads(false).len() - 1,
             "the connected list must show more entries than the disconnected one, even \
              though it swaps out the withdrawn First Contact entry rather than strictly \
              extending it"
         );
 
         state.apply(Msg::SelectLastSignal);
-        assert_eq!(state.selected_signal(), last);
+        assert_eq!(state.selected_thread(), last);
 
         state.apply(Msg::SelectFirstSignal);
-        assert_eq!(state.selected_signal(), 0);
+        assert_eq!(state.selected_thread(), 0);
     }
 
     #[test]
     fn activating_the_actionable_signal_marks_target_known_and_opens_it() {
         let mut state = AppState::new();
-        let actionable = visible_signals(false)
+        let actionable = local_entries()
             .iter()
             .position(|signal| signal.is_actionable())
             .expect("exactly one signal is actionable");
@@ -2277,7 +2437,7 @@ mod tests {
     #[test]
     fn activating_a_non_actionable_signal_is_a_no_op() {
         let mut state = AppState::new();
-        let non_actionable = visible_signals(false)
+        let non_actionable = local_entries()
             .iter()
             .position(|signal| !signal.is_actionable())
             .expect("at least one signal is non-actionable");

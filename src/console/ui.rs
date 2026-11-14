@@ -4,7 +4,7 @@
 //! operation so it can be exercised against `ratatui`'s `TestBackend`
 //! without a real terminal.
 
-use super::intel::{Signal, TargetDossier, first_contact_dossier, visible_signals};
+use super::intel::{Signal, TargetDossier, first_contact_dossier, visible_threads};
 use super::state::{
     AppState, ConclusionKind, OperationConclusion, OperationSnapshot, OperationView, PaneId,
     ReviewPoint, ReviewPointKind, RunInspectorMode, Validation, View, WorkingSet,
@@ -369,7 +369,7 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
             let signals = format!(
                 "{}: {:02}",
                 front_door_label(state.presentation_connected()),
-                visible_signals(state.presentation_connected()).len()
+                visible_threads(state.presentation_connected()).len()
             );
             let mut candidates = Vec::new();
             // A controller's status — `starter`/`modified`/`invalid`, plus
@@ -1532,7 +1532,7 @@ fn draw_pane_with_pinned_action(
 }
 
 fn draw_signals(frame: &mut Frame, area: Rect, state: &AppState) {
-    let signal = selected_signal(state);
+    let detail = selected_signal_detail(state);
     let focused = state.focused_pane(View::Signals);
 
     let [left, right] =
@@ -1552,7 +1552,7 @@ fn draw_signals(frame: &mut Frame, area: Rect, state: &AppState) {
     draw_signal_detail_pane(
         frame,
         right,
-        signal,
+        &detail,
         focused == PaneId::SelectedSignal,
         state.presentation_connected(),
         state.scroll_offset(PaneId::SelectedSignal),
@@ -1563,31 +1563,100 @@ fn draw_signals(frame: &mut Frame, area: Rect, state: &AppState) {
 /// on its last row.
 const SIGNAL_DETAIL_ACTION: &str = "Enter  inspect opportunity";
 
-/// How the detail pane's inner area divides at a given inner size: rows
-/// for the fixed header ([`signal_detail_header_lines`]), then rows for
-/// the scrollable body ([`signal_detail_body_lines`]), with one more row
-/// reserved below for [`SIGNAL_DETAIL_ACTION`] when the entry is
-/// actionable. Shared by [`draw_signal_detail_pane`] and the dispatch-time
-/// helpers ([`signal_detail_max_scroll`], [`scroll_pane_visible_rows`]) so
-/// rendering and scroll clamping/paging can never disagree (issue #222).
-fn signal_detail_layout(signal: &Signal, width: u16, height: u16) -> (u16, u16, u16) {
-    let header_rows =
-        (wrapped_row_count(&signal_detail_header_lines(signal), width) as u16).min(height);
-    let action_rows = u16::from(signal.is_actionable()).min(height - header_rows);
-    let body_rows = height - header_rows - action_rows;
-    (header_rows, body_rows, action_rows)
+/// What the detail pane shows for the selected thread: its subject, its
+/// visible reports in receipt order, which one of them is expanded, and
+/// whether each has been inspected (for the headline cue). Built from data
+/// rather than a [`super::intel::Thread`] so tests can render synthetic
+/// reports.
+struct SignalDetail<'a> {
+    subject: &'a str,
+    reports: Vec<&'a Signal>,
+    inspected: Vec<bool>,
+    expanded: usize,
 }
 
-/// How far `signal`'s detail body can scroll at this inner size before it
-/// would scroll past its last wrapped row. `0` whenever the body fits, or
-/// when there is no rendered geometry at all.
-fn signal_detail_max_scroll_for(signal: &Signal, width: u16, height: u16) -> u16 {
+impl<'a> SignalDetail<'a> {
+    /// A single-report thread, which renders exactly as a flat Signals
+    /// entry always has.
+    #[cfg(test)]
+    fn single(signal: &'a Signal) -> Self {
+        SignalDetail {
+            subject: signal.subject,
+            reports: vec![signal],
+            inspected: vec![true],
+            expanded: 0,
+        }
+    }
+
+    fn expanded_report(&self) -> &'a Signal {
+        self.reports[self.expanded]
+    }
+
+    /// Whether the headline stack is shown at all. A single-report thread
+    /// has no thread heading, no headlines, and no extra step.
+    fn is_multi_report(&self) -> bool {
+        self.reports.len() > 1
+    }
+}
+
+/// How many headlines the stack shows at once for `report_count` reports
+/// in a detail pane `height` rows tall: every headline when they fit,
+/// otherwise a window of a quarter of the pane (at least one), so the
+/// expanded report always keeps most of the pane. `0` for a single-report
+/// thread.
+fn signal_headline_window_rows(report_count: usize, height: u16) -> u16 {
+    if report_count <= 1 {
+        return 0;
+    }
+    let cap = (height / 4).max(1);
+    u16::try_from(report_count).unwrap_or(u16::MAX).min(cap)
+}
+
+/// Rows the headline stack takes above the expanded report: the thread
+/// subject, the headline window, and a blank separator. `0` for a
+/// single-report thread.
+fn signal_headline_stack_rows(report_count: usize, height: u16) -> u16 {
+    match signal_headline_window_rows(report_count, height) {
+        0 => 0,
+        headlines => (headlines + 2).min(height),
+    }
+}
+
+/// How the detail pane's inner area divides at a given inner size: rows
+/// for the headline stack ([`signal_headline_stack_lines`], multi-report
+/// threads only), then the expanded report's fixed header
+/// ([`signal_detail_header_lines`]), then its scrollable body
+/// ([`signal_detail_body_lines`]), with one more row reserved below for
+/// [`SIGNAL_DETAIL_ACTION`] when the expanded report is actionable. Shared
+/// by [`draw_signal_detail_pane`] and the dispatch-time helpers
+/// ([`signal_detail_max_scroll`], [`scroll_pane_visible_rows`]) so
+/// rendering and scroll clamping/paging can never disagree (issues #222,
+/// #235).
+fn signal_detail_layout(
+    detail: &SignalDetail<'_>,
+    width: u16,
+    height: u16,
+) -> (u16, u16, u16, u16) {
+    let stack_rows = signal_headline_stack_rows(detail.reports.len(), height);
+    let rest = height - stack_rows;
+    let header_rows =
+        (wrapped_row_count(&signal_detail_header_lines(detail), width) as u16).min(rest);
+    let action_rows = u16::from(detail.expanded_report().is_actionable()).min(rest - header_rows);
+    let body_rows = rest - header_rows - action_rows;
+    (stack_rows, header_rows, body_rows, action_rows)
+}
+
+/// How far the expanded report's detail body can scroll at this inner size
+/// before it would scroll past its last wrapped row. `0` whenever the body
+/// fits, or when there is no rendered geometry at all.
+fn signal_detail_max_scroll_for(detail: &SignalDetail<'_>, width: u16, height: u16) -> u16 {
     if width == 0 || height == 0 {
         // No rendered geometry (an undersized terminal): nothing to scroll.
         return 0;
     }
-    let (_, body_rows, _) = signal_detail_layout(signal, width, height);
-    let content_rows = wrapped_row_count(&signal_detail_body_lines(signal), width);
+    let (_, _, body_rows, _) = signal_detail_layout(detail, width, height);
+    let content_rows =
+        wrapped_row_count(&signal_detail_body_lines(detail.expanded_report()), width);
     content_rows.saturating_sub(body_rows as usize) as u16
 }
 
@@ -1617,11 +1686,29 @@ pub(crate) fn signal_detail_max_scroll(
     frame_height: u16,
 ) -> u16 {
     let (width, height) = signal_detail_inner_dimensions(frame_width, frame_height);
-    signal_detail_max_scroll_for(selected_signal(state), width, height)
+    signal_detail_max_scroll_for(&selected_signal_detail(state), width, height)
 }
 
-fn selected_signal(state: &AppState) -> &'static Signal {
-    visible_signals(state.presentation_connected())[state.selected_signal()]
+/// The selected thread's detail, with the report [`AppState::expanded_report`]
+/// chose expanded.
+fn selected_signal_detail(state: &AppState) -> SignalDetail<'static> {
+    let thread = state
+        .selected_thread_ref()
+        .expect("the Signals selection always names a visible thread");
+    let reports = thread.visible_reports(state.presentation_connected());
+    let expanded = state
+        .expanded_report()
+        .and_then(|signal| reports.iter().position(|report| report.id == signal.id))
+        .expect("the expanded report is a visible member of the selected thread");
+    SignalDetail {
+        subject: thread.subject(),
+        inspected: reports
+            .iter()
+            .map(|signal| state.signal_inspected(signal.id))
+            .collect(),
+        reports,
+        expanded,
+    }
 }
 
 /// The detail pane's title follows the front door's own naming split
@@ -1633,10 +1720,15 @@ fn selected_signal(state: &AppState) -> &'static Signal {
 /// fixed above it, and an
 /// actionable entry's [`SIGNAL_DETAIL_ACTION`] stays pinned below it, so no
 /// amount of authored content or scrolling can hide either.
+///
+/// A multi-report thread adds its headline stack above the expanded report
+/// (issue #235); the stack is windowed on its own, so it never scrolls with
+/// or crowds out the expanded report. A single-report thread renders
+/// exactly as a flat entry did.
 fn draw_signal_detail_pane(
     frame: &mut Frame,
     area: Rect,
-    signal: &Signal,
+    detail: &SignalDetail<'_>,
     focused: bool,
     connected: bool,
     scroll: u16,
@@ -1652,24 +1744,35 @@ fn draw_signal_detail_pane(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let (header_rows, body_rows, action_rows) =
-        signal_detail_layout(signal, inner.width, inner.height);
-    let [header_area, body_area, action_area] = Layout::vertical([
+    let (stack_rows, header_rows, body_rows, action_rows) =
+        signal_detail_layout(detail, inner.width, inner.height);
+    let [stack_area, header_area, body_area, action_area] = Layout::vertical([
+        Constraint::Length(stack_rows),
         Constraint::Length(header_rows),
         Constraint::Length(body_rows),
         Constraint::Length(action_rows),
     ])
     .areas(inner);
+    if stack_rows > 0 {
+        frame.render_widget(
+            Paragraph::new(signal_headline_stack_lines(
+                detail,
+                usize::from(inner.width),
+                inner.height,
+            )),
+            stack_area,
+        );
+    }
     frame.render_widget(
-        Paragraph::new(signal_detail_header_lines(signal)).wrap(Wrap { trim: false }),
+        Paragraph::new(signal_detail_header_lines(detail)).wrap(Wrap { trim: false }),
         header_area,
     );
     // As in `draw_after_action_report_pane`: the event loop already clamps
     // the stored offset via `signal_detail_max_scroll`; this is a
     // render-time backstop against the exact rendered area.
-    let max_scroll = signal_detail_max_scroll_for(signal, inner.width, inner.height);
+    let max_scroll = signal_detail_max_scroll_for(detail, inner.width, inner.height);
     frame.render_widget(
-        Paragraph::new(signal_detail_body_lines(signal))
+        Paragraph::new(signal_detail_body_lines(detail.expanded_report()))
             .wrap(Wrap { trim: false })
             .scroll((scroll.min(max_scroll), 0)),
         body_area,
@@ -1774,29 +1877,41 @@ fn signal_list_header(signal: &Signal, selected: bool, inspected: bool, width: u
 /// and PageUp/PageDown math ([`signals_list_visible_items`]) out of step
 /// with what is actually on screen. `width == 0` (geometry unknown) leaves
 /// rows uncut.
+///
+/// Each row is one thread (issue #235). Its header and preview come from
+/// the thread's newest visible report and its subject line is the
+/// thread's authored subject, so a single-report thread's row is exactly
+/// that report's row. The `•` derives from whether any visible member is
+/// uninspected ([`AppState::thread_inspected`]), and `[OPEN]` follows the
+/// header report; no multi-report thread carries an opportunity.
 fn signal_list_lines(state: &AppState, visible_items: usize, width: usize) -> Vec<Line<'static>> {
-    let signals = visible_signals(state.presentation_connected());
+    let connected = state.presentation_connected();
+    let threads = visible_threads(connected);
     let (start, end) = if visible_items == 0 {
-        (0, signals.len())
+        (0, threads.len())
     } else {
-        let start = list_window_start(state.selected_signal(), signals.len(), visible_items);
-        (start, (start + visible_items).min(signals.len()))
+        let start = list_window_start(state.selected_thread(), threads.len(), visible_items);
+        (start, (start + visible_items).min(threads.len()))
     };
 
     let mut lines = Vec::new();
-    for (index, signal) in signals[start..end].iter().enumerate() {
-        let selected = start + index == state.selected_signal();
+    for (index, thread) in threads[start..end].iter().enumerate() {
+        let signal = *thread
+            .visible_reports(connected)
+            .last()
+            .expect("a visible thread has a visible report");
+        let selected = start + index == state.selected_thread();
         let header_style = if selected {
             Style::default().add_modifier(Modifier::BOLD)
         } else {
             Style::default()
         };
         lines.push(Line::from(Span::styled(
-            signal_list_header(signal, selected, state.signal_inspected(signal.id), width),
+            signal_list_header(signal, selected, state.thread_inspected(thread), width),
             header_style,
         )));
         lines.push(Line::from(fit_to_width(
-            &format!("    {}", signal.subject),
+            &format!("    {}", thread.subject()),
             width,
         )));
         lines.push(Line::from(fit_to_width(
@@ -1822,17 +1937,89 @@ fn signal_status(signal: &Signal) -> &'static str {
     }
 }
 
-/// The detail pane's fixed header: origin; time with the two independent
-/// assessments, source trust and claim confidence (issue #230); and the
-/// opportunity status. Rendered above the scrollable body so it never
-/// scrolls away (issue #222).
-fn signal_detail_header_lines(signal: &Signal) -> Vec<Line<'static>> {
+/// The expanded report's fixed header: origin; time with the two
+/// independent assessments, source trust and claim confidence (issue
+/// #230); and the opportunity status. Rendered above the scrollable body so
+/// it never scrolls away (issue #222). In a multi-report thread it opens
+/// with the report's own subject, since the list row shows only the
+/// thread's subject and headlines are cut to one row (issue #235), unless
+/// that subject is the thread's own.
+fn signal_detail_header_lines(detail: &SignalDetail<'_>) -> Vec<Line<'static>> {
     let bold = Style::default().add_modifier(Modifier::BOLD);
-    vec![
+    let signal = detail.expanded_report();
+    let mut lines = Vec::new();
+    // Skipped when it would only repeat the thread heading directly above
+    // it (the thread's first report).
+    if detail.is_multi_report() && signal.subject != detail.subject {
+        lines.push(Line::from(Span::styled(signal.subject.to_string(), bold)));
+    }
+    lines.extend([
         Line::from(Span::styled(signal_origin(signal), bold)),
         Line::from(signal_assessment_line(signal)),
         Line::from(Span::styled(signal_status(signal), bold)),
-    ]
+    ]);
+    lines
+}
+
+/// The headline's two-column leading slot, sharing one slot the way
+/// [`signal_list_lead`] does: `▸ ` for the expanded report, `• ` for a
+/// collapsed report not yet inspected this session, or blank. The expanded
+/// report is by definition being presented, so the cues never compete.
+fn signal_headline_lead(expanded: bool, inspected: bool) -> &'static str {
+    if expanded {
+        "\u{25B8} "
+    } else if !inspected {
+        "\u{2022} "
+    } else {
+        "  "
+    }
+}
+
+/// A multi-report thread's headline stack (issue #235): the thread subject,
+/// then one single-row headline per report in receipt order — lead slot,
+/// time, category label, subject — windowed ([`list_window_start`]) so the
+/// expanded report's headline is always visible, then a blank separator.
+/// The column after the time is the report's [`SignalCategory`] label,
+/// padded to the widest label in this thread; it is classification, not a
+/// lifecycle kind. A headline only says a report exists: it is never
+/// presentation, so showing it inspects nothing.
+///
+/// [`SignalCategory`]: super::intel::SignalCategory
+fn signal_headline_stack_lines(
+    detail: &SignalDetail<'_>,
+    width: usize,
+    height: u16,
+) -> Vec<Line<'static>> {
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let total = detail.reports.len();
+    let window = usize::from(signal_headline_window_rows(total, height));
+    let start = list_window_start(detail.expanded, total, window);
+    let category_width = detail
+        .reports
+        .iter()
+        .map(|signal| signal.category.label().len())
+        .max()
+        .unwrap_or(0);
+
+    let mut lines = vec![Line::from(Span::styled(
+        fit_to_width(detail.subject, width),
+        bold,
+    ))];
+    for index in start..(start + window).min(total) {
+        let signal = detail.reports[index];
+        let expanded = index == detail.expanded;
+        let text = format!(
+            "{}{}  {:<category_width$}  {}",
+            signal_headline_lead(expanded, detail.inspected[index]),
+            signal.time,
+            signal.category.label(),
+            signal.subject
+        );
+        let style = if expanded { bold } else { Style::default() };
+        lines.push(Line::from(Span::styled(fit_to_width(&text, width), style)));
+    }
+    lines.push(Line::from(""));
+    lines
 }
 
 /// `<time>   source: <source_trust>   claim: <claim_confidence>`. Neither
@@ -2014,7 +2201,7 @@ pub(crate) fn scroll_pane_visible_rows(
         }
         PaneId::SelectedSignal => {
             let (width, height) = signal_detail_inner_dimensions(frame_width, frame_height);
-            signal_detail_layout(selected_signal(state), width, height).1 as usize
+            signal_detail_layout(&selected_signal_detail(state), width, height).2 as usize
         }
         _ => 0,
     }
@@ -2982,6 +3169,16 @@ mod tests {
         terminal
     }
 
+    /// Each visible thread's newest visible report, in list order: the
+    /// report each list row takes its header and preview from. In LOCAL LOG
+    /// every thread holds one report, so this is every row's only report.
+    fn row_reports(connected: bool) -> Vec<&'static Signal> {
+        visible_threads(connected)
+            .into_iter()
+            .map(|thread| *thread.visible_reports(connected).last().unwrap())
+            .collect()
+    }
+
     fn buffer_contains(terminal: &Terminal<TestBackend>, needle: &str) -> bool {
         terminal
             .backend()
@@ -3092,24 +3289,24 @@ mod tests {
     fn signal_list_lines_windows_around_the_selection_and_keeps_it_visible() {
         let mut state = AppState::new();
         state.apply(super::super::state::Msg::SelectLastSignal);
-        let last = visible_signals(false).len() - 1;
-        assert_eq!(state.selected_signal(), last);
+        let last = row_reports(false).len() - 1;
+        assert_eq!(state.selected_thread(), last);
 
         // Only 2 signals fit on screen; the window must still contain the
         // selected (last) signal rather than always starting at the top.
         let lines = signal_list_lines(&state, 2, 70);
-        let visible_items = visible_signals(false).len().min(2);
+        let visible_items = row_reports(false).len().min(2);
         assert_eq!(lines.len(), visible_items * SIGNAL_ROWS_PER_ITEM);
         assert!(
-            lines.iter().any(|line| line
-                .to_string()
-                .contains(visible_signals(false)[last].source)),
+            lines
+                .iter()
+                .any(|line| line.to_string().contains(row_reports(false)[last].source)),
             "the selected signal must be part of the rendered window"
         );
         assert!(
             !lines
                 .iter()
-                .any(|line| line.to_string().contains(visible_signals(false)[0].source)),
+                .any(|line| line.to_string().contains(row_reports(false)[0].source)),
             "an out-of-window signal must not render"
         );
     }
@@ -3118,10 +3315,7 @@ mod tests {
     fn signal_list_lines_renders_every_signal_when_geometry_is_unknown() {
         let state = AppState::new();
         let lines = signal_list_lines(&state, 0, 0);
-        assert_eq!(
-            lines.len(),
-            visible_signals(false).len() * SIGNAL_ROWS_PER_ITEM
-        );
+        assert_eq!(lines.len(), row_reports(false).len() * SIGNAL_ROWS_PER_ITEM);
     }
 
     #[test]
@@ -3161,17 +3355,21 @@ mod tests {
                 .iter()
                 .map(|line| line.to_string())
                 .collect();
-            for (index, signal) in visible_signals(connected).iter().enumerate() {
+            for (index, thread) in visible_threads(connected).into_iter().enumerate() {
+                // Header and preview from the newest report, subject from
+                // the thread: identical to the report's own row whenever
+                // the thread holds one report.
+                let signal = *thread.visible_reports(connected).last().unwrap();
                 let row = &lines[index * SIGNAL_ROWS_PER_ITEM..][..SIGNAL_ROWS_PER_ITEM];
                 let cursor = signal_list_lead(
-                    index == state.selected_signal(),
-                    state.signal_inspected(signal.id),
+                    index == state.selected_thread(),
+                    state.thread_inspected(thread),
                 );
                 assert!(row[0].starts_with(&format!("{cursor}{}  ", signal.time)));
                 assert!(row[0].contains(signal.category.label()));
                 assert!(row[0].contains(signal.source));
                 assert_eq!(row[0].contains(OPEN_MARKER), signal.is_actionable());
-                assert_eq!(row[1], format!("    {}", signal.subject));
+                assert_eq!(row[1], format!("    {}", thread.subject()));
                 assert_eq!(row[2], format!("    {}", signal.preview));
                 assert_eq!(row[3], "");
             }
@@ -3185,10 +3383,7 @@ mod tests {
         let state = AppState::new();
         for width in [20, 30, 45, 70] {
             let lines = signal_list_lines(&state, 0, width);
-            assert_eq!(
-                lines.len(),
-                visible_signals(false).len() * SIGNAL_ROWS_PER_ITEM
-            );
+            assert_eq!(lines.len(), row_reports(false).len() * SIGNAL_ROWS_PER_ITEM);
             for line in &lines {
                 assert!(
                     line.to_string().width() <= width,
@@ -3220,8 +3415,8 @@ mod tests {
 
         let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
         assert!(!buffer_contains(&terminal, OPEN_MARKER));
-        for signal in visible_signals(true) {
-            assert!(buffer_contains(&terminal, signal.subject));
+        for thread in visible_threads(true) {
+            assert!(buffer_contains(&terminal, thread.subject()));
         }
     }
 
@@ -3246,7 +3441,7 @@ mod tests {
     fn fresh_signals_list_marks_every_unselected_entry_uninspected() {
         let state = AppState::new();
         let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
-        for (index, signal) in visible_signals(false).iter().enumerate() {
+        for (index, signal) in row_reports(false).iter().enumerate() {
             let header = row_header(&terminal, signal.source);
             let lead = format!("\u{2502}{}", if index == 0 { "> " } else { "\u{2022} " });
             assert!(header.starts_with(&lead), "{header:?}");
@@ -3259,7 +3454,7 @@ mod tests {
 
         let mut state = AppState::new();
         state.apply(Msg::SelectNextSignal);
-        let local = visible_signals(false);
+        let local = row_reports(false);
         let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
         assert!(row_header(&terminal, local[0].source).starts_with("\u{2502}  "));
         assert!(row_header(&terminal, local[1].source).starts_with("\u{2502}> "));
@@ -3275,7 +3470,7 @@ mod tests {
         use super::super::state::Msg;
 
         let mut state = AppState::new();
-        let local = visible_signals(false);
+        let local = row_reports(false);
         assert!(
             state.signal_inspected(local[0].id),
             "internal, before input"
@@ -3304,19 +3499,24 @@ mod tests {
         // never been shown.
         state.apply(Msg::SelectFirstSignal);
         state.apply(Msg::SelectLastSignal);
-        let connected = visible_signals(true);
+        let threads = visible_threads(true);
+        // The only operator report ever presented: thread 0's expanded
+        // (oldest) report. Its other members were only ever headlines.
+        let presented = threads[0].visible_reports(true)[0].id;
+        let never_shown = |signal: &&Signal| !signal.local_available && signal.id != presented;
         let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
-        for (index, signal) in connected.iter().enumerate() {
-            let header = row_header(&terminal, signal.source);
-            let never_shown = !signal.local_available && index != 0;
+        for thread in &threads {
+            let newest = *thread.visible_reports(true).last().unwrap();
+            let header = row_header(&terminal, newest.source);
+            let expected = thread.visible_reports(true).iter().any(never_shown);
             let marked = header.starts_with("\u{2502}\u{2022} ");
-            assert_eq!(marked, never_shown, "{header:?}");
+            assert_eq!(marked, expected, "{header:?}");
         }
         assert!(
-            connected
+            threads
                 .iter()
-                .enumerate()
-                .any(|(index, s)| !s.local_available && index != 0),
+                .flat_map(|thread| thread.visible_reports(true))
+                .any(|s| never_shown(&s)),
             "at least one operator entry must start uninspected for this test to mean anything"
         );
         assert!(
@@ -3338,7 +3538,7 @@ mod tests {
         let state = AppState::new();
         let terminal = render(120, 40, &state);
 
-        for signal in visible_signals(false) {
+        for signal in row_reports(false) {
             assert!(buffer_contains(&terminal, signal.source));
         }
         let content = terminal
@@ -3368,15 +3568,21 @@ mod tests {
                 continue;
             }
             assert!(buffer_contains(&terminal, newest.source));
-            // Until the threaded view (#235), a thread's earlier reports
-            // stay out of the flat list rather than appearing as extra rows.
-            for earlier in thread.reports().filter(|signal| signal.id != newest.id) {
-                assert!(
-                    !buffer_contains(&terminal, earlier.source),
-                    "{:?}",
-                    earlier.id
-                );
-            }
+            assert!(buffer_contains(&terminal, thread.subject()));
+        }
+        // A thread is one row, never one row per report: the selected
+        // multi-report thread's expanded (oldest) report is the only one
+        // whose detail, and so whose sender, is on screen besides the
+        // newest report's row header.
+        let selected = visible_threads(true)[0].visible_reports(true);
+        assert!(selected.len() > 1);
+        assert!(buffer_contains(&terminal, selected[0].source));
+        for collapsed in &selected[1..selected.len() - 1] {
+            assert!(
+                !buffer_contains(&terminal, collapsed.source),
+                "{:?}",
+                collapsed.id
+            );
         }
     }
 
@@ -3702,19 +3908,215 @@ mod tests {
     /// Renders only the detail pane, at the size it gets inside a
     /// minimum-geometry frame.
     fn render_detail(signal: &Signal, scroll: u16) -> Terminal<TestBackend> {
+        render_thread_detail(&SignalDetail::single(signal), scroll)
+    }
+
+    /// Renders only the detail pane for `detail`, at the size it gets inside
+    /// a minimum-geometry frame.
+    fn render_thread_detail(detail: &SignalDetail<'_>, scroll: u16) -> Terminal<TestBackend> {
         let (width, height) = signal_detail_inner_dimensions(MIN_COLUMNS, MIN_ROWS);
         let mut terminal = Terminal::new(TestBackend::new(width + 2, height + 2))
             .expect("test backend should initialize");
         terminal
-            .draw(|frame| draw_signal_detail_pane(frame, frame.area(), signal, true, false, scroll))
+            .draw(|frame| draw_signal_detail_pane(frame, frame.area(), detail, true, false, scroll))
             .expect("draw should succeed");
         terminal
+    }
+
+    /// Twelve synthetic reports, each with a distinct subject and source,
+    /// expanding [`LONG_SIGNAL`]'s overflowing detail.
+    fn overlong_thread() -> Vec<Signal> {
+        const NAMES: [&str; 12] = [
+            "R00", "R01", "R02", "R03", "R04", "R05", "R06", "R07", "R08", "R09", "R10", "R11",
+        ];
+        const TIMES: [&str; 12] = [
+            "09:00", "09:01", "09:02", "09:03", "09:04", "09:05", "09:06", "09:07", "09:08",
+            "09:09", "09:10", "09:11",
+        ];
+        (0..12)
+            .map(|i| Signal {
+                id: super::super::intel::SignalId(NAMES[i]),
+                time: TIMES[i],
+                source: NAMES[i],
+                subject: NAMES[i],
+                opportunity: None,
+                ..LONG_SIGNAL
+            })
+            .collect()
+    }
+
+    fn thread_detail<'a>(reports: &'a [Signal], expanded: usize) -> SignalDetail<'a> {
+        SignalDetail {
+            subject: "THREAD-SUBJECT",
+            reports: reports.iter().collect(),
+            inspected: (0..reports.len()).map(|i| i == expanded).collect(),
+            expanded,
+        }
+    }
+
+    /// The detail pane's inner rows as text, without the border.
+    fn detail_rows(terminal: &Terminal<TestBackend>) -> Vec<String> {
+        let rows = frame_text(terminal);
+        let rows: Vec<&str> = rows.lines().collect();
+        rows[1..rows.len() - 1]
+            .iter()
+            .map(|row| {
+                let chars: Vec<char> = row.chars().collect();
+                chars[1..chars.len() - 1].iter().collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_overlong_headline_stack_keeps_the_expanded_report_usable_at_minimum_geometry() {
+        let reports = overlong_thread();
+        let (width, height) = signal_detail_inner_dimensions(MIN_COLUMNS, MIN_ROWS);
+        for expanded in [0, 6, 11] {
+            let detail = thread_detail(&reports, expanded);
+            let (stack, header, body, action) = signal_detail_layout(&detail, width, height);
+            assert_eq!(
+                stack + header + body + action,
+                height,
+                "fills the pane exactly"
+            );
+            assert!(
+                stack <= height / 3,
+                "the stack never crowds out the expanded report"
+            );
+            assert!(body >= 10, "expanded body keeps usable room: {body}");
+            assert_eq!(action, 0, "the synthetic reports carry no opportunity");
+
+            let rows = detail_rows(&render_thread_detail(&detail, 0));
+            assert!(rows[0].starts_with("THREAD-SUBJECT"));
+            let headlines: Vec<&String> = rows[1..usize::from(stack) - 1].iter().collect();
+            assert!(headlines.len() < reports.len(), "the stack is windowed");
+            let expanded_headline = format!("\u{25B8} 09:{expanded:02}");
+            assert!(
+                headlines
+                    .iter()
+                    .any(|row| row.starts_with(&expanded_headline)),
+                "{expanded}: {headlines:?}"
+            );
+            assert_eq!(rows[usize::from(stack) - 1].trim(), "", "separator");
+            // Only the expanded report's detail is on screen: its own
+            // subject heads it, and no collapsed report's source appears.
+            let detail_text = rows[usize::from(stack)..].join("\n");
+            assert!(rows[usize::from(stack)].starts_with(reports[expanded].subject));
+            assert!(detail_text.contains(&format!(
+                "{} // MACHINE INTERCEPT",
+                reports[expanded].source
+            )));
+            assert!(detail_text.contains("STATUS  no open opportunity"));
+            for (index, report) in reports.iter().enumerate() {
+                if index != expanded {
+                    assert!(
+                        !detail_text.contains(&format!("{} // ", report.source)),
+                        "{index}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_expanded_report_scrolls_its_body_below_a_fixed_stack_and_status() {
+        let reports: Vec<Signal> = overlong_thread()
+            .into_iter()
+            .take(3)
+            .map(|signal| Signal {
+                opportunity: Some(WorkingSet::FirstContact),
+                ..signal
+            })
+            .collect();
+        let detail = thread_detail(&reports, 1);
+        let (width, height) = signal_detail_inner_dimensions(MIN_COLUMNS, MIN_ROWS);
+        let max = signal_detail_max_scroll_for(&detail, width, height);
+        let single =
+            signal_detail_max_scroll_for(&SignalDetail::single(&reports[1]), width, height);
+        assert!(
+            max > single,
+            "the stack's rows are subtracted from the body"
+        );
+
+        let top = render_thread_detail(&detail, 0);
+        let bottom = render_thread_detail(&detail, max);
+        assert!(buffer_contains(&top, "FIRST-MESSAGE-ROW"));
+        assert!(buffer_contains(&bottom, "LAST-UNRESOLVED-ROW"));
+        assert!(!buffer_contains(&bottom, "FIRST-MESSAGE-ROW"));
+        for terminal in [&top, &bottom] {
+            assert!(buffer_contains(terminal, "THREAD-SUBJECT"));
+            assert!(buffer_contains(terminal, "\u{25B8} 09:01"));
+            assert!(buffer_contains(terminal, "STATUS  OPEN // FIRST CONTACT"));
+            assert!(buffer_contains(terminal, SIGNAL_DETAIL_ACTION));
+        }
+    }
+
+    #[test]
+    fn headlines_cue_only_the_expanded_and_uninspected_reports() {
+        let reports = overlong_thread();
+        let mut detail = thread_detail(&reports[..3], 1);
+        detail.inspected = vec![true, true, false];
+        let lines: Vec<String> = signal_headline_stack_lines(&detail, 46, 32)
+            .iter()
+            .map(|line| line.to_string())
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "THREAD-SUBJECT",
+                "  09:00  MACHINE INTERCEPT  R00",
+                "\u{25B8} 09:01  MACHINE INTERCEPT  R01",
+                "\u{2022} 09:02  MACHINE INTERCEPT  R02",
+                "",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_connected_multi_report_thread_renders_as_one_row_and_one_expanded_report() {
+        let mut state = AppState::new();
+        state.set_connected(true);
+        let thread = visible_threads(true)[0];
+        let reports = thread.visible_reports(true);
+        assert_eq!(reports.len(), 3);
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+        let text = frame_text(&terminal);
+
+        // The list row: newest report's header and preview, the authored
+        // thread subject, an uninspected cue, and no count.
+        let (list_width, _) = signals_list_inner_dimensions(MIN_COLUMNS, MIN_ROWS);
+        let row: Vec<String> = signal_list_lines(&state, 1, usize::from(list_width))
+            .iter()
+            .map(|line| line.to_string())
+            .collect();
+        let newest = reports[2];
+        assert_eq!(
+            row[0],
+            signal_list_header(newest, true, false, usize::from(list_width))
+        );
+        assert_eq!(row[1], format!("    {}", thread.subject()));
+        assert_eq!(row[1], format!("    {}", reports[0].subject));
+        assert_eq!(row[2], format!("    {}", newest.preview));
+
+        // The detail: one expanded report (the oldest) and three headlines.
+        assert_eq!(text.matches("SOURCE").count(), 1);
+        assert_eq!(text.matches("MESSAGE").count(), 1);
+        assert!(text.contains(&format!("\u{25B8} {}", reports[0].time)));
+        for collapsed in &reports[1..] {
+            assert!(text.contains(&format!("\u{2022} {}", collapsed.time)));
+        }
+        assert!(text.contains(&signal_origin(reports[0])));
+        // The list row and the stack heading; the expanded oldest report
+        // doesn't repeat the heading it shares.
+        assert_eq!(text.matches(reports[0].subject).count(), 2);
+        assert!(!text.contains(&signal_origin(reports[1])));
+        assert!(!text.contains(&signal_origin(reports[2])));
     }
 
     #[test]
     fn long_signal_detail_scrolls_its_body_but_keeps_status_and_action_fixed() {
         let (width, height) = signal_detail_inner_dimensions(MIN_COLUMNS, MIN_ROWS);
-        let max = signal_detail_max_scroll_for(&LONG_SIGNAL, width, height);
+        let max = signal_detail_max_scroll_for(&SignalDetail::single(&LONG_SIGNAL), width, height);
         assert!(max > 0, "the synthetic entry must overflow");
 
         let top = render_detail(&LONG_SIGNAL, 0);
@@ -3738,7 +4140,7 @@ mod tests {
     #[test]
     fn signal_detail_render_clamps_an_out_of_range_scroll_offset() {
         let (width, height) = signal_detail_inner_dimensions(MIN_COLUMNS, MIN_ROWS);
-        let max = signal_detail_max_scroll_for(&LONG_SIGNAL, width, height);
+        let max = signal_detail_max_scroll_for(&SignalDetail::single(&LONG_SIGNAL), width, height);
         let past_end = render_detail(&LONG_SIGNAL, max + 50);
         assert!(buffer_contains(&past_end, "LAST-UNRESOLVED-ROW"));
     }
@@ -3759,7 +4161,8 @@ mod tests {
                 };
                 let line = signal_assessment_line(&signal);
                 longest = longest.max(line.chars().count());
-                let (header_rows, _, _) = signal_detail_layout(&signal, width, height);
+                let (_, header_rows, _, _) =
+                    signal_detail_layout(&SignalDetail::single(&signal), width, height);
                 assert_eq!(header_rows, 3, "{line:?} must not wrap");
                 assert!(
                     buffer_contains(&render_detail(&signal, 0), &line),
@@ -3800,8 +4203,22 @@ mod tests {
         // pane with today's authored entries.
         let (width, height) = signal_detail_inner_dimensions(MIN_COLUMNS, MIN_ROWS);
         for connected in [false, true] {
-            for signal in visible_signals(connected) {
-                assert_eq!(signal_detail_max_scroll_for(signal, width, height), 0);
+            for thread in visible_threads(connected) {
+                let reports = thread.visible_reports(connected);
+                for expanded in 0..reports.len() {
+                    let detail = SignalDetail {
+                        subject: thread.subject(),
+                        inspected: vec![false; reports.len()],
+                        reports: reports.clone(),
+                        expanded,
+                    };
+                    assert_eq!(
+                        signal_detail_max_scroll_for(&detail, width, height),
+                        0,
+                        "{:?}",
+                        reports[expanded].id
+                    );
+                }
             }
         }
     }
@@ -3810,7 +4227,9 @@ mod tests {
     fn signal_detail_page_size_is_the_visible_body_height() {
         let state = AppState::new();
         let (width, height) = signal_detail_inner_dimensions(MIN_COLUMNS, MIN_ROWS);
-        let (header, body, action) = signal_detail_layout(selected_signal(&state), width, height);
+        let (stack, header, body, action) =
+            signal_detail_layout(&selected_signal_detail(&state), width, height);
+        assert_eq!(stack, 0, "LOCAL LOG has no multi-report thread");
         assert_eq!(header + body + action, height);
         assert_eq!(
             scroll_pane_visible_rows(PaneId::SelectedSignal, &state, MIN_COLUMNS, MIN_ROWS),
@@ -3826,7 +4245,7 @@ mod tests {
     #[test]
     fn signal_detail_adds_provenance_assessments_and_status_beyond_the_list_row() {
         for signal in authored_signals() {
-            let text: Vec<String> = signal_detail_header_lines(signal)
+            let text: Vec<String> = signal_detail_header_lines(&SignalDetail::single(signal))
                 .iter()
                 .chain(&signal_detail_body_lines(signal))
                 .map(|line| line.to_string())
@@ -3865,7 +4284,7 @@ mod tests {
         assert!(buffer_contains(&terminal, "Enter  inspect opportunity"));
 
         state.apply(Msg::SelectNextSignal);
-        assert!(!visible_signals(false)[state.selected_signal()].is_actionable());
+        assert!(!row_reports(false)[state.selected_thread()].is_actionable());
         let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
         assert!(buffer_contains(&terminal, "STATUS  no open opportunity"));
         assert!(!buffer_contains(&terminal, "OPEN // FIRST CONTACT"));
@@ -3881,7 +4300,7 @@ mod tests {
 
         let mut state = AppState::new();
         state.set_connected(true);
-        for _ in 0..visible_signals(true).len() {
+        for _ in 0..row_reports(true).len() {
             let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
             assert!(buffer_contains(&terminal, "STATUS  no open opportunity"));
             assert!(!buffer_contains(&terminal, "OPEN // FIRST CONTACT"));

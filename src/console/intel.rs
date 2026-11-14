@@ -114,7 +114,7 @@ pub struct ThreadId(pub &'static str);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Signal {
     /// A stable identity for this authored entry, independent of its
-    /// position in [`visible_signals`] (which differs between LOCAL LOG and
+    /// position in [`visible_threads`] (which differs between LOCAL LOG and
     /// SIGNALS). Session-only inspected state is keyed by it (issue #216).
     pub id: SignalId,
     /// Receipt time as zero-padded `HH:MM`, so lexical order is
@@ -153,7 +153,7 @@ pub struct Signal {
     /// Contact opportunity itself. `false` marks content framed as live
     /// traffic from a named remote operator or cell, which only becomes
     /// legitimate once connected (`docs/TUI_DESIGN.md`, "Bootstrap and
-    /// network connectivity"). See [`visible_signals`].
+    /// network connectivity"). See [`signal_visible`].
     pub local_available: bool,
 }
 
@@ -363,10 +363,6 @@ impl Thread {
 
     /// The thread's subject: its first report's authored subject. There is
     /// no generated summary.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "rendered by the threaded Signals view (#235)")
-    )]
     pub fn subject(&self) -> &'static str {
         self.reports()
             .next()
@@ -427,18 +423,6 @@ pub fn visible_threads(connected: bool) -> Vec<&'static Thread> {
         .collect();
     threads.sort_by(|a, b| b.0.cmp(a.0));
     threads.into_iter().map(|(_, thread)| thread).collect()
-}
-
-/// Temporary compatibility adapter for the flat Signals list (issue #234):
-/// one representative per visible thread, its newest visible report, in
-/// [`visible_threads`] order. This keeps the LOCAL LOG and SIGNALS rows
-/// unchanged until the threaded interface (#235) selects threads explicitly
-/// and replaces it.
-pub fn visible_signals(connected: bool) -> Vec<&'static Signal> {
-    visible_threads(connected)
-        .into_iter()
-        .filter_map(|thread| thread.visible_reports(connected).last().copied())
-        .collect()
 }
 
 /// A dossier of what is currently known about an opportunity, and how
@@ -539,9 +523,18 @@ mod tests {
         );
     }
 
+    /// Every report the console may show at this connectivity, across all
+    /// visible threads.
+    fn visible_reports(connected: bool) -> Vec<&'static Signal> {
+        visible_threads(connected)
+            .into_iter()
+            .flat_map(|thread| thread.visible_reports(connected))
+            .collect()
+    }
+
     #[test]
     fn disconnected_signals_exclude_shared_intel_and_requests() {
-        let disconnected = visible_signals(false);
+        let disconnected = visible_reports(false);
         assert!(
             disconnected
                 .iter()
@@ -552,14 +545,14 @@ mod tests {
 
     #[test]
     fn disconnected_signals_still_include_the_first_contact_opportunity() {
-        let disconnected = visible_signals(false);
+        let disconnected = visible_reports(false);
         assert!(disconnected.iter().any(|signal| signal.is_actionable()));
     }
 
     #[test]
     fn connected_signals_exclude_the_resolved_first_contact_opportunity() {
-        let connected = visible_signals(true);
-        assert_eq!(connected.len(), authored_threads().len() - 1);
+        assert_eq!(visible_threads(true).len(), authored_threads().len() - 1);
+        let connected = visible_reports(true);
         assert!(
             connected.iter().all(|signal| !signal.is_actionable()),
             "First Contact must not be offered again as an undiscovered opportunity"
@@ -795,16 +788,42 @@ mod tests {
     }
 
     #[test]
+    fn a_visible_threads_subject_report_is_always_visible() {
+        // The list row shows `Thread::subject()`, so its report must be
+        // legitimately visible whenever the thread is, or the row would leak
+        // a report the console can't show yet.
+        for connected in [false, true] {
+            for thread in visible_threads(connected) {
+                assert_eq!(
+                    thread.visible_reports(connected)[0].subject,
+                    thread.subject(),
+                    "{:?}",
+                    thread.id
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_thread_subject_is_its_first_reports_subject() {
         for thread in authored_threads() {
             assert_eq!(thread.subject(), thread.reports().next().unwrap().subject);
         }
     }
 
+    /// Each visible thread's newest visible report, in list order: the
+    /// report a thread's list row takes its header and preview from.
+    fn newest_reports(connected: bool) -> Vec<&'static Signal> {
+        visible_threads(connected)
+            .into_iter()
+            .filter_map(|thread| thread.visible_reports(connected).last().copied())
+            .collect()
+    }
+
     #[test]
-    fn the_flat_adapter_keeps_the_local_log_rows_unchanged() {
+    fn local_log_thread_order_and_newest_reports_are_unchanged() {
         assert_eq!(
-            ids(&visible_signals(false)),
+            ids(&newest_reports(false)),
             [
                 "fabricator-31b-fallback",
                 "console-core-verify",
@@ -814,9 +833,9 @@ mod tests {
     }
 
     #[test]
-    fn the_flat_adapter_keeps_the_connected_signals_rows_unchanged() {
+    fn connected_thread_order_and_newest_reports_are_unchanged() {
         assert_eq!(
-            ids(&visible_signals(true)),
+            ids(&newest_reports(true)),
             [
                 "rook-relay-lost",
                 "mare4-convoy-request",
