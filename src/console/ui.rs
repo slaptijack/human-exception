@@ -2968,7 +2968,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &AppState) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::intel::authored_signals;
+    use super::super::intel::{authored_signals, authored_threads};
     use super::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -3284,19 +3284,31 @@ mod tests {
     }
 
     #[test]
-    fn connected_signals_view_shows_every_non_withdrawn_authored_signal() {
+    fn connected_signals_view_shows_every_non_withdrawn_thread() {
         let mut state = AppState::new();
         state.set_connected(true);
         let terminal = render(120, 40, &state);
 
-        for signal in authored_signals() {
-            if signal.is_actionable() {
+        for thread in authored_threads() {
+            let Some(newest) = thread.reports().last() else {
+                continue;
+            };
+            if newest.is_actionable() {
                 // The resolved First Contact opportunity is withdrawn once
                 // connected, not shown as a still-actionable entry (see
                 // `connected_signals_withdraw_the_resolved_first_contact_entry`).
                 continue;
             }
-            assert!(buffer_contains(&terminal, signal.source));
+            assert!(buffer_contains(&terminal, newest.source));
+            // Until the threaded view (#235), a thread's earlier reports
+            // stay out of the flat list rather than appearing as extra rows.
+            for earlier in thread.reports().filter(|signal| signal.id != newest.id) {
+                assert!(
+                    !buffer_contains(&terminal, earlier.source),
+                    "{:?}",
+                    earlier.id
+                );
+            }
         }
     }
 
@@ -3572,7 +3584,7 @@ mod tests {
     /// A synthetic actionable entry long enough to overflow the detail pane
     /// at minimum geometry, since no authored entry does today.
     const LONG_SIGNAL: Signal = Signal {
-        id: "test-long-signal",
+        id: super::super::intel::SignalId("test-long-signal"),
         time: "09:00",
         source: "test source",
         category: super::super::intel::SignalCategory::MachineIntercept,
@@ -3761,7 +3773,7 @@ mod tests {
             );
             assert!(
                 text.contains(&assessment),
-                "{}: expected {assessment:?}",
+                "{:?}: expected {assessment:?}",
                 signal.id
             );
             assert!(text.iter().any(|line| line.starts_with("STATUS  ")));

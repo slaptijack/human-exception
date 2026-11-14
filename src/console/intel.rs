@@ -92,6 +92,17 @@ impl ClaimConfidence {
     }
 }
 
+/// A stable identity for one authored report, never derived from list
+/// position. Deliberately a different type from [`ThreadId`] so the two
+/// namespaces cannot be mixed up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SignalId(pub &'static str);
+
+/// A stable identity for one thread of related reports, never derived from
+/// list position and never reused for a [`SignalId`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ThreadId(pub &'static str);
+
 /// One item in the resistance-network intelligence stream.
 ///
 /// `time`, `source`, `category`, `subject`, and `preview` are what the
@@ -105,7 +116,9 @@ pub struct Signal {
     /// A stable identity for this authored entry, independent of its
     /// position in [`visible_signals`] (which differs between LOCAL LOG and
     /// SIGNALS). Session-only inspected state is keyed by it (issue #216).
-    pub id: &'static str,
+    pub id: SignalId,
+    /// Receipt time as zero-padded `HH:MM`, so lexical order is
+    /// chronological order.
     pub time: &'static str,
     pub source: &'static str,
     pub category: SignalCategory,
@@ -155,7 +168,7 @@ impl Signal {
 pub fn authored_signals() -> &'static [Signal] {
     &[
         Signal {
-            id: "fabricator-31b-fallback",
+            id: SignalId("fabricator-31b-fallback"),
             time: "11:42",
             source: "fabricator node 31B",
             category: SignalCategory::MachineIntercept,
@@ -181,7 +194,7 @@ pub fn authored_signals() -> &'static [Signal] {
             local_available: true,
         },
         Signal {
-            id: "rook-relay-lost",
+            id: SignalId("rook-relay-lost"),
             time: "11:35",
             source: "rook@pacific",
             category: SignalCategory::SharedIntel,
@@ -194,6 +207,7 @@ pub fn authored_signals() -> &'static [Signal] {
             provenance: &[
                 "operator mesh, relayed twice",
                 "sender key seen before, not verified",
+                "linked: attached trace ends at hop P-9",
             ],
             context: &["An independent operator's fragment; nothing here is addressed to us."],
             unresolved: &[
@@ -204,7 +218,45 @@ pub fn authored_signals() -> &'static [Signal] {
             local_available: false,
         },
         Signal {
-            id: "mare4-convoy-request",
+            id: SignalId("wren-p9-sessions-lost"),
+            time: "11:29",
+            source: "wren@coast",
+            category: SignalCategory::SharedIntel,
+            subject: "A sender keyed as wren reports sessions lost through P-9",
+            preview: "\"Not retrying until someone knows why.\"",
+            body: "\"Lost two sessions through P-9 around 11:17. Both dropped at the same \
+                   hop. Not retrying until someone knows why.\"",
+            source_trust: SourceTrust::Unverified,
+            claim_confidence: ClaimConfidence::Low,
+            provenance: &[
+                "operator mesh, relayed once",
+                "sender key not seen before",
+                "linked: names hop P-9 and the 11:17 cutoff",
+            ],
+            context: &["An independent operator's fragment; nothing here is addressed to us."],
+            unresolved: &["whether wren's sessions and the stale hop share a cause"],
+            opportunity: None,
+            local_available: false,
+        },
+        Signal {
+            id: SignalId("p9-heartbeat-missed"),
+            time: "11:21",
+            source: "MESH ROUTE MONITOR",
+            category: SignalCategory::Anomaly,
+            subject: "Route table marks relay hop P-9 stale",
+            preview: "Two missed heartbeats; routes through the hop are being withdrawn.",
+            body: "HB/P-9 miss x2. Last ack 11:17. 3 routes withdrawn, \
+                   1 rerouted via P-11.",
+            source_trust: SourceTrust::Probable,
+            claim_confidence: ClaimConfidence::High,
+            provenance: &["operator mesh route table, local copy"],
+            context: &["Missed heartbeats alone do not say why a hop went quiet."],
+            unresolved: &["whether P-9 failed or was taken down"],
+            opportunity: None,
+            local_available: false,
+        },
+        Signal {
+            id: SignalId("mare4-convoy-request"),
             time: "11:18",
             source: "CELL/MARE-4",
             category: SignalCategory::Request,
@@ -221,7 +273,7 @@ pub fn authored_signals() -> &'static [Signal] {
             local_available: false,
         },
         Signal {
-            id: "console-core-verify",
+            id: SignalId("console-core-verify"),
             time: "11:05",
             source: "BOOTSTRAP LOG",
             category: SignalCategory::BootstrapLog,
@@ -238,7 +290,7 @@ pub fn authored_signals() -> &'static [Signal] {
             local_available: true,
         },
         Signal {
-            id: "municipal-cluster-burst",
+            id: SignalId("municipal-cluster-burst"),
             time: "10:57",
             source: "PASSIVE SENSOR",
             category: SignalCategory::Anomaly,
@@ -260,31 +312,132 @@ pub fn authored_signals() -> &'static [Signal] {
     ]
 }
 
-/// The signals a console may legitimately show, gated by resistance-network
-/// connectivity (`docs/TUI_DESIGN.md`, "Bootstrap and network connectivity").
-/// Disconnected, only [`Signal::local_available`] entries are legitimate,
-/// since nothing framed as live operator/cell traffic can exist without a
-/// network connection. Connected, the full authored stream is shown *except*
-/// any signal that already offered an opportunity ([`Signal::is_actionable`]):
-/// re-offering a resolved opportunity as though it were still undiscovered
-/// would be dishonest (`docs/TUI_DESIGN.md`, "1. Signals", "SIGNALS
-/// (connected)"). In this playable slice there is exactly one opportunity,
-/// First Contact, and connectivity is established exactly once, by
-/// completing it — so `connected == true` already implies that signal is
-/// resolved. This is a deliberate simplification tied to there being only
-/// one opportunity, not a general completed-opportunities tracker; a future
-/// second opportunity will need this filter to distinguish resolved from
-/// still-open opportunities instead of keying off `connected` alone.
-pub fn visible_signals(connected: bool) -> Vec<&'static Signal> {
-    authored_signals()
+/// Whether a console may legitimately show this report, gated by
+/// resistance-network connectivity (`docs/TUI_DESIGN.md`, "Bootstrap and
+/// network connectivity"). Disconnected, only [`Signal::local_available`]
+/// entries are legitimate, since nothing framed as live operator/cell
+/// traffic can exist without a network connection. Connected, every report
+/// is shown *except* any that already offered an opportunity
+/// ([`Signal::is_actionable`]): re-offering a resolved opportunity as though
+/// it were still undiscovered would be dishonest (`docs/TUI_DESIGN.md`, "1.
+/// Signals", "SIGNALS (connected)"). In this playable slice there is exactly
+/// one opportunity, First Contact, and connectivity is established exactly
+/// once, by completing it — so `connected == true` already implies that
+/// signal is resolved. This is a deliberate simplification tied to there
+/// being only one opportunity, not a general completed-opportunities
+/// tracker; a future second opportunity will need this filter to
+/// distinguish resolved from still-open opportunities instead of keying off
+/// `connected` alone.
+fn signal_visible(signal: &Signal, connected: bool) -> bool {
+    if connected {
+        !signal.is_actionable()
+    } else {
+        signal.local_available
+    }
+}
+
+/// The authored report with this id, if any.
+fn find_signal(id: SignalId) -> Option<&'static Signal> {
+    authored_signals().iter().find(|signal| signal.id == id)
+}
+
+/// A group of related reports. Membership is authored, explicit, and
+/// permanent: every authored report belongs to exactly one thread, and a
+/// report that joins an existing thread carries a `linked:` provenance
+/// bullet naming the evidence the console holds for the relationship.
+/// Most threads hold a single report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Thread {
+    pub id: ThreadId,
+    /// Member reports in receipt order, oldest first.
+    pub signals: &'static [SignalId],
+}
+
+impl Thread {
+    /// Member reports in receipt order, oldest first, ignoring connectivity.
+    pub fn reports(&self) -> impl Iterator<Item = &'static Signal> + '_ {
+        self.signals
+            .iter()
+            .map(|&id| find_signal(id).expect("every authored thread member is an authored signal"))
+    }
+
+    /// The thread's subject: its first report's authored subject. There is
+    /// no generated summary.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "rendered by the threaded Signals view (#235)")
+    )]
+    pub fn subject(&self) -> &'static str {
+        self.reports()
+            .next()
+            .expect("every authored thread has at least one report")
+            .subject
+    }
+
+    /// The member reports this console may legitimately show, in receipt
+    /// order, oldest first.
+    pub fn visible_reports(&self, connected: bool) -> Vec<&'static Signal> {
+        self.reports()
+            .filter(|signal| signal_visible(signal, connected))
+            .collect()
+    }
+}
+
+/// The authored threads. Every [`authored_signals`] entry belongs to exactly
+/// one of them.
+pub fn authored_threads() -> &'static [Thread] {
+    &[
+        Thread {
+            id: ThreadId("t-fabricator-31b"),
+            signals: &[SignalId("fabricator-31b-fallback")],
+        },
+        Thread {
+            id: ThreadId("t-relay-p9"),
+            signals: &[
+                SignalId("p9-heartbeat-missed"),
+                SignalId("wren-p9-sessions-lost"),
+                SignalId("rook-relay-lost"),
+            ],
+        },
+        Thread {
+            id: ThreadId("t-mare4-convoy"),
+            signals: &[SignalId("mare4-convoy-request")],
+        },
+        Thread {
+            id: ThreadId("t-console-core"),
+            signals: &[SignalId("console-core-verify")],
+        },
+        Thread {
+            id: ThreadId("t-municipal-burst"),
+            signals: &[SignalId("municipal-cluster-burst")],
+        },
+    ]
+}
+
+/// The threads with at least one report this console may legitimately
+/// show, ordered by newest visible activity first. Ties keep authored order,
+/// so the result is deterministic.
+pub fn visible_threads(connected: bool) -> Vec<&'static Thread> {
+    let mut threads: Vec<(&'static str, &'static Thread)> = authored_threads()
         .iter()
-        .filter(|signal| {
-            if connected {
-                !signal.is_actionable()
-            } else {
-                signal.local_available
-            }
+        .filter_map(|thread| {
+            let newest = thread.visible_reports(connected).last()?.time;
+            Some((newest, thread))
         })
+        .collect();
+    threads.sort_by(|a, b| b.0.cmp(a.0));
+    threads.into_iter().map(|(_, thread)| thread).collect()
+}
+
+/// Temporary compatibility adapter for the flat Signals list (issue #234):
+/// one representative per visible thread, its newest visible report, in
+/// [`visible_threads`] order. This keeps the LOCAL LOG and SIGNALS rows
+/// unchanged until the threaded interface (#235) selects threads explicitly
+/// and replaces it.
+pub fn visible_signals(connected: bool) -> Vec<&'static Signal> {
+    visible_threads(connected)
+        .into_iter()
+        .filter_map(|thread| thread.visible_reports(connected).last().copied())
         .collect()
 }
 
@@ -406,7 +559,7 @@ mod tests {
     #[test]
     fn connected_signals_exclude_the_resolved_first_contact_opportunity() {
         let connected = visible_signals(true);
-        assert_eq!(connected.len(), authored_signals().len() - 1);
+        assert_eq!(connected.len(), authored_threads().len() - 1);
         assert!(
             connected.iter().all(|signal| !signal.is_actionable()),
             "First Contact must not be offered again as an undiscovered opportunity"
@@ -467,13 +620,15 @@ mod tests {
         let expected = [
             ("fabricator-31b-fallback", Probable, High),
             ("rook-relay-lost", Probable, Med),
+            ("wren-p9-sessions-lost", Unverified, Low),
+            ("p9-heartbeat-missed", Probable, High),
             ("mare4-convoy-request", Unverified, Low),
             ("console-core-verify", Verified, High),
             ("municipal-cluster-burst", Unverified, High),
         ];
         let actual: Vec<_> = authored_signals()
             .iter()
-            .map(|signal| (signal.id, signal.source_trust, signal.claim_confidence))
+            .map(|signal| (signal.id.0, signal.source_trust, signal.claim_confidence))
             .collect();
         assert_eq!(actual, expected);
     }
@@ -496,7 +651,7 @@ mod tests {
     fn signal_ids_are_unique_and_non_empty() {
         let signals = authored_signals();
         for (index, signal) in signals.iter().enumerate() {
-            assert!(!signal.id.is_empty());
+            assert!(!signal.id.0.is_empty());
             assert!(
                 signals[index + 1..]
                     .iter()
@@ -505,6 +660,170 @@ mod tests {
                 signal.id
             );
         }
+    }
+
+    fn ids(signals: &[&Signal]) -> Vec<&'static str> {
+        signals.iter().map(|signal| signal.id.0).collect()
+    }
+
+    #[test]
+    fn every_authored_signal_belongs_to_exactly_one_thread() {
+        for signal in authored_signals() {
+            let memberships = authored_threads()
+                .iter()
+                .flat_map(|thread| thread.signals)
+                .filter(|&&id| id == signal.id)
+                .count();
+            assert_eq!(memberships, 1, "{:?}", signal.id);
+        }
+    }
+
+    #[test]
+    fn every_thread_member_is_an_authored_signal_and_no_thread_is_empty() {
+        for thread in authored_threads() {
+            assert!(!thread.signals.is_empty(), "{:?}", thread.id);
+            for &id in thread.signals {
+                assert!(find_signal(id).is_some(), "{:?} in {:?}", id, thread.id);
+            }
+        }
+    }
+
+    #[test]
+    fn thread_ids_are_unique_non_empty_and_never_reuse_a_signal_id() {
+        let threads = authored_threads();
+        for (index, thread) in threads.iter().enumerate() {
+            assert!(!thread.id.0.is_empty());
+            assert!(
+                threads[index + 1..]
+                    .iter()
+                    .all(|other| other.id != thread.id),
+                "duplicate thread id {:?}",
+                thread.id
+            );
+            assert!(
+                authored_signals()
+                    .iter()
+                    .all(|signal| signal.id.0 != thread.id.0),
+                "thread id {:?} reuses a signal id",
+                thread.id
+            );
+        }
+    }
+
+    #[test]
+    fn signal_times_are_zero_padded_hours_and_minutes() {
+        for signal in authored_signals() {
+            let bytes = signal.time.as_bytes();
+            assert!(
+                bytes.len() == 5
+                    && bytes[2] == b':'
+                    && [0, 1, 3, 4].iter().all(|&i| bytes[i].is_ascii_digit()),
+                "{:?}: {:?}",
+                signal.id,
+                signal.time
+            );
+        }
+    }
+
+    #[test]
+    fn thread_members_are_in_strictly_ascending_receipt_order() {
+        for thread in authored_threads() {
+            let times: Vec<_> = thread.reports().map(|signal| signal.time).collect();
+            assert!(
+                times.windows(2).all(|pair| pair[0] < pair[1]),
+                "{:?}: {times:?}",
+                thread.id
+            );
+        }
+    }
+
+    #[test]
+    fn visible_threads_are_ordered_by_newest_activity_deterministically() {
+        for connected in [false, true] {
+            let threads = visible_threads(connected);
+            let newest: Vec<_> = threads
+                .iter()
+                .map(|thread| thread.visible_reports(connected).last().unwrap().time)
+                .collect();
+            assert!(
+                newest.windows(2).all(|pair| pair[0] >= pair[1]),
+                "{newest:?}"
+            );
+            assert_eq!(threads, visible_threads(connected));
+        }
+    }
+
+    #[test]
+    fn exactly_one_thread_holds_three_related_reports() {
+        let multi: Vec<_> = authored_threads()
+            .iter()
+            .filter(|thread| thread.signals.len() > 1)
+            .collect();
+        assert_eq!(multi.len(), 1);
+        assert_eq!(multi[0].signals.len(), 3);
+    }
+
+    #[test]
+    fn only_reports_joining_an_existing_thread_carry_linked_evidence() {
+        for thread in authored_threads() {
+            for (position, signal) in thread.reports().enumerate() {
+                let linked = signal
+                    .provenance
+                    .iter()
+                    .filter(|line| line.starts_with("linked: "))
+                    .count();
+                let expected = usize::from(position > 0);
+                assert_eq!(linked, expected, "{:?}", signal.id);
+            }
+        }
+    }
+
+    #[test]
+    fn the_three_report_thread_is_connected_only_and_never_actionable() {
+        let thread = authored_threads()
+            .iter()
+            .find(|thread| thread.signals.len() == 3)
+            .unwrap();
+        assert!(
+            thread
+                .reports()
+                .all(|signal| !signal.local_available && !signal.is_actionable())
+        );
+        assert!(!visible_threads(false).contains(&thread));
+        assert!(visible_threads(true).contains(&thread));
+        assert_eq!(thread.visible_reports(true).len(), 3);
+    }
+
+    #[test]
+    fn a_thread_subject_is_its_first_reports_subject() {
+        for thread in authored_threads() {
+            assert_eq!(thread.subject(), thread.reports().next().unwrap().subject);
+        }
+    }
+
+    #[test]
+    fn the_flat_adapter_keeps_the_local_log_rows_unchanged() {
+        assert_eq!(
+            ids(&visible_signals(false)),
+            [
+                "fabricator-31b-fallback",
+                "console-core-verify",
+                "municipal-cluster-burst"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_flat_adapter_keeps_the_connected_signals_rows_unchanged() {
+        assert_eq!(
+            ids(&visible_signals(true)),
+            [
+                "rook-relay-lost",
+                "mare4-convoy-request",
+                "console-core-verify",
+                "municipal-cluster-burst"
+            ]
+        );
     }
 
     #[test]

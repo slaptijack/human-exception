@@ -519,12 +519,12 @@ Representative 120×40 layout after First Contact succeeds:
 │ • 11:18  REQUEST            CELL/MARE-4                       │ SOURCE                                         │
 │     Convoy routing changed near old I-5                       │ • operator mesh, relayed twice                 │
 │     Asking anyone with eyes on the corridor to share telemet… │ • sender key seen before, not verified         │
-│                                                               │                                                │
-│ • 11:05  PACKAGE VERIFY     BOOTSTRAP LOG                     │ MESSAGE                                        │
-│     console-core 0.3.1 install verified                       │ "Relay went dark mid-trace. Dumping what I saw │
-│     Signed by slaptijack@; bootstrap software provenance onl… │ in case somebody is closer. Timing looked like │
-│                                                               │ a scheduled sweep, not a fault."               │
-│ • 10:57  ANOMALY            PASSIVE SENSOR                    │                                                │
+│                                                               │ • linked: attached trace ends at hop P-9       │
+│ • 11:05  PACKAGE VERIFY     BOOTSTRAP LOG                     │                                                │
+│     console-core 0.3.1 install verified                       │ MESSAGE                                        │
+│     Signed by slaptijack@; bootstrap software provenance onl… │ "Relay went dark mid-trace. Dumping what I saw │
+│                                                               │ in case somebody is closer. Timing looked like │
+│ • 10:57  ANOMALY            PASSIVE SENSOR                    │ a scheduled sweep, not a fault."               │
 ├────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │ F1/? Help   F2 Signals   F3 Target   F4 Controller   F5 Operation   F6 Deploy   F8 Next Pane       Ctrl+Q Quit │
 └────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

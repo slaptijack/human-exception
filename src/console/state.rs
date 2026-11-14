@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::document::ControllerDocument;
 use super::editor::EditOp;
-use super::intel::{Signal, visible_signals};
+use super::intel::{Signal, SignalId, visible_signals};
 use crate::lua_controller::{self, ControllerError, LiveOperation, TickRecord};
 
 /// An upper bound on how far any scrollable pane can scroll. This exists
@@ -612,7 +612,7 @@ pub struct AppState {
     /// only — never persisted by `profile.rs` — and keyed by stable id
     /// rather than `selected_signal`'s index, so an entry inspected in LOCAL
     /// LOG stays inspected after connecting.
-    inspected_signals: HashSet<&'static str>,
+    inspected_signals: HashSet<SignalId>,
     /// True once the player has inspected the actionable signal, making
     /// Target reachable even before a working set is committed.
     target_known: bool,
@@ -1145,8 +1145,8 @@ impl AppState {
     /// selected entry at some point this session — including right now, so
     /// the entry selected automatically when Signals first appears counts
     /// before any input (issues #216, #227).
-    pub fn signal_inspected(&self, id: &str) -> bool {
-        self.inspected_signals.contains(id)
+    pub fn signal_inspected(&self, id: SignalId) -> bool {
+        self.inspected_signals.contains(&id)
             || self
                 .presented_signal()
                 .is_some_and(|signal| signal.id == id)
@@ -1820,7 +1820,7 @@ mod tests {
         );
         for signal in super::super::intel::authored_signals() {
             if signal.id != presented.id {
-                assert!(!state.signal_inspected(signal.id), "{}", signal.id);
+                assert!(!state.signal_inspected(signal.id), "{:?}", signal.id);
             }
         }
     }
@@ -1967,7 +1967,7 @@ mod tests {
         let landed = visible_signals(true)[state.selected_signal()];
         for signal in visible_signals(true) {
             if signal.id != revealed.id && signal.id != landed.id && !signal.local_available {
-                assert!(!state.signal_inspected(signal.id), "{}", signal.id);
+                assert!(!state.signal_inspected(signal.id), "{:?}", signal.id);
             }
         }
     }
