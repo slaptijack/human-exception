@@ -1,0 +1,40 @@
+┌HUMAN EXCEPTION // RESISTANCE CONSOLE─────────────────────────────────────────────────────────────────────────────────┐
+│MESH: NONE   LOCAL LOG: 03   WORKING SET: none                                                                        │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌> LOCAL LOG───────────────────────────────────────────────────────────┐┌SELECTED ENTRY────────────────────────────────┐
+│> 11:42  MACHINE INTERCEPT  fabricator node 31B                 [OPEN]││fabricator node 31B // MACHINE INTERCEPT      │
+│    Node 31B appears to have fallen back to local control             ││11:42   source: PROBABLE   claim: HIGH        │
+│    Auth state inconsistent; a maintenance channel is still answering.││STATUS  OPEN // FIRST CONTACT                 │
+│                                                                      ││                                              │
+│• 11:05  PACKAGE VERIFY     BOOTSTRAP LOG                             ││SOURCE                                        │
+│    console-core 0.3.1 install verified                               ││• local receiver, maintenance band            │
+│    Signed by slaptijack@; bootstrap software provenance only.        ││• handshake replay, partial                   │
+│                                                                      ││                                              │
+│• 10:57  ANOMALY            PASSIVE SENSOR                            ││MESSAGE                                       │
+│    Burst traffic on the municipal cluster's dead band                ││AUTH/RETRY x14 — no mesh ack. FALLBACK: local.│
+│    Three short bursts on a long-dead band; source unconfirmed.       ││Maintenance channel 2 still answering a stale │
+│                                                                      ││controller key.                               │
+│                                                                      ││                                              │
+│                                                                      ││CONTEXT                                       │
+│                                                                      ││• Correlated fragments suggest a temporary    │
+│                                                                      ││access window through a captured maintenance  │
+│                                                                      ││drone.                                        │
+│                                                                      ││                                              │
+│                                                                      ││UNRESOLVED                                    │
+│                                                                      ││• how long the stale key stays valid          │
+│                                                                      ││• what else on this node still listens        │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││Enter  inspect opportunity                    │
+└──────────────────────────────────────────────────────────────────────┘└──────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│F1/? Help F2 Local Log F3 Target F4 Controller F5 Operation F6 Deploy F8 Next Pane                        Ctrl+Q Quit │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

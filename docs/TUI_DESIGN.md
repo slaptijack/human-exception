@@ -512,25 +512,25 @@ Representative 120×40 layout after First Contact succeeds:
 ├───────────────────────────────────────────────────────────────┬────────────────────────────────────────────────┤
 │ > SIGNALS                                                     │ SELECTED SIGNAL                                │
 │                                                               │                                                │
-│ > 11:35  SHARED INTEL       rook@pacific                      │ rook@pacific // SHARED INTEL                   │
-│     A sender keyed as rook reports a lost relay               │ 11:35   source: PROBABLE   claim: MED          │
-│     "Dumping what I saw in case somebody is closer."          │ STATUS  no open opportunity — information only │
-│                                                               │                                                │
-│ • 11:18  REQUEST            CELL/MARE-4                       │ SOURCE                                         │
-│     Convoy routing changed near old I-5                       │ • operator mesh, relayed twice                 │
-│     Asking anyone with eyes on the corridor to share telemet… │ • sender key seen before, not verified         │
-│                                                               │ • linked: attached trace ends at hop P-9       │
+│ > 11:35  SHARED INTEL       rook@pacific                      │ Route table marks relay hop P-9 stale          │
+│     Route table marks relay hop P-9 stale                     │ ▸ 11:21  ANOMALY       Route table marks rela… │
+│     "Dumping what I saw in case somebody is closer."          │ • 11:29  SHARED INTEL  A sender keyed as wren… │
+│                                                               │ • 11:35  SHARED INTEL  A sender keyed as rook… │
+│ • 11:18  REQUEST            CELL/MARE-4                       │                                                │
+│     Convoy routing changed near old I-5                       │ MESH ROUTE MONITOR // ANOMALY                  │
+│     Asking anyone with eyes on the corridor to share telemet… │ 11:21   source: PROBABLE   claim: HIGH         │
+│                                                               │ STATUS  no open opportunity — information only │
 │ • 11:05  PACKAGE VERIFY     BOOTSTRAP LOG                     │                                                │
-│     console-core 0.3.1 install verified                       │ MESSAGE                                        │
-│     Signed by slaptijack@; bootstrap software provenance onl… │ "Relay went dark mid-trace. Dumping what I saw │
-│                                                               │ in case somebody is closer. Timing looked like │
-│ • 10:57  ANOMALY            PASSIVE SENSOR                    │ a scheduled sweep, not a fault."               │
+│     console-core 0.3.1 install verified                       │ SOURCE                                         │
+│     Signed by slaptijack@; bootstrap software provenance onl… │ • operator mesh route table, local copy        │
+│                                                               │                                                │
+│ • 10:57  ANOMALY            PASSIVE SENSOR                    │ MESSAGE                                        │
 ├────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │ F1/? Help   F2 Signals   F3 Target   F4 Controller   F5 Operation   F6 Deploy   F8 Next Pane       Ctrl+Q Quit │
 └────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-`WORKING SET: FIRST CONTACT` persists here because the state rules keep the current working set for the session regardless of view (§ [State and information rules](#state-and-information-rules)); it only reads `none` again after First Contact's working set is explicitly cleared or a fresh, connectivity-persisted relaunch begins before any working set has been chosen this session. `CONTROLLER: starter` appears beside it because a working set carries its controller status into every view's header. The Signals header never shows `SATLINK`, in either connectivity state; views such as Controller and Operation do. Nothing in this feed is currently actionable (below), so no entry shows `[OPEN]` or the pinned `Enter  inspect opportunity` row. Selecting a row with `↑↓` (or `j`/`k`) already updates the detail pane on its own.
+`WORKING SET: FIRST CONTACT` persists here because the state rules keep the current working set for the session regardless of view (§ [State and information rules](#state-and-information-rules)); it only reads `none` again after First Contact's working set is explicitly cleared or a fresh, connectivity-persisted relaunch begins before any working set has been chosen this session. `CONTROLLER: starter` appears beside it because a working set carries its controller status into every view's header. The Signals header never shows `SATLINK`, in either connectivity state; views such as Controller and Operation do. Nothing in this feed is currently actionable (below), so no entry shows `[OPEN]` or the pinned `Enter  inspect opportunity` row. Selecting a row with `↑↓` (or `j`/`k`) already updates the detail pane on its own. The selected row here is a multi-report thread (§ [Signal threads](#signal-threads)). Its row carries the thread's subject between the newest report's header and preview. The detail pane shows the thread's headline stack above its one expanded report.
 
 Once connected, the front door genuinely carries operator-network traffic — shared intel and cell requests from other independent hackers are now legitimate, because the resistance mesh is actually reachable. First Contact does not reappear here as an actionable item: it is already complete, and re-offering it as an undiscovered opportunity would be dishonest (§5, § [Network Bootstrap](#network-bootstrap)). For the first playable slice, no signal in the connected feed is actionable; they exist to make the wider network feel real, per § [Opportunity design principles beyond First Contact](#opportunity-design-principles-beyond-first-contact).
 
@@ -594,6 +594,19 @@ Selecting an actionable entry and pressing `Enter` (from either the list or the 
 If the player already has First Contact as the current working set, selecting it again must preserve the current controller source. Re-entering Target never reloads or replaces source by itself.
 
 The `> ` before a pane title in the mockups above (`> LOCAL LOG`, `> SIGNALS`) is the non-color focus cue (§ [Non-color focus cue](#non-color-focus-cue)). The same glyph marks the selected row inside the list. The two cues stay distinct by position: the focus cue sits in a pane's border title, and the selection cursor sits at the start of a list row. `F8` moves the focus cue to `> SELECTED ENTRY` / `> SELECTED SIGNAL` without moving the selected row. Like every view, the footer shows the F-key vocabulary rather than per-key list hints. Help (`F1`/`?`) lists the Signals list's `↑↓`, `j`/`k`, `Enter`/`o`, and paging keys, and notes that `Enter` also works from the focused detail pane.
+
+### Signal threads
+
+Related reports are grouped into **threads**. Each list row is one thread, ordered by its newest visible report. A thread is a way of showing related reports together, not a container of work. It has no count, no completion state, and no "read thread" action.
+
+- **Single-report threads** (most of them) look and behave exactly as described above. There is no thread header, no expansion step, and nothing to suggest threads exist.
+- **Multi-report rows** keep the same four-row shape. The header and preview come from the newest report, and the subject row is the thread's authored subject (its first report's subject). The `•` shows while *any* visible report in the thread has not been inspected.
+- **Multi-report detail** opens with the thread subject and a headline stack, one row per report in receipt order: a cue, the time, the report's category, and its subject. The cue is `▸` for the expanded report, `•` for a collapsed report not yet inspected, or blank. Below a blank row, **exactly one report is expanded**, with the full detail described above. It starts with that report's own subject when it differs from the thread subject.
+- **Only the expanded report is presented**, so only it counts as inspected. Headlines tell the player that a report exists, not what it says, and showing them inspects nothing. Moving between threads never clears a report's inspected state.
+- **Which report expands:** selecting a thread expands its oldest report not yet inspected, or its newest if every report has been inspected. Once shown, that report stays expanded while the thread stays selected. `F8`, Help, overlays, and scrolling never switch it.
+- **Layout:** the headline stack takes at most a quarter of the detail pane. At 120×40 that is 8 headlines, leaving the expanded report most of the pane. Longer threads are windowed so the expanded report's headline is always visible. The stack never scrolls with the expanded report's body, and the report's fixed header, status line, and pinned action stay in place.
+
+Thread membership is authored. A report that joins an existing thread carries a `linked:` bullet in `SOURCE` naming the evidence the console holds for the relationship.
 
 ## 2. Target
 

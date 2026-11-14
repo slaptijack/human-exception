@@ -732,6 +732,19 @@ mod tests {
     use ratatui::backend::TestBackend;
     use state::{ConclusionKind, View};
 
+    /// The LOCAL LOG's entries in list order. Every disconnected thread
+    /// holds exactly one report, so each row is that report.
+    fn local_entries() -> Vec<&'static intel::Signal> {
+        intel::visible_threads(false)
+            .into_iter()
+            .map(|thread| {
+                let reports = thread.visible_reports(false);
+                assert_eq!(reports.len(), 1, "{:?}", thread.id);
+                reports[0]
+            })
+            .collect()
+    }
+
     fn press(code: KeyCode) -> Event {
         Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
@@ -952,7 +965,7 @@ mod tests {
     /// use this to skip past it.
     ///
     /// The working set is seeded via `Msg::Activate` *before* connecting,
-    /// not after: once connected, `intel::visible_signals` withdraws the
+    /// not after: once connected, `intel::visible_threads` withdraws the
     /// resolved First Contact entry from Signals (`docs/TUI_DESIGN.md`,
     /// "SIGNALS (connected)"), so a connected-from-scratch state has no
     /// route back into Controller — the same dead end a real relaunched
@@ -984,7 +997,7 @@ mod tests {
         );
         assert_eq!(state.focused_pane(View::Signals), PaneId::SelectedSignal);
         assert_eq!(state.scroll_offset(PaneId::SelectedSignal), 0);
-        assert_eq!(state.selected_signal(), 0);
+        assert_eq!(state.selected_thread(), 0);
         assert!(buffer_contains(&terminal, "STATUS  OPEN // FIRST CONTACT"));
 
         // F8 back to the list: j/Down select again, exactly as before.
@@ -998,7 +1011,7 @@ mod tests {
             ],
         );
         assert_eq!(state.focused_pane(View::Signals), PaneId::SignalsList);
-        assert_eq!(state.selected_signal(), 1);
+        assert_eq!(state.selected_thread(), 1);
     }
 
     fn render(width: u16, height: u16, events: &[Event]) -> (AppState, Terminal<TestBackend>) {
@@ -1149,7 +1162,7 @@ mod tests {
         );
 
         assert_eq!(state.current_view(), View::Signals);
-        assert_eq!(state.selected_signal(), 0);
+        assert_eq!(state.selected_thread(), 0);
     }
 
     #[test]
@@ -2193,7 +2206,7 @@ mod tests {
             state.focused_pane(state.current_view()),
             PaneId::SignalsList
         );
-        let last = intel::visible_signals(false).len() - 1;
+        let last = intel::visible_threads(false).len() - 1;
         let page = ui::signals_list_visible_items(120, 40);
         assert!(page > 0);
 
@@ -2205,7 +2218,7 @@ mod tests {
             &mut last_transition_press,
         );
         assert_eq!(
-            state.selected_signal(),
+            state.selected_thread(),
             page.min(last),
             "PageDown should land exactly `page` signals forward (clamped \
              at the end), not stay at the placeholder `0` `event::map` emits"
@@ -2217,7 +2230,7 @@ mod tests {
             (120, 40),
             &mut last_transition_press,
         );
-        assert_eq!(state.selected_signal(), 0);
+        assert_eq!(state.selected_thread(), 0);
 
         should_redraw(
             &mut state,
@@ -2225,7 +2238,7 @@ mod tests {
             (120, 40),
             &mut last_transition_press,
         );
-        assert_eq!(state.selected_signal(), last);
+        assert_eq!(state.selected_thread(), last);
 
         should_redraw(
             &mut state,
@@ -2234,7 +2247,7 @@ mod tests {
             &mut last_transition_press,
         );
         assert_eq!(
-            state.selected_signal(),
+            state.selected_thread(),
             last.saturating_sub(page),
             "PageUp should move back `page` signals, clamped at the start"
         );
@@ -2243,7 +2256,7 @@ mod tests {
         // inert, matching the console-wide focus-ownership contract.
         state.apply(Msg::FocusNextPane);
         assert_eq!(state.focused_pane(View::Signals), PaneId::SelectedSignal);
-        let before = state.selected_signal();
+        let before = state.selected_thread();
         for key in [
             KeyCode::PageDown,
             KeyCode::PageUp,
@@ -2257,7 +2270,7 @@ mod tests {
                 &mut last_transition_press,
             );
         }
-        assert_eq!(state.selected_signal(), before);
+        assert_eq!(state.selected_thread(), before);
     }
 
     /// A route script padded with enough leading comment lines that its
@@ -4218,7 +4231,7 @@ mod tests {
             .iter()
             .map(|event| {
                 should_redraw(&mut state, event.clone(), (120, 40), &mut debounce);
-                state.selected_signal()
+                state.selected_thread()
             })
             .collect()
     }
@@ -4231,7 +4244,7 @@ mod tests {
             ("SIGNALS", connected_signals_state),
         ];
         for (label, start) in presentations {
-            let count = intel::visible_signals(start().presentation_connected()).len();
+            let count = intel::visible_threads(start().presentation_connected()).len();
             assert!(count > 1, "{label} needs more than one signal to test");
             // Past both ends, so clamping is exercised in each direction.
             let mut arrows = vec![press(KeyCode::Up)];
@@ -4262,13 +4275,13 @@ mod tests {
     fn j_moves_the_selected_signal_detail_along_with_the_selection() {
         let (via_letter, letter_terminal) = render(120, 40, &[press(KeyCode::Char('j'))]);
         let (via_arrow, arrow_terminal) = render(120, 40, &[press(KeyCode::Down)]);
-        assert_eq!(via_letter.selected_signal(), 1);
+        assert_eq!(via_letter.selected_thread(), 1);
         assert_eq!(
             letter_terminal.backend().buffer(),
             arrow_terminal.backend().buffer(),
             "j must render exactly what Down renders, list and detail alike"
         );
-        assert_eq!(via_letter.selected_signal(), via_arrow.selected_signal());
+        assert_eq!(via_letter.selected_thread(), via_arrow.selected_thread());
     }
 
     #[test]
@@ -4281,7 +4294,7 @@ mod tests {
 
     #[test]
     fn o_leaves_a_non_actionable_signal_inert_exactly_like_enter() {
-        let signals = intel::visible_signals(false);
+        let signals = local_entries();
         let inert = signals
             .iter()
             .position(|signal| !signal.is_actionable())
@@ -4289,13 +4302,13 @@ mod tests {
         let mut events: Vec<Event> = (0..inert).map(|_| press(KeyCode::Char('j'))).collect();
         events.push(press(KeyCode::Char('o')));
         let (state, _) = render(120, 40, &events);
-        assert_eq!(state.selected_signal(), inert);
+        assert_eq!(state.selected_thread(), inert);
         assert_eq!(state.current_view(), View::Signals);
     }
 
     #[test]
     fn o_activates_nothing_in_connected_signals_where_nothing_is_actionable() {
-        let count = intel::visible_signals(true).len();
+        let count = intel::visible_threads(true).len();
         for index in 0..count {
             let mut events: Vec<Event> = (0..index).map(|_| press(KeyCode::Char('j'))).collect();
             events.push(press(KeyCode::Char('o')));
@@ -4320,7 +4333,7 @@ mod tests {
             ],
         );
         assert_eq!(state.current_view(), View::Signals);
-        assert_eq!(state.selected_signal(), 0);
+        assert_eq!(state.selected_thread(), 0);
     }
 
     /// Selects `index`, then focuses the detail pane with `F8`, then presses `Enter`.
@@ -4335,7 +4348,7 @@ mod tests {
     fn enter_from_the_focused_signal_detail_opens_target_on_the_actionable_entry() {
         use state::PaneId;
 
-        let actionable = intel::visible_signals(false)
+        let actionable = local_entries()
             .iter()
             .position(|signal| signal.is_actionable())
             .expect("LOCAL LOG has an actionable signal");
@@ -4358,13 +4371,13 @@ mod tests {
     fn enter_from_the_focused_signal_detail_leaves_a_non_actionable_entry_inert() {
         use state::PaneId;
 
-        let inert = intel::visible_signals(false)
+        let inert = local_entries()
             .iter()
             .position(|signal| !signal.is_actionable())
             .expect("LOCAL LOG has at least one non-actionable signal");
         let (state, _) = render(120, 40, &enter_from_signal_detail(inert));
         assert_eq!(state.current_view(), View::Signals);
-        assert_eq!(state.selected_signal(), inert);
+        assert_eq!(state.selected_thread(), inert);
         assert_eq!(state.focused_pane(View::Signals), PaneId::SelectedSignal);
         // Target stays unreachable: Enter must not have marked it known.
         let (state, _) = render_from(state, 120, 40, &[press(KeyCode::F(3))]);
@@ -4373,7 +4386,7 @@ mod tests {
 
     #[test]
     fn enter_from_the_focused_signal_detail_activates_nothing_in_connected_signals() {
-        let count = intel::visible_signals(true).len();
+        let count = intel::visible_threads(true).len();
         for index in 0..count {
             let (state, _) = render_from(
                 connected_signals_state(),
@@ -4382,7 +4395,7 @@ mod tests {
                 &enter_from_signal_detail(index),
             );
             assert_eq!(state.current_view(), View::Signals, "{index}");
-            assert_eq!(state.selected_signal(), index, "{index}");
+            assert_eq!(state.selected_thread(), index, "{index}");
         }
     }
 
@@ -4492,7 +4505,7 @@ mod tests {
             40,
             &[press(KeyCode::Char('j')), repeat(KeyCode::Char('j'))],
         );
-        assert_eq!(state.selected_signal(), 2);
+        assert_eq!(state.selected_thread(), 2);
 
         let (state, _) = render(
             120,
