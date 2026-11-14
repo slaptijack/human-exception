@@ -2993,6 +2993,74 @@ mod tests {
             .contains(needle)
     }
 
+    fn frame_text(terminal: &Terminal<TestBackend>) -> String {
+        let buffer = terminal.backend().buffer();
+        let mut out = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                out.push_str(buffer[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Every single-report thread must render exactly as the flat Signals
+    /// list did before threads were rendered (issue #235). These 120×40
+    /// frames were captured from the pre-#235 renderer and must not change.
+    #[test]
+    fn local_log_frames_are_identical_to_the_pre_thread_renderer() {
+        use super::super::state::Msg;
+        let expected = [
+            include_str!("snapshots/local_log_0.txt"),
+            include_str!("snapshots/local_log_1.txt"),
+            include_str!("snapshots/local_log_2.txt"),
+        ];
+        for (index, expected) in expected.into_iter().enumerate() {
+            let mut state = AppState::new();
+            for _ in 0..index {
+                state.apply(Msg::SelectNextSignal);
+            }
+            let actual = frame_text(&render(MIN_COLUMNS, MIN_ROWS, &state));
+            assert_eq!(actual, expected, "LOCAL LOG, selection {index}");
+        }
+    }
+
+    /// Connected, each single-report thread's list row and detail pane are
+    /// unchanged from the pre-#235 renderer. Only the multi-report thread's
+    /// own list row (the first item: inner rows 4..=7 of the left pane) may
+    /// differ, because it now shows the thread subject and its derived `•`.
+    #[test]
+    fn connected_single_report_threads_are_identical_to_the_pre_thread_renderer() {
+        use super::super::state::Msg;
+        let expected = [
+            (1, include_str!("snapshots/signals_1.txt")),
+            (2, include_str!("snapshots/signals_2.txt")),
+            (3, include_str!("snapshots/signals_3.txt")),
+        ];
+        let (list_width, _) = signals_list_inner_dimensions(MIN_COLUMNS, MIN_ROWS);
+        let multi_report_row =
+            |y: usize, x: usize| (4..=7).contains(&y) && (1..=usize::from(list_width)).contains(&x);
+        for (index, expected) in expected {
+            let mut state = AppState::new();
+            state.set_connected(true);
+            for _ in 0..index {
+                state.apply(Msg::SelectNextSignal);
+            }
+            let actual = frame_text(&render(MIN_COLUMNS, MIN_ROWS, &state));
+            for (y, (actual, expected)) in actual.lines().zip(expected.lines()).enumerate() {
+                let keep = |line: &str| -> String {
+                    line.chars()
+                        .enumerate()
+                        .map(|(x, c)| if multi_report_row(y, x) { ' ' } else { c })
+                        .collect()
+                };
+                assert_eq!(keep(actual), keep(expected), "selection {index}, row {y}");
+            }
+            assert_eq!(actual.lines().count(), expected.lines().count());
+        }
+    }
+
     #[test]
     fn list_window_start_is_stable_for_empty_and_single_item_lists() {
         assert_eq!(list_window_start(0, 0, 5), 0);

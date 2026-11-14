@@ -1,0 +1,40 @@
+┌HUMAN EXCEPTION // RESISTANCE CONSOLE─────────────────────────────────────────────────────────────────────────────────┐
+│MESH: DEGRADED   SIGNALS: 04   WORKING SET: none                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌> SIGNALS─────────────────────────────────────────────────────────────┐┌SELECTED SIGNAL───────────────────────────────┐
+│  11:35  SHARED INTEL       rook@pacific                              ││CELL/MARE-4 // REQUEST                        │
+│    A sender keyed as rook reports a lost relay                       ││11:18   source: UNVERIFIED   claim: LOW       │
+│    "Dumping what I saw in case somebody is closer."                  ││STATUS  no open opportunity — information only│
+│                                                                      ││                                              │
+│> 11:18  REQUEST            CELL/MARE-4                               ││SOURCE                                        │
+│    Convoy routing changed near old I-5                               ││• open cell broadcast, unsigned               │
+│    Asking anyone with eyes on the corridor to share telemetry.       ││                                              │
+│                                                                      ││MESSAGE                                       │
+│• 11:05  PACKAGE VERIFY     BOOTSTRAP LOG                             ││"Convoys stopped using the usual corridor     │
+│    console-core 0.3.1 install verified                               ││three days ago. No clean telemetry yet. Anyone│
+│    Signed by slaptijack@; bootstrap software provenance only.        ││with eyes on old I-5, share what you have."   │
+│                                                                      ││                                              │
+│• 10:57  ANOMALY            PASSIVE SENSOR                            ││CONTEXT                                       │
+│    Burst traffic on the municipal cluster's dead band                ││• A request to the wider network, not a task  │
+│    Three short bursts on a long-dead band; source unconfirmed.       ││assigned to this console.                     │
+│                                                                      ││                                              │
+│                                                                      ││UNRESOLVED                                    │
+│                                                                      ││• why the routing changed                     │
+│                                                                      ││• whether anyone has answered                 │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+└──────────────────────────────────────────────────────────────────────┘└──────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│F1/? Help F2 Signals F3 Target F4 Controller F5 Operation F6 Deploy F8 Next Pane                          Ctrl+Q Quit │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
