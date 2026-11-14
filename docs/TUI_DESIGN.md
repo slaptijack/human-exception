@@ -41,7 +41,7 @@ The console therefore presents:
 - anomalies detected by the player's own systems;
 - actionable opportunities inferred from one or more of those signals.
 
-Use language such as **signal**, **intercept**, **shared intel**, **source**, **confidence**, **opportunity**, **target**, and **working set**.
+Use language such as **signal**, **intercept**, **shared intel**, **source**, **source trust**, **claim confidence**, **opportunity**, **target**, and **working set**.
 
 Avoid language such as **mission assigned**, **orders**, **commander**, **quest**, **objective received**, or anything implying a central authority has decided what the player should do.
 
@@ -483,7 +483,7 @@ Representative 120×40 layout before connectivity:
 │ > LOCAL LOG                                                   │ SELECTED ENTRY                                 │
 │                                                               │                                                │
 │ > 11:42  MACHINE INTERCEPT  fabricator node 31B        [OPEN] │ fabricator node 31B // MACHINE INTERCEPT       │
-│     Fabricator node 31B fell back to local control            │ 11:42   confidence: HIGH                       │
+│     Node 31B appears to have fallen back to local control     │ 11:42   source: PROBABLE   claim: HIGH         │
 │     Auth state inconsistent; a maintenance channel is still … │ STATUS  OPEN // FIRST CONTACT                  │
 │                                                               │                                                │
 │ • 11:05  PACKAGE VERIFY     BOOTSTRAP LOG                     │ SOURCE                                         │
@@ -491,7 +491,7 @@ Representative 120×40 layout before connectivity:
 │     Signed by slaptijack@; bootstrap software provenance onl… │ • handshake replay, partial                    │
 │                                                               │                                                │
 │ • 10:57  ANOMALY            PASSIVE SENSOR                    │ MESSAGE                                        │
-│     Offline municipal cluster sent burst traffic              │ AUTH/RETRY x14 — no mesh ack. FALLBACK: local. │
+│     Burst traffic on the municipal cluster's dead band        │ AUTH/RETRY x14 — no mesh ack. FALLBACK: local. │
 │     Three short bursts on a long-dead band; source unconfirm… │ Maintenance channel 2 still answering a stale  │
 │                                                               │ controller key.                                │
 │                                                               │ Enter  inspect opportunity                     │
@@ -513,7 +513,7 @@ Representative 120×40 layout after First Contact succeeds:
 │ > SIGNALS                                                     │ SELECTED SIGNAL                                │
 │                                                               │                                                │
 │ > 11:35  SHARED INTEL       rook@pacific                      │ rook@pacific // SHARED INTEL                   │
-│     rook lost a relay mid-trace                               │ 11:35   confidence: MED                        │
+│     A sender keyed as rook reports a lost relay               │ 11:35   source: PROBABLE   claim: MED          │
 │     "Dumping what I saw in case somebody is closer."          │ STATUS  no open opportunity — information only │
 │                                                               │                                                │
 │ • 11:18  REQUEST            CELL/MARE-4                       │ SOURCE                                         │
@@ -557,18 +557,27 @@ The mockups above show a fresh session, where nothing but the selected entry has
 The right pane expands on the selected entry instead of repeating its list row. From top to bottom it shows:
 
 - **origin:** the sender and category;
-- **time and confidence:** `HIGH`, `MED`, `LOW`, or `UNVERIFIED`;
+- **time and assessments:** `<time>   source: <source trust>   claim: <claim confidence>`, for example `11:42   source: PROBABLE   claim: HIGH` (below);
 - **status line:** either `STATUS  OPEN // <opportunity>` or `STATUS  no open opportunity — information only`;
 - **`SOURCE`:** how the entry reached this console;
 - **`MESSAGE`:** the full message, intercepted fragment, or telemetry;
 - **`CONTEXT`:** correlated background, when authored;
 - **`UNRESOLVED`:** open questions the entry raises, when authored.
 
+**Source trust and claim confidence.** Each entry carries two separate, hand-authored assessments, and the detail header shows both. The list row shows neither.
+
+- **Source trust** (`VERIFIED`, `PROBABLE`, or `UNVERIFIED`) rates the entry's *inferred origin*: the transmitter or sender, not the local sensor or receiver that picked it up.
+- **Claim confidence** (`HIGH`, `MED`, `LOW`, or `UNKNOWN`) rates the entry's *principal claim*. For a local sensor entry, that is the recorded observation itself, not who sent it or what it means. Interpretation stays in hedged `CONTEXT` / `UNRESOLVED` text and is not rated.
+
+The two axes are independent. A trusted origin can carry an inaccurate claim, and an unverified origin can carry an accurate one. Their vocabularies differ on purpose so they cannot be read as one scale. Both are presentation only: they never affect a mechanic or an outcome, never change over time, and never depend on or reveal hidden scenario state.
+
+**Observation before attribution.** When an entry's source trust is not `VERIFIED`, its subject, preview, and message describe what was observed. They never state the origin as fact. A suspected origin appears only with a hedge ("appears to", "a sender keyed as") or as a location ("on the municipal cluster's dead band").
+
 The mockups above are cut short at the bottom. At full height, the list shows every entry that fits, and `CONTEXT` and `UNRESOLVED` follow `MESSAGE` in the detail pane.
 
 All of this content is hand-written and hedged to what the console could plausibly know at its current connectivity. It never reveals hidden scenario state.
 
-The status line sits near the top so long content can never push it off-screen. Origin, time and confidence, and the status line form a fixed header. Only the sections below it (`SOURCE` onward) scroll, and only while the detail pane has focus (`F8`). There the console-wide `Up`/`Down`/`PageUp`/`PageDown`/`Home`/`End` scroll the body. `Enter` still inspects an actionable entry, exactly as from the list, because the detail pane presents the same selected entry. `j`/`k`/`o` stay list-only. Changing the selection resets the detail to its top. Like Help and the After Action report, the pane shows no overflow indicator. Every authored entry currently fits at 120×40, so these keys accept input but have nothing to move until longer intelligence arrives. The pinned `Enter  inspect opportunity` row appears only for an actionable entry. The status line, the list's `[OPEN]` marker, that pinned row, and whether `Enter`/`o` respond all come from the same availability rule, so they cannot disagree. A non-actionable entry states in words that it has no opportunity; it never shows a disabled or fake action.
+The status line sits near the top so long content can never push it off-screen. Origin, the time and assessments line, and the status line form a fixed header. Only the sections below it (`SOURCE` onward) scroll, and only while the detail pane has focus (`F8`). There the console-wide `Up`/`Down`/`PageUp`/`PageDown`/`Home`/`End` scroll the body. `Enter` still inspects an actionable entry, exactly as from the list, because the detail pane presents the same selected entry. `j`/`k`/`o` stay list-only. Changing the selection resets the detail to its top. Like Help and the After Action report, the pane shows no overflow indicator. Every authored entry currently fits at 120×40, so these keys accept input but have nothing to move until longer intelligence arrives. The pinned `Enter  inspect opportunity` row appears only for an actionable entry. The status line, the list's `[OPEN]` marker, that pinned row, and whether `Enter`/`o` respond all come from the same availability rule, so they cannot disagree. A non-actionable entry states in words that it has no opportunity; it never shows a disabled or fake action.
 
 For the first playable slice:
 
@@ -596,7 +605,7 @@ Representative layout:
 
 ```text
 ┌ HUMAN EXCEPTION // RESISTANCE CONSOLE ─────────────────────────────────────────────────────────────────────┐
-│ MESH: NONE            TARGET: FIRST CONTACT        CONFIDENCE: MED/HIGH        WORKING SET: none           │
+│ MESH: NONE   TARGET: FIRST CONTACT   WORKING SET: none                                                     │
 ├───────────────────────────────────────────────────────────────┬────────────────────────────────────────────┤
 │ TARGET INTELLIGENCE                                           │ PROVENANCE / ACCESS                        │
 │                                                               │                                            │
@@ -607,7 +616,7 @@ Representative layout:
 │ • one maintenance drone responds to our control channel       │ captured maintenance controller            │
 │ • facility map is incomplete                                  │ compromised satellite feed                 │
 │ • a local network uplink exists somewhere inside              │                                            │
-│ • drone endurance is limited                                  │ CONFIDENCE                                 │
+│ • drone endurance is limited                                  │ CLAIM CONFIDENCE                           │
 │                                                               │ maintenance access      HIGH               │
 │ UNKNOWN                                                       │ facility layout         LOW                │
 │ • uplink location                                             │ uplink location         UNKNOWN            │
@@ -628,7 +637,7 @@ Representative layout:
 A target dossier may contain:
 
 - **provenance** — where the information came from;
-- **confidence** — how trustworthy a claim appears;
+- **claim confidence** — per fact, how likely that claim is accurate (`HIGH`, `MED`, `LOW`, or `UNKNOWN`), using the same vocabulary as a signal's claim confidence (§1). There is no overall confidence rollup. Source trust for the dossier is stated in words in the `SOURCE` section;
 - **known facts** — information already established;
 - **unknowns** — meaningful gaps the player must account for;
 - **available access/hardware** — what the player can currently control or observe;

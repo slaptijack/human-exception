@@ -395,7 +395,6 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
         View::Target => {
             let dossier = first_contact_dossier();
             let target = format!("TARGET: {}", dossier.title);
-            let confidence = format!("CONFIDENCE: {}", dossier.confidence_summary);
             let mut candidates = Vec::new();
             if let Some(controller) = &controller_field {
                 candidates.push(format!("{mesh}   {target}   {controller}   {working}"));
@@ -406,17 +405,16 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
                 // (or that's already echoed by WORKING SET once committed).
                 candidates.push(format!("{mesh}   {controller}   {working}"));
             }
-            candidates.push(format!("{mesh}   {target}   {confidence}   {working}"));
-            // Confidence and controller status are both lower-priority than
-            // MESH here — drop them first, not MESH, so Target doesn't lose
-            // link condition while every other view keeps it at the same
-            // widths.
+            // Controller status is lower-priority than MESH here — drop it
+            // first, not MESH, so Target doesn't lose link condition while
+            // every other view keeps it at the same widths. There is no
+            // dossier confidence rollup (issue #230): claim confidence is
+            // per fact, in the PROVENANCE / ACCESS pane.
             candidates.push(format!("{mesh}   {target}   {working}"));
             if let Some(controller) = &controller_field {
                 candidates.push(format!("{target}   {controller}   {working}"));
                 candidates.push(format!("{controller}   {working}"));
             }
-            candidates.push(format!("{target}   {confidence}   {working}"));
             candidates.push(format!("{target}   {working}"));
             candidates
         }
@@ -1630,8 +1628,9 @@ fn selected_signal(state: &AppState) -> &'static Signal {
 /// (`docs/TUI_DESIGN.md`, "1. Signals"): `SELECTED ENTRY` for the bootstrap
 /// `LOCAL LOG`, `SELECTED SIGNAL` once connected to `SIGNALS`.
 ///
-/// Only the body scrolls (issue #222). The header — origin, time and
-/// confidence, and the opportunity `STATUS` — stays fixed above it, and an
+/// Only the body scrolls (issue #222). The header — origin, time with
+/// source trust and claim confidence, and the opportunity `STATUS` — stays
+/// fixed above it, and an
 /// actionable entry's [`SIGNAL_DETAIL_ACTION`] stays pinned below it, so no
 /// amount of authored content or scrolling can hide either.
 fn draw_signal_detail_pane(
@@ -1823,19 +1822,28 @@ fn signal_status(signal: &Signal) -> &'static str {
     }
 }
 
-/// The detail pane's fixed header: origin, time and confidence, and the
+/// The detail pane's fixed header: origin; time with the two independent
+/// assessments, source trust and claim confidence (issue #230); and the
 /// opportunity status. Rendered above the scrollable body so it never
 /// scrolls away (issue #222).
 fn signal_detail_header_lines(signal: &Signal) -> Vec<Line<'static>> {
     let bold = Style::default().add_modifier(Modifier::BOLD);
     vec![
         Line::from(Span::styled(signal_origin(signal), bold)),
-        Line::from(format!(
-            "{}   confidence: {}",
-            signal.time, signal.confidence
-        )),
+        Line::from(signal_assessment_line(signal)),
         Line::from(Span::styled(signal_status(signal), bold)),
     ]
+}
+
+/// `<time>   source: <source_trust>   claim: <claim_confidence>`. Neither
+/// value appears in the list row.
+fn signal_assessment_line(signal: &Signal) -> String {
+    format!(
+        "{}   source: {}   claim: {}",
+        signal.time,
+        signal.source_trust.label(),
+        signal.claim_confidence.label()
+    )
 }
 
 /// The detail pane's scrollable body: everything the list row does not
@@ -1939,11 +1947,11 @@ fn target_provenance_lines(dossier: &TargetDossier) -> Vec<Line<'static>> {
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "CONFIDENCE",
+        "CLAIM CONFIDENCE",
         Style::default().add_modifier(Modifier::BOLD),
     )));
-    for (fact, level) in dossier.confidence {
-        lines.push(Line::from(format!("{fact}   {level}")));
+    for (fact, level) in dossier.claim_confidence {
+        lines.push(Line::from(format!("{fact}   {}", level.label())));
     }
     lines
 }
@@ -3571,7 +3579,8 @@ mod tests {
         subject: "long subject",
         preview: "long preview",
         body: "FIRST-MESSAGE-ROW",
-        confidence: "LOW",
+        source_trust: super::super::intel::SourceTrust::Unverified,
+        claim_confidence: super::super::intel::ClaimConfidence::Low,
         provenance: &["test provenance"],
         context: &[],
         unresolved: &[
@@ -3638,7 +3647,10 @@ mod tests {
 
         for terminal in [&top, &bottom] {
             assert!(buffer_contains(terminal, "STATUS  OPEN // FIRST CONTACT"));
-            assert!(buffer_contains(terminal, "confidence: LOW"));
+            assert!(buffer_contains(
+                terminal,
+                "09:00   source: UNVERIFIED   claim: LOW"
+            ));
             assert!(buffer_contains(terminal, SIGNAL_DETAIL_ACTION));
         }
     }
@@ -3649,6 +3661,56 @@ mod tests {
         let max = signal_detail_max_scroll_for(&LONG_SIGNAL, width, height);
         let past_end = render_detail(&LONG_SIGNAL, max + 50);
         assert!(buffer_contains(&past_end, "LAST-UNRESOLVED-ROW"));
+    }
+
+    #[test]
+    fn every_assessment_combination_fits_the_detail_header_unwrapped_at_minimum_geometry() {
+        use super::super::intel::{ClaimConfidence, SourceTrust};
+
+        let (width, height) = signal_detail_inner_dimensions(MIN_COLUMNS, MIN_ROWS);
+        let mut longest = 0;
+        for source_trust in SourceTrust::ALL {
+            for claim_confidence in ClaimConfidence::ALL {
+                let signal = Signal {
+                    time: "11:42",
+                    source_trust,
+                    claim_confidence,
+                    ..LONG_SIGNAL
+                };
+                let line = signal_assessment_line(&signal);
+                longest = longest.max(line.chars().count());
+                let (header_rows, _, _) = signal_detail_layout(&signal, width, height);
+                assert_eq!(header_rows, 3, "{line:?} must not wrap");
+                assert!(
+                    buffer_contains(&render_detail(&signal, 0), &line),
+                    "{line:?} must render unclipped"
+                );
+            }
+        }
+        assert_eq!(
+            longest,
+            "11:42   source: UNVERIFIED   claim: UNKNOWN".len(),
+            "the issue #230 longest combination is 43 columns"
+        );
+    }
+
+    #[test]
+    fn target_has_no_confidence_rollup_and_labels_its_per_fact_table_as_claim_confidence() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.apply(Msg::Activate);
+        let before = render(MIN_COLUMNS, MIN_ROWS, &state);
+        state.apply(Msg::Activate);
+        state.apply(Msg::Navigate(View::Target));
+        let after = render(MIN_COLUMNS, MIN_ROWS, &state);
+
+        for terminal in [&before, &after] {
+            assert!(!buffer_contains(terminal, "CONFIDENCE:"));
+            assert!(!buffer_contains(terminal, "MED/HIGH"));
+            assert!(buffer_contains(terminal, "CLAIM CONFIDENCE"));
+            assert!(buffer_contains(terminal, "maintenance access   HIGH"));
+        }
     }
 
     #[test]
@@ -3682,7 +3744,7 @@ mod tests {
     }
 
     #[test]
-    fn signal_detail_adds_provenance_confidence_and_status_beyond_the_list_row() {
+    fn signal_detail_adds_provenance_assessments_and_status_beyond_the_list_row() {
         for signal in authored_signals() {
             let text: Vec<String> = signal_detail_header_lines(signal)
                 .iter()
@@ -3691,7 +3753,17 @@ mod tests {
                 .collect();
             assert!(text.iter().any(|line| line == "SOURCE"));
             assert!(text.iter().any(|line| line == "MESSAGE"));
-            assert!(text.iter().any(|line| line.contains(signal.confidence)));
+            let assessment = format!(
+                "{}   source: {}   claim: {}",
+                signal.time,
+                signal.source_trust.label(),
+                signal.claim_confidence.label()
+            );
+            assert!(
+                text.contains(&assessment),
+                "{}: expected {assessment:?}",
+                signal.id
+            );
             assert!(text.iter().any(|line| line.starts_with("STATUS  ")));
             assert!(
                 !text

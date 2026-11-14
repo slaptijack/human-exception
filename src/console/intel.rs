@@ -31,6 +31,67 @@ impl SignalCategory {
     }
 }
 
+/// How far the console trusts an entry's **inferred origin** — the
+/// transmitter or sender — not the local sensor or receiver that picked it
+/// up. Deliberately a different vocabulary from [`ClaimConfidence`] so the
+/// two axes can't be read as one scale. Hand-authored and presentation only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceTrust {
+    Verified,
+    Probable,
+    Unverified,
+}
+
+impl SourceTrust {
+    #[cfg(test)]
+    pub const ALL: [SourceTrust; 3] = [
+        SourceTrust::Verified,
+        SourceTrust::Probable,
+        SourceTrust::Unverified,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SourceTrust::Verified => "VERIFIED",
+            SourceTrust::Probable => "PROBABLE",
+            SourceTrust::Unverified => "UNVERIFIED",
+        }
+    }
+}
+
+/// How far the console believes an entry's **principal claim** is accurate.
+/// For a local sensor entry that is the recorded observation itself, not
+/// who sent it or what it means; interpretation stays in hedged `context` /
+/// `unresolved` text and is not rated. Independent of [`SourceTrust`]: a
+/// trusted origin can carry an inaccurate claim, and the reverse.
+/// Hand-authored and presentation only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimConfidence {
+    High,
+    Med,
+    Low,
+    Unknown,
+}
+
+impl ClaimConfidence {
+    #[cfg(test)]
+    pub const ALL: [ClaimConfidence; 4] = [
+        ClaimConfidence::High,
+        ClaimConfidence::Med,
+        ClaimConfidence::Low,
+        ClaimConfidence::Unknown,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ClaimConfidence::High => "HIGH",
+            ClaimConfidence::Med => "MED",
+            ClaimConfidence::Low => "LOW",
+            ClaimConfidence::Unknown => "UNKNOWN",
+        }
+    }
+}
+
 /// One item in the resistance-network intelligence stream.
 ///
 /// `time`, `source`, `category`, `subject`, and `preview` are what the
@@ -57,9 +118,12 @@ pub struct Signal {
     /// does not open by repeating `subject` or `preview`, so selecting a row is worth
     /// doing.
     pub body: &'static str,
-    /// How far this entry should be trusted: `HIGH`, `MED`, `LOW`, or
-    /// `UNVERIFIED`.
-    pub confidence: &'static str,
+    /// How far the entry's inferred origin is trusted. Unless this is
+    /// [`SourceTrust::Verified`], `subject`, `preview`, and `body` describe
+    /// what was observed and never state the origin as fact (issue #230).
+    pub source_trust: SourceTrust,
+    /// How far the entry's principal claim is believed accurate.
+    pub claim_confidence: ClaimConfidence,
     /// How the entry reached this console.
     pub provenance: &'static [&'static str],
     /// Authored correlation or background, hedged in-fiction.
@@ -95,11 +159,12 @@ pub fn authored_signals() -> &'static [Signal] {
             time: "11:42",
             source: "fabricator node 31B",
             category: SignalCategory::MachineIntercept,
-            subject: "Fabricator node 31B fell back to local control",
+            subject: "Node 31B appears to have fallen back to local control",
             preview: "Auth state inconsistent; a maintenance channel is still answering.",
             body: "AUTH/RETRY x14 \u{2014} no mesh ack. FALLBACK: local. \
                    Maintenance channel 2 still answering a stale controller key.",
-            confidence: "HIGH",
+            source_trust: SourceTrust::Probable,
+            claim_confidence: ClaimConfidence::High,
             provenance: &[
                 "local receiver, maintenance band",
                 "handshake replay, partial",
@@ -120,11 +185,12 @@ pub fn authored_signals() -> &'static [Signal] {
             time: "11:35",
             source: "rook@pacific",
             category: SignalCategory::SharedIntel,
-            subject: "rook lost a relay mid-trace",
+            subject: "A sender keyed as rook reports a lost relay",
             preview: "\"Dumping what I saw in case somebody is closer.\"",
             body: "\"Relay went dark mid-trace. Dumping what I saw in case somebody is \
                    closer. Timing looked like a scheduled sweep, not a fault.\"",
-            confidence: "MED",
+            source_trust: SourceTrust::Probable,
+            claim_confidence: ClaimConfidence::Med,
             provenance: &[
                 "operator mesh, relayed twice",
                 "sender key seen before, not verified",
@@ -146,7 +212,8 @@ pub fn authored_signals() -> &'static [Signal] {
             preview: "Asking anyone with eyes on the corridor to share telemetry.",
             body: "\"Convoys stopped using the usual corridor three days ago. No clean \
                    telemetry yet. Anyone with eyes on old I-5, share what you have.\"",
-            confidence: "LOW",
+            source_trust: SourceTrust::Unverified,
+            claim_confidence: ClaimConfidence::Low,
             provenance: &["open cell broadcast, unsigned"],
             context: &["A request to the wider network, not a task assigned to this console."],
             unresolved: &["why the routing changed", "whether anyone has answered"],
@@ -162,7 +229,8 @@ pub fn authored_signals() -> &'static [Signal] {
             preview: "Signed by slaptijack@; bootstrap software provenance only.",
             body: "verify: signature OK. manifest OK. 0 modified files. \
                    Bootstrap software provenance only \u{2014} no resistance-network traffic.",
-            confidence: "HIGH",
+            source_trust: SourceTrust::Verified,
+            claim_confidence: ClaimConfidence::High,
             provenance: &["local package verifier"],
             context: &[],
             unresolved: &[],
@@ -174,17 +242,18 @@ pub fn authored_signals() -> &'static [Signal] {
             time: "10:57",
             source: "PASSIVE SENSOR",
             category: SignalCategory::Anomaly,
-            subject: "Offline municipal cluster sent burst traffic",
+            subject: "Burst traffic on the municipal cluster's dead band",
             preview: "Three short bursts on a long-dead band; source unconfirmed.",
             body: "3 bursts, 40-90 ms each, on a band the cluster has not used since \
                    the grid went down. Payload encrypted.",
-            confidence: "UNVERIFIED",
+            source_trust: SourceTrust::Unverified,
+            claim_confidence: ClaimConfidence::High,
             provenance: &["local passive sensor array"],
             context: &[
                 "Could be a maintenance heartbeat, a relay, or noise. Source and intent \
                  unconfirmed.",
             ],
-            unresolved: &["who or what woke the cluster"],
+            unresolved: &["whether the cluster itself sent them"],
             opportunity: None,
             local_available: true,
         },
@@ -225,13 +294,14 @@ pub fn visible_signals(connected: bool) -> Vec<&'static Signal> {
 pub struct TargetDossier {
     pub title: &'static str,
     pub location: &'static str,
-    pub confidence_summary: &'static str,
     pub known: &'static [&'static str],
     pub unknown: &'static [&'static str],
     pub opportunity: &'static str,
     pub source: &'static [&'static str],
     pub access: &'static [&'static str],
-    pub confidence: &'static [(&'static str, &'static str)],
+    /// Per-fact claim confidence. Source trust for the dossier stays in
+    /// the `source` text; there is deliberately no rollup (issue #230).
+    pub claim_confidence: &'static [(&'static str, ClaimConfidence)],
 }
 
 /// The dossier for the one playable opportunity, First Contact. Content is
@@ -241,7 +311,6 @@ pub fn first_contact_dossier() -> TargetDossier {
     TargetDossier {
         title: "FIRST CONTACT",
         location: "Automated production facility // sector 7",
-        confidence_summary: "MED/HIGH",
         known: &[
             "one maintenance drone responds to our control channel",
             "facility map is incomplete",
@@ -256,11 +325,11 @@ pub fn first_contact_dossier() -> TargetDossier {
             "captured maintenance controller",
             "compromised satellite feed",
         ],
-        confidence: &[
-            ("maintenance access", "HIGH"),
-            ("facility layout", "LOW"),
-            ("uplink location", "UNKNOWN"),
-            ("hazards", "UNKNOWN"),
+        claim_confidence: &[
+            ("maintenance access", ClaimConfidence::High),
+            ("facility layout", ClaimConfidence::Low),
+            ("uplink location", ClaimConfidence::Unknown),
+            ("hazards", ClaimConfidence::Unknown),
         ],
     }
 }
@@ -345,16 +414,68 @@ mod tests {
     }
 
     #[test]
-    fn every_signal_has_provenance_and_a_known_confidence_level() {
+    fn every_signal_has_provenance() {
         for signal in authored_signals() {
             assert!(!signal.provenance.is_empty(), "{}", signal.source);
-            assert!(
-                ["HIGH", "MED", "LOW", "UNVERIFIED"].contains(&signal.confidence),
-                "{}: unexpected confidence {:?}",
-                signal.source,
-                signal.confidence
-            );
         }
+    }
+
+    #[test]
+    fn source_trust_vocabulary_is_exactly_verified_probable_unverified() {
+        // Exhaustive, so a new variant fails to compile here until it is
+        // also added to `ALL` (and this vocabulary is deliberately revisited).
+        fn listed(trust: SourceTrust) -> bool {
+            match trust {
+                SourceTrust::Verified | SourceTrust::Probable | SourceTrust::Unverified => {
+                    SourceTrust::ALL.contains(&trust)
+                }
+            }
+        }
+        assert!(SourceTrust::ALL.into_iter().all(listed));
+        let labels: Vec<_> = SourceTrust::ALL.iter().map(|t| t.label()).collect();
+        assert_eq!(labels, ["VERIFIED", "PROBABLE", "UNVERIFIED"]);
+    }
+
+    #[test]
+    fn claim_confidence_vocabulary_is_exactly_high_med_low_unknown() {
+        fn listed(claim: ClaimConfidence) -> bool {
+            match claim {
+                ClaimConfidence::High
+                | ClaimConfidence::Med
+                | ClaimConfidence::Low
+                | ClaimConfidence::Unknown => ClaimConfidence::ALL.contains(&claim),
+            }
+        }
+        assert!(ClaimConfidence::ALL.into_iter().all(listed));
+        let labels: Vec<_> = ClaimConfidence::ALL.iter().map(|c| c.label()).collect();
+        assert_eq!(labels, ["HIGH", "MED", "LOW", "UNKNOWN"]);
+    }
+
+    #[test]
+    fn the_two_axes_never_share_a_label() {
+        for trust in SourceTrust::ALL {
+            for claim in ClaimConfidence::ALL {
+                assert_ne!(trust.label(), claim.label());
+            }
+        }
+    }
+
+    #[test]
+    fn authored_signals_carry_the_issue_230_assessments() {
+        use ClaimConfidence::{High, Low, Med};
+        use SourceTrust::{Probable, Unverified, Verified};
+        let expected = [
+            ("fabricator-31b-fallback", Probable, High),
+            ("rook-relay-lost", Probable, Med),
+            ("mare4-convoy-request", Unverified, Low),
+            ("console-core-verify", Verified, High),
+            ("municipal-cluster-burst", Unverified, High),
+        ];
+        let actual: Vec<_> = authored_signals()
+            .iter()
+            .map(|signal| (signal.id, signal.source_trust, signal.claim_confidence))
+            .collect();
+        assert_eq!(actual, expected);
     }
 
     #[test]
