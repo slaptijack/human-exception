@@ -197,6 +197,18 @@ pub fn map(
         // the identical eligibility check (non-actionable signals stay
         // inert). Deliberately not bound in Target.
         KeyCode::Char('o') if unmodified && signals_list_focused => Some(Msg::Activate),
+        // `n`/`p` step through the selected thread's reports from *either*
+        // Signals pane (issue #236). Mapped whenever Signals is showing:
+        // whether a step is possible (thread boundary, single-report
+        // thread) is decided only by `AppState::step_report`, so an inert
+        // press can't move focus. Signals is never a text-entry surface, so
+        // Controller editing still types a literal `n`/`p`, and every
+        // modal/bootstrap/dialog gate above has already returned (in the
+        // quit dialog `n` still means cancel).
+        KeyCode::Char('n') if unmodified && current_view == View::Signals => Some(Msg::NextReport),
+        KeyCode::Char('p') if unmodified && current_view == View::Signals => {
+            Some(Msg::PreviousReport)
+        }
         // `Enter`/`Space` while Operation is showing: pacing controls, not
         // navigation (`docs/TUI_DESIGN.md`, "Pacing controls").
         // `Msg::StepOperationTick` is itself a no-op unless the run is
@@ -906,6 +918,194 @@ mod tests {
                 "{k:?} should scroll the Selected Signal pane, not move the selection"
             );
         }
+    }
+
+    #[test]
+    fn n_and_p_step_reports_from_either_signals_pane() {
+        // Issue #236: no F8 prerequisite — both panes produce the same
+        // message, and `AppState` alone decides whether it moves anything.
+        for pane in [PaneId::SignalsList, PaneId::SelectedSignal] {
+            assert_eq!(
+                map_focused(key(KeyCode::Char('n')), View::Signals, pane),
+                Some(Msg::NextReport),
+                "{pane:?}"
+            );
+            assert_eq!(
+                map_focused(key(KeyCode::Char('p')), View::Signals, pane),
+                Some(Msg::PreviousReport),
+                "{pane:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn modified_n_and_p_are_unbound_in_signals() {
+        for modifiers in [
+            KeyModifiers::SHIFT,
+            KeyModifiers::CONTROL,
+            KeyModifiers::ALT,
+        ] {
+            for c in ['n', 'p', 'N', 'P'] {
+                assert_eq!(
+                    map_in(
+                        key_with_modifiers(KeyCode::Char(c), modifiers),
+                        View::Signals
+                    ),
+                    None,
+                    "{c:?} with {modifiers:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn n_and_p_mean_nothing_new_outside_signals() {
+        for (view, pane) in [
+            (View::Help, PaneId::Help),
+            (View::Target, PaneId::TargetIntelligence),
+            (View::Target, PaneId::Provenance),
+            (View::Controller, PaneId::LuaFieldReference),
+            (View::Operation, PaneId::Satellite),
+            (View::Operation, PaneId::OperationTelemetry),
+            (View::AfterAction, PaneId::Report),
+            (View::AfterAction, PaneId::FinalFrame),
+        ] {
+            for c in ['n', 'p'] {
+                assert_eq!(
+                    map_focused(key(KeyCode::Char(c)), view, pane),
+                    None,
+                    "{c:?} in {view:?}/{pane:?}"
+                );
+            }
+        }
+        // The Controller source keeps typing them as Lua.
+        for c in ['n', 'p'] {
+            assert_eq!(
+                map_focused(
+                    key(KeyCode::Char(c)),
+                    View::Controller,
+                    PaneId::ControllerSource
+                ),
+                Some(Msg::EditController(EditOp::Insert(c)))
+            );
+        }
+    }
+
+    #[test]
+    fn n_and_p_are_swallowed_by_every_gate_and_n_still_cancels_dialogs() {
+        let n = key(KeyCode::Char('n'));
+        let p = key(KeyCode::Char('p'));
+        let pane = PaneId::SelectedSignal;
+        // Network Bootstrap, then the bootstrap introduction.
+        for k in [n, p] {
+            assert_eq!(
+                map(
+                    k,
+                    View::Signals,
+                    true,
+                    false,
+                    false,
+                    false,
+                    false,
+                    pane,
+                    true
+                ),
+                None
+            );
+            assert_eq!(
+                map(
+                    k,
+                    View::Signals,
+                    false,
+                    true,
+                    false,
+                    false,
+                    false,
+                    pane,
+                    true
+                ),
+                None
+            );
+        }
+        // Reset, quit, and redeploy confirmations: `n` answers, `p` is inert.
+        assert_eq!(
+            map(
+                n,
+                View::Signals,
+                false,
+                false,
+                true,
+                false,
+                false,
+                pane,
+                true
+            ),
+            Some(Msg::CancelResetController)
+        );
+        assert_eq!(
+            map(
+                n,
+                View::Signals,
+                false,
+                false,
+                false,
+                true,
+                false,
+                pane,
+                true
+            ),
+            Some(Msg::CancelQuit)
+        );
+        assert_eq!(
+            map(
+                n,
+                View::Signals,
+                false,
+                false,
+                false,
+                false,
+                true,
+                pane,
+                true
+            ),
+            Some(Msg::CancelDeploy)
+        );
+        for (reset, quit, redeploy) in [
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ] {
+            assert_eq!(
+                map(
+                    p,
+                    View::Signals,
+                    false,
+                    false,
+                    reset,
+                    quit,
+                    redeploy,
+                    pane,
+                    true
+                ),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn o_stays_list_local_while_n_and_p_do_not() {
+        assert_eq!(
+            map_focused(key(KeyCode::Char('o')), View::Signals, PaneId::SignalsList),
+            Some(Msg::Activate)
+        );
+        assert_eq!(
+            map_focused(
+                key(KeyCode::Char('o')),
+                View::Signals,
+                PaneId::SelectedSignal
+            ),
+            None
+        );
     }
 
     #[test]
