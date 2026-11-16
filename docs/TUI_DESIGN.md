@@ -331,6 +331,11 @@ contextual Help shortcut (§ [Overall navigation](#overall-navigation)), not a
 list key. There is no mode toggle and no broader Vim/Gmail vocabulary
 (`h`/`l`, `gg`, `G`, …).
 
+`n` and `p` are Signals letter keys too, but they are **not** list-local. They
+step to the next/previous report in the selected thread from *either* Signals
+pane (§ [Signal threads](#signal-threads)). Like the list aliases, they mean
+nothing on any other surface and stay ordinary text in the Controller source.
+
 ### Read-only panes and unsupported input
 
 A pane with no pane-local input today (Target's two panes, Operation's
@@ -345,7 +350,7 @@ that every pane has something to do.
 | View | Pane-local input | View-level input |
 | --- | --- | --- |
 | Help | Up/Down/PageUp/PageDown/Home/End scroll (its one pane) | — |
-| Signals | Up/Down/PageUp/PageDown/Home/End select, Enter activate, plus list-local `j`/`k` select and `o` activate (Signals list); Up/Down/PageUp/PageDown/Home/End scroll the body below its fixed header, Enter activate (Selected signal) | — |
+| Signals | Up/Down/PageUp/PageDown/Home/End select, Enter activate, plus list-local `j`/`k` select and `o` activate (Signals list); Up/Down/PageUp/PageDown/Home/End scroll the body below its fixed header, Enter activate (Selected signal) | `n`/`p` next/previous report in the selected thread (either Signals pane) |
 | Target | none | Enter (work opportunity), Esc (back) |
 | Controller | Full editor contract — see [The editor contract](#the-editor-contract) — including Up/Down/PageUp/PageDown/Home/End (Controller source); PageUp/PageDown are a fixed 10-line jump, not viewport-sized — see the [Console-wide navigation](#console-wide-navigation) exception; none (Lua field reference) | Ctrl+V validate, F6 deploy, F7 reset |
 | Operation | none (either pane); once a deployment has finished, Operation telemetry becomes the Review Run inspector with the full chronology/SOURCE contract — see [Review Run](#review-run) | Space (pause/resume), Enter (step) |
@@ -577,7 +582,7 @@ The mockups above are cut short at the bottom. At full height, the list shows ev
 
 All of this content is hand-written and hedged to what the console could plausibly know at its current connectivity. It never reveals hidden scenario state.
 
-The status line sits near the top so long content can never push it off-screen. Origin, the time and assessments line, and the status line form a fixed header. Only the sections below it (`SOURCE` onward) scroll, and only while the detail pane has focus (`F8`). There the console-wide `Up`/`Down`/`PageUp`/`PageDown`/`Home`/`End` scroll the body. `Enter` still inspects an actionable entry, exactly as from the list, because the detail pane presents the same selected entry. `j`/`k`/`o` stay list-only. Changing the selection resets the detail to its top. Like Help and the After Action report, the pane shows no overflow indicator. Every authored entry currently fits at 120×40, so these keys accept input but have nothing to move until longer intelligence arrives. The pinned `Enter  inspect opportunity` row appears only for an actionable entry. The status line, the list's `[OPEN]` marker, that pinned row, and whether `Enter`/`o` respond all come from the same availability rule, so they cannot disagree. A non-actionable entry states in words that it has no opportunity; it never shows a disabled or fake action.
+The status line sits near the top so long content can never push it off-screen. Origin, the time and assessments line, and the status line form a fixed header. Only the sections below it (`SOURCE` onward) scroll, and only while the detail pane has focus (`F8`). There the console-wide `Up`/`Down`/`PageUp`/`PageDown`/`Home`/`End` scroll the body. `Enter` still inspects an actionable entry, exactly as from the list, because the detail pane presents the same selected entry. `j`/`k`/`o` stay list-only; `n`/`p` work from both panes (§ [Signal threads](#signal-threads)). Changing the selection resets the detail to its top. Like Help and the After Action report, the pane shows no overflow indicator. Every authored entry currently fits at 120×40, so these keys accept input but have nothing to move until longer intelligence arrives. The pinned `Enter  inspect opportunity` row appears only for an actionable entry. The status line, the list's `[OPEN]` marker, that pinned row, and whether `Enter`/`o` respond all come from the same availability rule, so they cannot disagree. A non-actionable entry states in words that it has no opportunity; it never shows a disabled or fake action.
 
 For the first playable slice:
 
@@ -593,7 +598,7 @@ Selecting an actionable entry and pressing `Enter` (from either the list or the 
 
 If the player already has First Contact as the current working set, selecting it again must preserve the current controller source. Re-entering Target never reloads or replaces source by itself.
 
-The `> ` before a pane title in the mockups above (`> LOCAL LOG`, `> SIGNALS`) is the non-color focus cue (§ [Non-color focus cue](#non-color-focus-cue)). The same glyph marks the selected row inside the list. The two cues stay distinct by position: the focus cue sits in a pane's border title, and the selection cursor sits at the start of a list row. `F8` moves the focus cue to `> SELECTED ENTRY` / `> SELECTED SIGNAL` without moving the selected row. Like every view, the footer shows the F-key vocabulary rather than per-key list hints. Help (`F1`/`?`) lists the Signals list's `↑↓`, `j`/`k`, `Enter`/`o`, and paging keys, and notes that `Enter` also works from the focused detail pane.
+The `> ` before a pane title in the mockups above (`> LOCAL LOG`, `> SIGNALS`) is the non-color focus cue (§ [Non-color focus cue](#non-color-focus-cue)). The same glyph marks the selected row inside the list. The two cues stay distinct by position: the focus cue sits in a pane's border title, and the selection cursor sits at the start of a list row. `F8` moves the focus cue to `> SELECTED ENTRY` / `> SELECTED SIGNAL` without moving the selected row. Like every view, the footer shows the F-key vocabulary rather than per-key list hints. Help (`F1`/`?`) lists the Signals list's `↑↓`, `j`/`k`, `Enter`/`o`, and paging keys, the thread report keys `n`/`p`, and notes that `Enter` also works from the focused detail pane.
 
 ### Signal threads
 
@@ -603,7 +608,8 @@ Related reports are grouped into **threads**. Each list row is one thread, order
 - **Multi-report rows** keep the same four-row shape. The header and preview come from the newest report, and the subject row is the thread's authored subject (its first report's subject). The `•` shows while *any* visible report in the thread has not been inspected.
 - **Multi-report detail** opens with the thread subject and a headline stack, one row per report in receipt order: a cue, the time, the report's category, and its subject. The cue is `▸` for the expanded report, `•` for a collapsed report not yet inspected, or blank. Below a blank row, **exactly one report is expanded**, with the full detail described above. It starts with that report's own subject when it differs from the thread subject.
 - **Only the expanded report is presented**, so only it counts as inspected. Headlines tell the player that a report exists, not what it says, and showing them inspects nothing. Moving between threads never clears a report's inspected state.
-- **Which report expands:** selecting a thread expands its oldest report not yet inspected, or its newest if every report has been inspected. Once shown, that report stays expanded while the thread stays selected. `F8`, Help, overlays, and scrolling never switch it.
+- **Which report expands:** selecting a thread expands its oldest report not yet inspected, or its newest if every report has been inspected. Once shown, that report stays expanded while the thread stays selected, until `n`/`p` moves it. `F8`, Help, overlays, and scrolling never switch it.
+- **`n` / `p`** expand the next / previous report in the selected thread from *either* Signals pane, with no `F8` first. A successful move presents that report at once, moves focus to the detail pane, and starts its detail at the top. At the thread's first / last report, and in every single-report thread, `n`/`p` are inert: nothing moves and focus stays where it was. Stepping past a report never un-inspects it. Only the report that actually expands is inspected, so `n`/`p` can't mark a report the player never saw. `Enter` (either pane) and `o` (list only) act on the expanded report's opportunity alone; there is no thread-level action.
 - **Layout:** the headline stack takes at most a quarter of the detail pane. At 120×40 that is 8 headlines, leaving the expanded report most of the pane. Longer threads are windowed so the expanded report's headline is always visible. The stack never scrolls with the expanded report's body, and the report's fixed header, status line, and pinned action stay in place.
 
 Thread membership is authored. A report that joins an existing thread carries a `linked:` bullet in `SOURCE` naming the evidence the console holds for the relationship.
@@ -1249,7 +1255,7 @@ The durable fact this sequence dramatizes — operator-network connectivity — 
 
 ## 6. Help
 
-`F1` opens contextual help as an overlay or dedicated view. It preserves the underlying state and returns to that state when dismissed. `?` does the same wherever keyboard text entry is not active (§ [Overall navigation](#overall-navigation)); the current-view controls Help shows first list each view's applicable bindings, including the Signals list's `j`/`k`/`o` aliases.
+`F1` opens contextual help as an overlay or dedicated view. It preserves the underlying state and returns to that state when dismissed. `?` does the same wherever keyboard text entry is not active (§ [Overall navigation](#overall-navigation)); the current-view controls Help shows first list each view's applicable bindings, including the Signals list's `j`/`k`/`o` aliases and the Signals `n`/`p` report keys.
 
 Help has two levels:
 

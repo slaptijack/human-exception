@@ -4519,4 +4519,51 @@ mod tests {
         );
         assert!(state.controller_source().unwrap().contains("??"));
     }
+
+    /// A connected session on the authored three-report thread, which the
+    /// connected list selects first.
+    fn on_multi_report_thread() -> AppState {
+        let mut state = AppState::new();
+        state.set_connected(true);
+        assert_eq!(
+            intel::visible_threads(true)[0].visible_reports(true).len(),
+            3,
+            "the first connected thread is the three-report fixture"
+        );
+        state
+    }
+
+    #[test]
+    fn n_steps_reports_and_focuses_the_detail_end_to_end() {
+        // Issue #236: from the list, `n` moves to the next report and the
+        // detail pane takes focus; a held `n` keeps stepping like a held
+        // `j` (the repeat alone reaches the newest report).
+        let reports = intel::visible_threads(true)[0].visible_reports(true);
+        let (state, terminal) = render_from(
+            on_multi_report_thread(),
+            ui::MIN_COLUMNS,
+            ui::MIN_ROWS,
+            &[press(KeyCode::Char('n')), repeat(KeyCode::Char('n'))],
+        );
+        assert_eq!(state.expanded_report().map(|s| s.id), Some(reports[2].id));
+        assert_eq!(state.focused_pane(View::Signals), PaneId::SelectedSignal);
+        assert_eq!(state.selected_thread(), 0);
+        assert!(buffer_contains(&terminal, "> SELECTED SIGNAL"));
+    }
+
+    #[test]
+    fn n_and_p_are_inert_below_the_minimum_geometry() {
+        let reports = intel::visible_threads(true)[0].visible_reports(true);
+        let (state, _) = render_from(
+            on_multi_report_thread(),
+            ui::MIN_COLUMNS - 1,
+            ui::MIN_ROWS,
+            &[press(KeyCode::Char('n')), press(KeyCode::Char('p'))],
+        );
+        assert_eq!(state.expanded_report().map(|s| s.id), Some(reports[0].id));
+        assert_eq!(state.focused_pane(View::Signals), PaneId::SignalsList);
+        // Nothing past the first report was presented on the warning screen.
+        assert!(!state.signal_inspected(reports[1].id));
+        assert!(!state.signal_inspected(reports[2].id));
+    }
 }

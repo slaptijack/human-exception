@@ -475,6 +475,13 @@ pub enum Msg {
     /// `SelectReviewPointPageBackward`/`PageForward` already use.
     SelectSignalPageBackward(usize),
     SelectSignalPageForward(usize),
+    /// `n`/`p` from either Signals pane (issue #236): expands and presents
+    /// the next/previous report in the selected thread and focuses the
+    /// detail pane. Inert — no focus, pin, scroll, or inspection change —
+    /// at the thread's first/last report, in a single-report thread, or
+    /// outside Signals.
+    NextReport,
+    PreviousReport,
     /// Context-sensitive "Enter": inspects the selected signal in Signals,
     /// or commits to working the current dossier's opportunity in Target.
     Activate,
@@ -605,8 +612,9 @@ pub struct AppState {
     /// is indistinguishable from a flat Signals entry (issue #235).
     selected_thread: usize,
     /// The report pinned as expanded in the selected thread, once it has
-    /// been presented. Set by [`AppState::commit_presented_signal`] and
-    /// cleared only when the selected thread actually changes, so F8, Help,
+    /// been presented. Set by [`AppState::commit_presented_signal`], moved
+    /// by a successful `n`/`p` ([`AppState::step_report`]), and cleared
+    /// only when the selected thread actually changes, so F8, Help,
     /// overlays and scrolling never re-pick it. `None`, or a pin that is not
     /// a visible member of the selected thread (after the connect reveal),
     /// falls back to the selection rule in [`AppState::expanded_report`].
@@ -1187,6 +1195,40 @@ impl AppState {
         }
     }
 
+    /// Moves the expansion to the adjacent report in the selected thread
+    /// (`n`/`p`, issue #236) and focuses the detail pane. Inert outside
+    /// Signals, at either end of the thread, and in a single-report thread,
+    /// so an inert press never transfers focus. Never touches the
+    /// inspected set: `apply` has already committed the report shown
+    /// before the move, and the newly expanded one is only committed once
+    /// it has actually been presented.
+    fn step_report(&mut self, forward: bool) {
+        if self.current_view != View::Signals {
+            return;
+        }
+        let Some(thread) = self.selected_thread_ref() else {
+            return;
+        };
+        let reports = thread.visible_reports(self.presentation_connected());
+        let Some(current) = self
+            .expanded_report()
+            .and_then(|expanded| reports.iter().position(|s| s.id == expanded.id))
+        else {
+            return;
+        };
+        let target = if forward {
+            current.checked_add(1).filter(|&i| i < reports.len())
+        } else {
+            current.checked_sub(1)
+        };
+        let Some(target) = target else {
+            return;
+        };
+        self.expanded_report = Some(reports[target].id);
+        self.reset_signal_detail_scroll();
+        self.set_focused_pane(View::Signals, PaneId::SelectedSignal);
+    }
+
     /// Records the currently presented entry, if any, as inspected. Called
     /// first by every mutation entry point that runs after a draw
     /// ([`AppState::apply`], [`AppState::advance_network_bootstrap`],
@@ -1396,6 +1438,8 @@ impl AppState {
                 let last = visible_threads(self.connected).len().saturating_sub(1);
                 self.select_thread((self.selected_thread + page.max(1)).min(last));
             }
+            Msg::NextReport => self.step_report(true),
+            Msg::PreviousReport => self.step_report(false),
             Msg::Activate => self.activate(),
             Msg::FocusNextPane => self.focus_next_pane(),
             Msg::ScrollUp => {
@@ -1968,6 +2012,192 @@ mod tests {
         assert!(state.signal_inspected(oldest), "shown before Help opened");
         assert!(!state.signal_inspected(middle));
         assert!(!state.signal_inspected(newest));
+    }
+
+    /// Selects the thread at `index`, starting from the first one.
+    fn select_thread_index(state: &mut AppState, index: usize) {
+        for _ in 0..index {
+            state.apply(Msg::SelectNextSignal);
+        }
+        assert_eq!(state.selected_thread(), index);
+    }
+
+    #[test]
+    fn n_and_p_step_reports_and_focus_the_detail_from_either_pane() {
+        // Issue #236: no F8 prerequisite; a successful step always lands
+        // focus on the detail pane and presents the new report.
+        for start_in_detail in [false, true] {
+            let (mut state, [oldest, middle, newest]) = connected_multi_report_thread();
+            if start_in_detail {
+                state.apply(Msg::FocusNextPane);
+            }
+            for (msg, expected) in [
+                (Msg::NextReport, middle),
+                (Msg::NextReport, newest),
+                (Msg::PreviousReport, middle),
+                (Msg::PreviousReport, oldest),
+            ] {
+                state.apply(msg.clone());
+                assert_eq!(expanded_id(&state), expected, "{msg:?}");
+                assert_eq!(
+                    state.presented_signal().map(|s| s.id),
+                    Some(expected),
+                    "{msg:?}"
+                );
+                assert_eq!(
+                    state.focused_pane(View::Signals),
+                    PaneId::SelectedSignal,
+                    "{msg:?}"
+                );
+                assert_eq!(state.selected_thread(), 0, "n/p never change thread");
+            }
+            // Stepping back never un-inspected anything.
+            for id in [oldest, middle, newest] {
+                assert!(state.signal_inspected(id), "{id:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn n_and_p_are_inert_at_thread_boundaries_and_keep_list_focus() {
+        let (mut state, [oldest, _, newest]) = connected_multi_report_thread();
+        state.apply(Msg::PreviousReport);
+        assert_eq!(expanded_id(&state), oldest);
+        assert_eq!(state.focused_pane(View::Signals), PaneId::SignalsList);
+
+        state.apply(Msg::NextReport);
+        state.apply(Msg::NextReport);
+        assert_eq!(expanded_id(&state), newest);
+        // Back to the list, then push past the end: nothing moves.
+        state.apply(Msg::FocusNextPane);
+        assert_eq!(state.focused_pane(View::Signals), PaneId::SignalsList);
+        state.apply(Msg::NextReport);
+        assert_eq!(expanded_id(&state), newest);
+        assert_eq!(state.focused_pane(View::Signals), PaneId::SignalsList);
+    }
+
+    #[test]
+    fn n_and_p_are_inert_in_every_single_report_thread() {
+        for connected in [false, true] {
+            let threads = visible_threads(connected);
+            for (index, thread) in threads.iter().enumerate() {
+                if thread.visible_reports(connected).len() != 1 {
+                    continue;
+                }
+                let mut state = AppState::new();
+                state.set_connected(connected);
+                select_thread_index(&mut state, index);
+                let only = expanded_id(&state);
+                for msg in [Msg::NextReport, Msg::PreviousReport] {
+                    state.apply(msg.clone());
+                    assert_eq!(expanded_id(&state), only, "{:?} {msg:?}", thread.id);
+                    assert_eq!(
+                        state.focused_pane(View::Signals),
+                        PaneId::SignalsList,
+                        "{:?} {msg:?} must not move focus",
+                        thread.id
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_report_step_resets_the_detail_scroll_but_an_inert_one_does_not() {
+        let (mut state, _) = connected_multi_report_thread();
+        state.apply(Msg::FocusNextPane);
+        state.apply(Msg::ScrollDown);
+        state.apply(Msg::PreviousReport); // inert: already the oldest
+        assert_eq!(state.scroll_offset(PaneId::SelectedSignal), 1);
+        state.apply(Msg::NextReport);
+        assert_eq!(state.scroll_offset(PaneId::SelectedSignal), 0);
+    }
+
+    #[test]
+    fn n_and_p_inspect_only_presented_reports() {
+        let (mut state, [oldest, middle, newest]) = connected_multi_report_thread();
+        let thread = visible_threads(true)[0];
+        state.apply(Msg::NextReport);
+        // Help covers the middle report before any further input:
+        // presenting it counted, but the newest was never shown.
+        state.apply(Msg::OpenHelp);
+        state.apply(Msg::NextReport); // inert under Help
+        state.apply(Msg::DismissHelp);
+        assert_eq!(expanded_id(&state), middle, "Help never re-picks");
+        assert!(state.signal_inspected(oldest));
+        assert!(state.signal_inspected(middle));
+        assert!(!state.signal_inspected(newest));
+        assert!(
+            !state.thread_inspected(thread),
+            "• stays until all are seen"
+        );
+
+        for msg in [Msg::FocusNextPane, Msg::FocusNextPane] {
+            state.apply(msg);
+            assert_eq!(expanded_id(&state), middle, "F8 never re-picks");
+        }
+        state.apply(Msg::NextReport);
+        assert!(state.thread_inspected(thread));
+    }
+
+    #[test]
+    fn report_steps_are_inert_outside_signals() {
+        let (mut state, [oldest, ..]) = connected_multi_report_thread();
+        state.apply(Msg::OpenHelp);
+        state.apply(Msg::NextReport);
+        state.apply(Msg::DismissHelp);
+        assert_eq!(expanded_id(&state), oldest);
+        assert_eq!(state.focused_pane(View::Signals), PaneId::SignalsList);
+    }
+
+    #[test]
+    fn moving_between_threads_keeps_report_inspection_history() {
+        let (mut state, [oldest, middle, newest]) = connected_multi_report_thread();
+        state.apply(Msg::NextReport);
+        state.apply(Msg::SelectNextSignal);
+        state.apply(Msg::SelectPreviousSignal);
+        // Back on the thread: its oldest uninspected report expands.
+        assert_eq!(expanded_id(&state), newest);
+        assert!(state.signal_inspected(oldest));
+        assert!(state.signal_inspected(middle));
+    }
+
+    #[test]
+    fn activation_follows_only_the_expanded_report() {
+        // The authored multi-report thread carries no opportunity, so
+        // activation stays inert on every report from either pane.
+        let (mut state, _) = connected_multi_report_thread();
+        for msg in [
+            Msg::Activate,
+            Msg::NextReport,
+            Msg::Activate,
+            Msg::FocusNextPane,
+            Msg::Activate,
+            Msg::NextReport,
+            Msg::Activate,
+        ] {
+            state.apply(msg.clone());
+            assert_eq!(state.current_view(), View::Signals, "{msg:?}");
+        }
+
+        // The actionable single-report thread (First Contact, offered only
+        // in LOCAL LOG) still opens Target from either pane, after inert
+        // `n`/`p` presses.
+        let index = local_entries()
+            .iter()
+            .position(|signal| signal.is_actionable())
+            .expect("First Contact is offered in LOCAL LOG");
+        for from_detail in [false, true] {
+            let mut state = AppState::new();
+            select_thread_index(&mut state, index);
+            if from_detail {
+                state.apply(Msg::FocusNextPane);
+            }
+            state.apply(Msg::NextReport);
+            state.apply(Msg::PreviousReport);
+            state.apply(Msg::Activate);
+            assert_eq!(state.current_view(), View::Target, "detail: {from_detail}");
+        }
     }
 
     #[test]

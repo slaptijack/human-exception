@@ -2906,6 +2906,7 @@ fn view_specific_help(state: &AppState, view: View) -> Vec<Line<'static>> {
             Line::from("Home/End     jump to the first/last signal"),
             Line::from("Enter        open Target (only signals marked [OPEN] respond)"),
             Line::from("o            same as Enter (list only)"),
+            Line::from("n/p          next/previous report in the thread (either pane; focuses it)"),
             Line::from("Its detail shows alongside; F8 moves focus there,"),
             Line::from("where Up/Down/PageUp/PageDown/Home/End scroll it"),
             Line::from("and Enter still opens Target for an [OPEN] signal"),
@@ -4114,6 +4115,34 @@ mod tests {
     }
 
     #[test]
+    fn n_moves_the_expanded_headline_and_focuses_the_detail_pane() {
+        use super::super::state::Msg;
+
+        let mut state = AppState::new();
+        state.set_connected(true);
+        let reports = visible_threads(true)[0].visible_reports(true);
+        assert!(buffer_contains(
+            &render(MIN_COLUMNS, MIN_ROWS, &state),
+            "> SIGNALS"
+        ));
+
+        state.apply(Msg::NextReport);
+        let terminal = render(MIN_COLUMNS, MIN_ROWS, &state);
+        let text = frame_text(&terminal);
+        assert!(text.contains("> SELECTED SIGNAL"), "focus moved to detail");
+        assert!(!text.contains("> SIGNALS"));
+        // The oldest was seen, so it loses its cue; the middle expands; the
+        // newest is still uninspected.
+        assert!(text.contains(&format!("  {}", reports[0].time)));
+        assert!(text.contains(&format!("\u{25B8} {}", reports[1].time)));
+        assert!(text.contains(&format!("\u{2022} {}", reports[2].time)));
+        assert_eq!(text.matches("SOURCE").count(), 1);
+        assert!(text.contains(&signal_origin(reports[1])));
+        assert!(!text.contains(&signal_origin(reports[0])));
+        assert!(!text.contains(&signal_origin(reports[2])));
+    }
+
+    #[test]
     fn long_signal_detail_scrolls_its_body_but_keeps_status_and_action_fixed() {
         let (width, height) = signal_detail_inner_dimensions(MIN_COLUMNS, MIN_ROWS);
         let max = signal_detail_max_scroll_for(&SignalDetail::single(&LONG_SIGNAL), width, height);
@@ -4387,6 +4416,10 @@ mod tests {
         assert!(buffer_contains(&terminal, "o            same as Enter"));
         assert!(buffer_contains(
             &terminal,
+            "n/p          next/previous report in the thread (either pane; focuses it)"
+        ));
+        assert!(buffer_contains(
+            &terminal,
             "F1/? Help        toggle this overlay (? types normally in Controller source)"
         ));
     }
@@ -4450,7 +4483,7 @@ mod tests {
 
         let mut state = AppState::new();
         state.apply(Msg::OpenHelp);
-        let terminal = render(120, 62, &state);
+        let terminal = render(120, 63, &state);
 
         assert!(buffer_contains(
             &terminal,
@@ -4470,7 +4503,7 @@ mod tests {
 
         let mut state = AppState::new();
         state.apply(Msg::OpenHelp);
-        let terminal = render(120, 74, &state);
+        let terminal = render(120, 75, &state);
 
         assert!(buffer_contains(&terminal, "scan does not move the drone"));
         assert!(buffer_contains(&terminal, "regardless of walls in the way"));
@@ -4628,10 +4661,10 @@ mod tests {
         // global controls, Lua contract, terminology, symbol legend) fits
         // without needing to scroll. (86 since the `•` inspected-marker
         // glossary line, issue #216; 87 since the detail-pane Enter line,
-        // issue #224.)
+        // issue #224; 88 since the `n/p` line, issue #236.)
         let mut state = AppState::new();
         state.apply(Msg::OpenHelp);
-        let terminal = render(120, 87, &state);
+        let terminal = render(120, 88, &state);
 
         assert!(buffer_contains(&terminal, "Terminology"));
         assert!(buffer_contains(&terminal, "MACHINE INTERCEPT"));
